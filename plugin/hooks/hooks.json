@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "SessionStart": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }],
+    "UserPromptSubmit": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }],
+    "PostToolUse": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }],
+    "Stop": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }],
+    "SessionEnd": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }]
+  }
+}

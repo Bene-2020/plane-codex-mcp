@@ -1,0 +1,15 @@
+{
+  "name": "@ambient/service",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx src/index.ts", "start": "node dist/index.js" },
+  "dependencies": {
+    "@ambient/core": "workspace:*",
+    "@ambient/plane": "workspace:*",
+    "@ambient/storage": "workspace:*",
+    "@fastify/cors": "^10.0.2",
+    "fastify": "^5.3.3"
+  }
+}

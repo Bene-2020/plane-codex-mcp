@@ -1,0 +1,12 @@
+{
+  "name": "@ambient/plane",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": { "build": "tsc -p tsconfig.json" },
+  "dependencies": {
+    "@ambient/core": "workspace:*",
+    "@ambient/storage": "workspace:*"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "ambient-project-layer-demo",
+  "private": true,
+  "packageManager": "pnpm@10.9.2",
+  "scripts": {
+    "build": "pnpm run build:packages && pnpm run build:apps",
+    "build:packages": "pnpm --filter @ambient/core build && pnpm --filter @ambient/storage build && pnpm --filter @ambient/plane build",
+    "build:apps": "pnpm --filter @ambient/mcp build && pnpm --filter @ambient/service build && pnpm --filter @ambient/hook-adapter build && pnpm --filter @ambient/panel build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc -p tsconfig.json --noEmit && tsc -p apps/panel/tsconfig.json --noEmit",
+    "dev:service": "pnpm --filter @ambient/service dev",
+    "dev:panel": "pnpm --filter @ambient/panel dev",
+    "dev:mcp": "pnpm --filter @ambient/mcp dev",
+    "eval": "tsx evals/evaluate.ts"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.15.30",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.4.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.4"
+  }
+}

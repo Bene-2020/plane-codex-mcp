@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "types": ["node"]
+  },
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/storage" },
+    { "path": "packages/plane" },
+    { "path": "apps/mcp" },
+    { "path": "apps/service" },
+    { "path": "apps/hook-adapter" }
+  ]
+}
