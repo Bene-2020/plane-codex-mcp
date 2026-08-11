@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -39,9 +39,23 @@ function runtimeFileFilter(packageRoot, source) {
   const pathParts = relativeSource.split(sep);
   const fileName = pathParts.at(-1);
   if (pathParts.includes("node_modules") || ["test", "tests", "__tests__"].some((part) => pathParts.includes(part))) return false;
-  if (fileName === "tsconfig.json") return false;
+  if (fileName === "tsconfig.json" || fileName === "bench.js" || fileName === "eslint.config.mjs") return false;
   if (statSync(source).isDirectory()) return true;
   return [".cjs", ".js", ".json", ".mjs", ".node"].includes(source.endsWith(".node") ? ".node" : source.slice(source.lastIndexOf(".")));
+}
+
+async function normalizeRuntimeText(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const source = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await normalizeRuntimeText(source);
+      continue;
+    }
+    if (!entry.isFile() || ![".cjs", ".js", ".json", ".mjs"].includes(source.slice(source.lastIndexOf(".")))) continue;
+    const original = await readFile(source, "utf8");
+    const normalized = original.replace(/\r\n/g, "\n").replace(/[ \t]+$/gm, "").replace(/\n+$/g, "\n");
+    if (normalized !== original) await writeFile(source, normalized);
+  }
 }
 
 await mkdir(join(runtimeNodeModules, "better-sqlite3", "lib"), { recursive: true });
@@ -97,6 +111,7 @@ async function copyRuntimePackage(packageName, requesterRequire) {
 }
 
 await copyRuntimePackage("@makeplane/plane-node-sdk", planeRequire);
+await normalizeRuntimeText(runtimeRoot);
 
 const manifest = JSON.parse(await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
 const mcpBundleSize = (await stat(join(runtimeRoot, "mcp/index.js"))).size.toLocaleString();
