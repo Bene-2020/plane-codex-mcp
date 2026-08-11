@@ -1,8 +1,8 @@
 {
-  "mcp_servers": {
+  "mcpServers": {
     "ambient-project": {
       "command": "node",
-      "args": ["${PLUGIN_ROOT}/../apps/mcp/dist/index.js"],
+      "args": ["${PLUGIN_ROOT}/runtime/mcp/index.js"],
       "env": {
         "AMBIENT_DB_PATH": "${AMBIENT_DB_PATH}",
         "PLANE_MODE": "${PLANE_MODE}",

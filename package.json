@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "build": "pnpm run build:packages && pnpm run build:apps",
+    "build": "pnpm run build:packages && pnpm run build:apps && pnpm run package:plugin",
     "build:packages": "pnpm --filter @ambient/core build && pnpm --filter @ambient/storage build && pnpm --filter @ambient/plane build",
     "build:apps": "pnpm --filter @ambient/mcp build && pnpm --filter @ambient/service build && pnpm --filter @ambient/hook-adapter build && pnpm --filter @ambient/panel build",
     "test": "vitest run",
@@ -12,6 +12,8 @@
     "dev:service": "pnpm --filter @ambient/service dev",
     "dev:panel": "pnpm --filter @ambient/panel dev",
     "dev:mcp": "pnpm --filter @ambient/mcp dev",
+    "package:plugin": "node scripts/package-plugin.mjs",
+    "smoke:plugin": "node scripts/smoke-plugin.mjs",
     "eval": "tsx evals/evaluate.ts"
   },
   "devDependencies": {
@@ -20,6 +22,7 @@
     "@types/react": "^19.1.6",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.4.1",
+    "esbuild": "0.25.12",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vite": "^6.3.5",

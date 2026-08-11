@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
+            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
+            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
+            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
+            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
+            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }

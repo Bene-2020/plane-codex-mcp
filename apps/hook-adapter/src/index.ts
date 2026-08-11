@@ -1,5 +1,8 @@
 import { buildAdditionalContext, canonicalizeCwd } from "@ambient/core";
 import { Storage } from "@ambient/storage";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 interface HookInput {
   session_id?: string;
@@ -79,4 +82,5 @@ async function main(): Promise<void> {
   output(await handleHook(raw));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main().catch(() => output({}));
+const entrypoint = process.argv[1];
+if (entrypoint && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(entrypoint))) main().catch(() => output({}));

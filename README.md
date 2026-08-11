@@ -25,7 +25,7 @@ pnpm dev:panel
 
 ## Codex 插件
 
-`plugin/` 包含 `.codex-plugin/plugin.json`、`.mcp.json`、五种 Hook 配置和 `ambient-project` Skill。构建后 MCP 与 Hook 的产物分别位于 `apps/mcp/dist/index.js` 和 `apps/hook-adapter/dist/index.js`；插件配置使用 `${PLUGIN_ROOT}/../apps/...` 路径。
+`plugin/` 包含 `.codex-plugin/plugin.json`、`.mcp.json`、五种 Hook 配置和 `ambient-project` Skill。`pnpm build` 会自动刷新 `plugin/runtime/`：`runtime/mcp/index.js` 和 `runtime/hook-adapter/index.js` 是 Node 22 bundle，`runtime/node_modules/` 只包含 `better-sqlite3` 的 JS/native runtime closure 和 Plane SDK 的生产运行时依赖。插件配置只使用 `${PLUGIN_ROOT}` 内路径，Hook 的命令路径带引号以支持含空格的插件安装目录。
 
 MCP 只暴露五个高层工具：`list_projects`、`get_binding`、`bind_project`、`change_binding`、`record_project_events`。没有自动删除、跨项目移动或分配人员的工具。`ui://ambient-project/summary/v1.html` 是独立的只读 MCP UI 宿主验收资源，主界面仍是本地伴随面板。
 
@@ -42,6 +42,12 @@ Hook 可用 fixture 直接试跑：
 
 ```bash
 node apps/hook-adapter/dist/index.js < fixtures/hooks/user-prompt-submit.json
+```
+
+隔离验证只复制 `plugin/`（含空格的临时路径），并检查 MCP STDIO `initialize`/`tools/list` 与五种 Hook fixture：
+
+```bash
+pnpm smoke:plugin
 ```
 
 评估文件 `evals/turns.jsonl` 是真实会话标注模板。将每个自然回合的 `actualBatchId` 和 `shouldCapture` 补齐后运行 `pnpm eval evals/turns.jsonl`，脚本输出捕获率、误记录率和重复记录数。
