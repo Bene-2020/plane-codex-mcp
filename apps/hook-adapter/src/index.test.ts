@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { handleHook } from "./index.js";
 import { Storage } from "@ambient/storage";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 describe("hook adapter", () => {
   it("uses hookSpecificOutput.additionalContext for session context", async () => {
@@ -36,5 +38,13 @@ describe("hook adapter", () => {
 
   it("returns an empty fail-open response for malformed JSON", async () => {
     expect(await handleHook("not json")).toEqual({});
+  });
+
+  it("keeps plugin hooks silent", async () => {
+    const hooksPath = fileURLToPath(new URL("../../../plugin/hooks/hooks.json", import.meta.url));
+    const hooks = JSON.parse(await readFile(hooksPath, "utf8")) as { hooks: Record<string, Array<{ hooks: Array<Record<string, unknown>> }>> };
+    const handlers = Object.values(hooks.hooks).flatMap((groups) => groups.flatMap((group) => group.hooks));
+    expect(handlers).toHaveLength(5);
+    expect(handlers.every((handler) => !Object.hasOwn(handler, "statusMessage"))).toBe(true);
   });
 });

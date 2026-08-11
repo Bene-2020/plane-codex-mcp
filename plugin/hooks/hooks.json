@@ -7,8 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
-            "statusMessage": "Loading ambient project context"
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
           }
         ]
       }
@@ -18,8 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
-            "statusMessage": "Loading ambient project context"
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
           }
         ]
       }
@@ -30,8 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
-            "statusMessage": "Auditing project event capture"
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
           }
         ]
       }
@@ -41,8 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
-            "statusMessage": "Closing ambient project turn"
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
           }
         ]
       }
@@ -53,8 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
-            "statusMessage": "Closing ambient project session"
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"
           }
         ]
       }
