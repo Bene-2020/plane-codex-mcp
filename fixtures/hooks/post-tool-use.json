@@ -1,1 +1,1 @@
-{"hook_event_name":"PostToolUse","cwd":"/Users/bene/Projects/see-my-work","session_id":"session_fixture_1","turn_id":"turn_fixture_1","tool_name":"record_project_events","tool_output":{"status":"accepted","batchId":"batch_1"}}
+{"hook_event_name":"PostToolUse","cwd":"/Users/bene/Projects/see-my-work","session_id":"session_fixture_1","turn_id":"turn_fixture_1","tool_name":"mcp__ambient-project__record_project_events","tool_response":{"status":"accepted","batchId":"batch_1"}}

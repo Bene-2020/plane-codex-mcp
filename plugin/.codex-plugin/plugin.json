@@ -1,8 +1,12 @@
 {
   "name": "ambient-project-layer",
-  "display_name": "Ambient Project Layer",
   "version": "0.1.0",
   "description": "Quietly captures meaningful project events from Codex work and syncs them to Plane.",
-  "skills": ["skills/ambient-project"],
-  "mcp_servers": ["ambient-project"]
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Ambient Project Layer",
+    "shortDescription": "Quiet project capture and Plane synchronization"
+  }
 }

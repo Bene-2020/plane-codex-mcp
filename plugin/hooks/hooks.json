@@ -1,9 +1,63 @@
 {
+  "description": "Ambient project lifecycle hooks for Codex sessions and tool calls.",
   "hooks": {
-    "SessionStart": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }],
-    "UserPromptSubmit": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }],
-    "PostToolUse": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }],
-    "Stop": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }],
-    "SessionEnd": [{ "command": "node", "args": ["${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js"] }]
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
+            "statusMessage": "Loading ambient project context"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
+            "statusMessage": "Loading ambient project context"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__ambient-project__record_project_events$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
+            "statusMessage": "Auditing project event capture"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
+            "statusMessage": "Closing ambient project turn"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "^other$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/../apps/hook-adapter/dist/index.js",
+            "statusMessage": "Closing ambient project session"
+          }
+        ]
+      }
+    ]
   }
 }
