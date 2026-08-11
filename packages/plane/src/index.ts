@@ -1,8 +1,9 @@
 import {
-  BatchRecord, EventType, LifecycleState, PlaneActivity, PlaneItem, PlaneProject, PlaneStatus, ProjectContext,
+  BatchRecord, LifecycleState, PlaneActivity, PlaneItem, PlaneProject, ProjectContext,
   RecordKind, SourceEvent, eventId, lifecycleForEvent, normalizeTitle, recordKindForEvent, sourceFooter,
 } from "@ambient/core";
 import { Storage } from "@ambient/storage";
+import { PlaneClient, State as PlaneSdkState, WorkItem as PlaneSdkWorkItem } from "@makeplane/plane-node-sdk";
 
 export interface CreateItemInput { title: string; description: string; kind: RecordKind; status: LifecycleState; dueDate?: string | null; parentId?: string; sourceEventId: string; }
 export interface UpdateItemInput { title?: string; description?: string; kind?: RecordKind; status?: LifecycleState; dueDate?: string | null; }
@@ -19,56 +20,101 @@ export interface PlaneAdapter {
 
 function itemUrl(baseUrl: string, workspace: string, project: string, itemId: string): string { return `${baseUrl.replace(/\/$/, "")}/workspaces/${encodeURIComponent(workspace)}/projects/${encodeURIComponent(project)}/work-items/${encodeURIComponent(itemId)}`; }
 
-export class PlaneHttpAdapter implements PlaneAdapter {
+export class PlaneSdkAdapter implements PlaneAdapter {
+  private readonly client: PlaneClient;
   private readonly stateIds = new Map<string, string>();
-  constructor(private readonly baseUrl: string, private readonly apiKey: string, private readonly defaultWorkspace?: string) {}
-  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
-    const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/api/v1${path}`, { ...options, headers: { "Content-Type": "application/json", "X-API-Key": this.apiKey, ...(options.headers ?? {}) } });
-    if (!response.ok) throw new Error(`Plane API ${response.status}: ${await response.text()}`);
-    if (response.status === 204) return undefined as T;
-    return await response.json() as T;
+  private readonly stateNames = new Map<string, string>();
+
+  constructor(private readonly baseUrl: string, apiKey: string, private readonly defaultWorkspace: string) {
+    this.client = new PlaneClient({ baseUrl, apiKey });
   }
+
   async listProjects(): Promise<PlaneProject[]> {
-    const workspace = this.defaultWorkspace;
-    const payload = await this.request<{ results?: Array<Record<string, unknown>> }>(workspace ? `/workspaces/${encodeURIComponent(workspace)}/projects/` : "/projects/");
-    return (payload.results ?? []).map((p) => ({ id: String(p.id), name: String(p.name), identifier: p.identifier ? String(p.identifier) : undefined, workspaceSlug: workspace }));
+    const payload = await this.client.projects.list(this.defaultWorkspace, { limit: 100 });
+    return payload.results.map((project) => ({ id: project.id, name: project.name, identifier: project.identifier, workspaceSlug: this.defaultWorkspace }));
   }
+
   async listItems(context: ProjectContext): Promise<PlaneItem[]> {
-    const payload = await this.request<{ results?: Array<Record<string, unknown>> }>(`/workspaces/${encodeURIComponent(context.workspaceSlug)}/projects/${encodeURIComponent(context.planeProjectId)}/work-items/`);
-    return (payload.results ?? []).map((item) => this.fromApi(context, item));
+    await this.loadStates(context);
+    const payload = await this.client.workItems.list(context.workspaceSlug, context.planeProjectId, { limit: 100 });
+    return payload.results.map((item) => this.fromSdk(context, item));
   }
+
   async createItem(context: ProjectContext, input: CreateItemInput): Promise<PlaneItem> {
     const stateId = await this.resolveStateId(context, input.status);
-    const payload = await this.request<Record<string, unknown>>(`/workspaces/${encodeURIComponent(context.workspaceSlug)}/projects/${encodeURIComponent(context.planeProjectId)}/work-items/`, { method: "POST", body: JSON.stringify({ name: input.title, description_html: input.description, state: stateId, due_date: input.dueDate ?? undefined, parent: input.parentId }) });
-    return { ...this.fromApi(context, payload), isSystemCreated: true, url: itemUrl(this.baseUrl, context.workspaceSlug, context.planeProjectId, String(payload.id)) };
+    const payload = await this.client.workItems.create(context.workspaceSlug, context.planeProjectId, {
+      name: input.title,
+      description_html: input.description,
+      state: stateId,
+      target_date: input.dueDate ?? undefined,
+      parent: input.parentId,
+    });
+    return {
+      ...this.fromSdk(context, payload),
+      isSystemCreated: true,
+      url: itemUrl(this.baseUrl, context.workspaceSlug, context.planeProjectId, payload.id),
+      kind: input.kind,
+    };
   }
+
   async updateItem(context: ProjectContext, itemId: string, input: UpdateItemInput): Promise<PlaneItem> {
     const stateId = input.status ? await this.resolveStateId(context, input.status) : undefined;
-    const payload = await this.request<Record<string, unknown>>(`/workspaces/${encodeURIComponent(context.workspaceSlug)}/projects/${encodeURIComponent(context.planeProjectId)}/work-items/${encodeURIComponent(itemId)}/`, { method: "PATCH", body: JSON.stringify({ name: input.title, description_html: input.description, state: stateId, due_date: input.dueDate }) });
-    return this.fromApi(context, payload);
+    const payload = await this.client.workItems.update(context.workspaceSlug, context.planeProjectId, itemId, {
+      name: input.title,
+      description_html: input.description,
+      state: stateId,
+      target_date: input.dueDate ?? undefined,
+    });
+    return this.fromSdk(context, payload);
   }
+
   async addActivity(context: ProjectContext, itemId: string, body: string, sourceEventId: string): Promise<PlaneActivity> {
-    const payload = await this.request<Record<string, unknown>>(`/workspaces/${encodeURIComponent(context.workspaceSlug)}/projects/${encodeURIComponent(context.planeProjectId)}/work-items/${encodeURIComponent(itemId)}/comments/`, { method: "POST", body: JSON.stringify({ comment_html: `${body}\n\n[ambient:${sourceEventId}]` }) });
-    return { id: String(payload.id ?? sourceEventId), itemId, body, createdAt: String(payload.created_at ?? new Date().toISOString()), sourceEventId };
+    const payload = await this.client.workItems.comments.create(context.workspaceSlug, context.planeProjectId, itemId, { comment_html: `${body}\n\n[ambient:${sourceEventId}]` });
+    return { id: payload.id, itemId, body, createdAt: String(payload.created_at ?? new Date().toISOString()), sourceEventId };
   }
-  async deleteItem(context: ProjectContext, itemId: string): Promise<void> { await this.request(`/workspaces/${encodeURIComponent(context.workspaceSlug)}/projects/${encodeURIComponent(context.planeProjectId)}/work-items/${encodeURIComponent(itemId)}/`, { method: "DELETE" }); }
-  async archiveItem(context: ProjectContext, itemId: string): Promise<void> { await this.updateItem(context, itemId, { status: "dropped" }); }
+
+  async deleteItem(context: ProjectContext, itemId: string): Promise<void> { await this.client.workItems.delete(context.workspaceSlug, context.planeProjectId, itemId); }
+
+  async archiveItem(context: ProjectContext, itemId: string): Promise<void> { await this.client.workItems.archive(context.workspaceSlug, context.planeProjectId, itemId); }
+
+  private async loadStates(context: ProjectContext): Promise<PlaneSdkState[]> {
+    const payload = await this.client.states.list(context.workspaceSlug, context.planeProjectId, { limit: 100 });
+    for (const state of payload.results) this.stateNames.set(this.stateKey(context, state.id), state.name);
+    return payload.results;
+  }
+
   private async resolveStateId(context: ProjectContext, lifecycle: LifecycleState): Promise<string> {
     const key = `${context.workspaceSlug}/${context.planeProjectId}/${lifecycle}`;
     const cached = this.stateIds.get(key);
     if (cached) return cached;
-    const payload = await this.request<{ results?: Array<Record<string, unknown>> }>(`/workspaces/${encodeURIComponent(context.workspaceSlug)}/projects/${encodeURIComponent(context.planeProjectId)}/states/`);
-    const states = payload.results ?? [];
-    const match = states.find((state) => toLifecycle(String(state.name ?? state.group ?? "")) === lifecycle) ?? states.find((state) => String(state.name ?? "").toLowerCase().includes(lifecycle.replace("_", " ")));
-    if (!match?.id) throw new Error(`Plane project has no state for ${lifecycle}`);
-    this.stateIds.set(key, String(match.id));
-    return String(match.id);
+    const states = await this.loadStates(context);
+    const match = states.find((state) => toLifecycle(`${state.name} ${state.group ?? ""}`) === lifecycle) ?? states.find((state) => state.name.toLowerCase().includes(lifecycle.replace("_", " ")));
+    if (!match) throw new Error(`Plane project has no state for ${lifecycle}`);
+    this.stateIds.set(key, match.id);
+    return match.id;
   }
-  private fromApi(context: ProjectContext, item: Record<string, unknown>): PlaneItem {
-    const state = item.state as Record<string, unknown> | undefined;
-    const stateName = String(state?.name ?? item.state_name ?? item.state ?? "captured");
-    return { id: String(item.id), identifier: String(item.sequence_id ?? item.identifier ?? item.id), title: String(item.name ?? item.title ?? "Untitled"), description: item.description ? String(item.description) : item.description_html ? String(item.description_html) : undefined, stateName, status: toLifecycle(stateName), dueDate: item.due_date ? String(item.due_date) : null, projectId: context.planeProjectId, url: item.url ? String(item.url) : itemUrl(this.baseUrl, context.workspaceSlug, context.planeProjectId, String(item.id)), updatedAt: String(item.updated_at ?? new Date().toISOString()), archived: Boolean(item.archived ?? false) };
+
+  private fromSdk(context: ProjectContext, item: PlaneSdkWorkItem): PlaneItem {
+    const stateId = typeof item.state === "string" ? item.state : undefined;
+    const stateName = stateId ? this.stateNames.get(this.stateKey(context, stateId)) : undefined;
+    const displayState = stateName ?? stateId ?? "captured";
+    return {
+      id: item.id,
+      identifier: String(item.sequence_id),
+      title: item.name,
+      description: item.description_html,
+      stateId,
+      stateName: displayState,
+      status: toLifecycle(displayState),
+      dueDate: item.target_date ?? null,
+      projectId: context.planeProjectId,
+      url: itemUrl(this.baseUrl, context.workspaceSlug, context.planeProjectId, item.id),
+      updatedAt: String(item.updated_at ?? new Date().toISOString()),
+      archived: Boolean(item.archived_at),
+    };
   }
+
+  private stateKey(context: ProjectContext, stateId: string): string { return `${context.workspaceSlug}/${context.planeProjectId}/${stateId}`; }
 }
 
 function toLifecycle(status: string): LifecycleState {
@@ -222,9 +268,12 @@ export class EventCoordinator {
 function appendDescription(existing: string | undefined, next: string): string { return existing?.includes(next) ? existing : `${existing ? `${existing}\n\n` : ""}${next}`; }
 
 export function createPlaneAdapter(): PlaneAdapter {
-  if ((process.env.PLANE_MODE ?? "fake") === "fake") return new FakePlaneAdapter();
+  const mode = process.env.PLANE_MODE ?? "fake";
+  if (mode === "fake") return new FakePlaneAdapter();
+  if (mode !== "sdk") throw new Error(`Unsupported PLANE_MODE: ${mode}; use fake or sdk`);
   const baseUrl = process.env.PLANE_BASE_URL;
   const apiKey = process.env.PLANE_API_KEY;
-  if (!baseUrl || !apiKey) throw new Error("PLANE_BASE_URL and PLANE_API_KEY are required when PLANE_MODE is not fake");
-  return new PlaneHttpAdapter(baseUrl, apiKey, process.env.PLANE_WORKSPACE_SLUG);
+  const workspaceSlug = process.env.PLANE_WORKSPACE_SLUG;
+  if (!baseUrl || !apiKey || !workspaceSlug) throw new Error("PLANE_BASE_URL, PLANE_API_KEY, and PLANE_WORKSPACE_SLUG are required when PLANE_MODE=sdk");
+  return new PlaneSdkAdapter(baseUrl, apiKey, workspaceSlug);
 }

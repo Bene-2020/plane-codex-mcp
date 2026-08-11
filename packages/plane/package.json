@@ -7,6 +7,7 @@
   "scripts": { "build": "tsc -p tsconfig.json" },
   "dependencies": {
     "@ambient/core": "workspace:*",
-    "@ambient/storage": "workspace:*"
+    "@ambient/storage": "workspace:*",
+    "@makeplane/plane-node-sdk": "^0.2.12"
   }
 }

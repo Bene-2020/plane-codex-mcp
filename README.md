@@ -20,7 +20,7 @@ pnpm dev:panel
 
 默认使用 `PLANE_MODE=fake`，Fake Plane 会提供一个 `Demo Project`，适合完成端到端 Demo。面板地址是 <http://127.0.0.1:4318>，服务健康检查是 <http://127.0.0.1:4317/health>。
 
-接入真实 Plane 时，在 `.env` 中设置 `PLANE_MODE=http`、`PLANE_BASE_URL`、`PLANE_API_KEY` 和可选的 `PLANE_WORKSPACE_SLUG`，再启动服务和 MCP。API key 只由服务端读取，不进入 SQLite、Hook 上下文或浏览器。
+接入真实 Plane 时，在 `.env` 中设置 `PLANE_MODE=sdk`、`PLANE_BASE_URL`、`PLANE_API_KEY` 和 `PLANE_WORKSPACE_SLUG`，再启动服务和 MCP。真实 Plane 连接统一通过官方 `@makeplane/plane-node-sdk` 完成；API key 只由服务端读取，不进入 SQLite、Hook 上下文或浏览器。
 
 ## Codex 插件
 
