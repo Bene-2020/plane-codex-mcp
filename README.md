@@ -4,9 +4,10 @@
 
 ## 快速启动
 
-需要 Node.js 22 和 pnpm。
+需要 Node.js 22 和 Corepack。项目通过 `package.json` 的 `packageManager` 固定使用 pnpm 10.34.5。
 
 ```bash
+corepack enable pnpm
 pnpm install
 cp .env.example .env
 pnpm build

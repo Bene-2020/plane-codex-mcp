@@ -1,7 +1,7 @@
 {
   "name": "ambient-project-layer-demo",
   "private": true,
-  "packageManager": "pnpm@10.9.2",
+  "packageManager": "pnpm@10.34.5",
   "scripts": {
     "build": "pnpm run build:packages && pnpm run build:apps",
     "build:packages": "pnpm --filter @ambient/core build && pnpm --filter @ambient/storage build && pnpm --filter @ambient/plane build",
