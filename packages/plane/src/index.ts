@@ -1,6 +1,6 @@
 import {
   BatchRecord, LifecycleState, PlaneActivity, PlaneItem, PlaneProject, ProjectContext,
-  RecordKind, SourceEvent, eventId, lifecycleForEvent, normalizeTitle, recordKindForEvent, sourceFooter,
+  RecordKind, SourceEvent, eventId, lifecycleForEvent, recordKindForEvent, sourceFooter,
 } from "@ambient/core";
 import { Storage } from "@ambient/storage";
 import { PlaneClient, State as PlaneSdkState, WorkItem as PlaneSdkWorkItem } from "@makeplane/plane-node-sdk";
@@ -17,6 +17,21 @@ export interface PlaneAdapter {
   deleteItem(context: ProjectContext, itemId: string): Promise<void>;
   archiveItem(context: ProjectContext, itemId: string): Promise<void>;
 }
+
+export type FakePlaneOperation = "listItems" | "createItem" | "updateItem" | "addActivity";
+export interface FakePlaneFailure {
+  operation: FakePlaneOperation;
+  call?: number;
+  sourceEventId?: string;
+  afterWrite?: boolean;
+}
+
+export function sourceMarker(sourceEventId: string): string { return `[ambient-source:${sourceEventId}]`; }
+function activityMarker(sourceEventId: string): string { return `[ambient:${sourceEventId}]`; }
+function hasSourceMarker(value: string | undefined, sourceEventId: string): boolean {
+  return Boolean(value && (value.includes(sourceMarker(sourceEventId)) || value.includes(`来源事件: ${sourceEventId}`)));
+}
+function stepSourceEventId(eventIdValue: string, index: number): string { return `${eventIdValue}:step_${index}`; }
 
 function itemUrl(baseUrl: string, workspace: string, project: string, itemId: string): string { return `${baseUrl.replace(/\/$/, "")}/workspaces/${encodeURIComponent(workspace)}/projects/${encodeURIComponent(project)}/work-items/${encodeURIComponent(itemId)}`; }
 
@@ -41,19 +56,30 @@ export class PlaneSdkAdapter implements PlaneAdapter {
   }
 
   async createItem(context: ProjectContext, input: CreateItemInput): Promise<PlaneItem> {
+    const existing = await this.findItemBySourceEventId(context, input.sourceEventId);
+    if (existing) return { ...existing, isSystemCreated: true, kind: input.kind, parentId: input.parentId ?? existing.parentId };
     const stateId = await this.resolveStateId(context, input.status);
-    const payload = await this.client.workItems.create(context.workspaceSlug, context.planeProjectId, {
-      name: input.title,
-      description_html: input.description,
-      state: stateId,
-      target_date: input.dueDate ?? undefined,
-      parent: input.parentId,
-    });
+    const description = `${input.description}\n\n${sourceMarker(input.sourceEventId)}`;
+    let payload: PlaneSdkWorkItem;
+    try {
+      payload = await this.client.workItems.create(context.workspaceSlug, context.planeProjectId, {
+        name: input.title,
+        description_html: description,
+        state: stateId,
+        target_date: input.dueDate ?? undefined,
+        parent: input.parentId,
+      });
+    } catch (error) {
+      const recovered = await this.findItemBySourceEventId(context, input.sourceEventId);
+      if (recovered) return { ...recovered, isSystemCreated: true, kind: input.kind, parentId: input.parentId ?? recovered.parentId };
+      throw error;
+    }
     return {
       ...this.fromSdk(context, payload),
       isSystemCreated: true,
       url: itemUrl(this.baseUrl, context.workspaceSlug, context.planeProjectId, payload.id),
       kind: input.kind,
+      parentId: input.parentId,
     };
   }
 
@@ -69,13 +95,34 @@ export class PlaneSdkAdapter implements PlaneAdapter {
   }
 
   async addActivity(context: ProjectContext, itemId: string, body: string, sourceEventId: string): Promise<PlaneActivity> {
-    const payload = await this.client.workItems.comments.create(context.workspaceSlug, context.planeProjectId, itemId, { comment_html: `${body}\n\n[ambient:${sourceEventId}]` });
+    const marker = activityMarker(sourceEventId);
+    const existing = await this.findActivityBySourceEventId(context, itemId, marker);
+    if (existing) return existing;
+    let payload;
+    try {
+      payload = await this.client.workItems.comments.create(context.workspaceSlug, context.planeProjectId, itemId, { comment_html: `${body}\n\n${marker}` });
+    } catch (error) {
+      const recovered = await this.findActivityBySourceEventId(context, itemId, marker);
+      if (recovered) return recovered;
+      throw error;
+    }
     return { id: payload.id, itemId, body, createdAt: String(payload.created_at ?? new Date().toISOString()), sourceEventId };
   }
 
   async deleteItem(context: ProjectContext, itemId: string): Promise<void> { await this.client.workItems.delete(context.workspaceSlug, context.planeProjectId, itemId); }
 
   async archiveItem(context: ProjectContext, itemId: string): Promise<void> { await this.client.workItems.archive(context.workspaceSlug, context.planeProjectId, itemId); }
+
+  private async findItemBySourceEventId(context: ProjectContext, sourceEventId: string): Promise<PlaneItem | null> {
+    const items = await this.listItems(context);
+    return items.find((item) => hasSourceMarker(item.description, sourceEventId)) ?? null;
+  }
+
+  private async findActivityBySourceEventId(context: ProjectContext, itemId: string, marker: string): Promise<PlaneActivity | null> {
+    const payload = await this.client.workItems.comments.list(context.workspaceSlug, context.planeProjectId, itemId, { limit: 100 });
+    const comment = payload.results.find((item) => item.comment_html?.includes(marker));
+    return comment ? { id: comment.id, itemId, body: comment.comment_html?.replace(`\n\n${marker}`, "") ?? "", createdAt: String(comment.created_at ?? new Date().toISOString()), sourceEventId: marker.slice("[ambient:".length, -1) } : null;
+  }
 
   private async loadStates(context: ProjectContext): Promise<PlaneSdkState[]> {
     const payload = await this.client.states.list(context.workspaceSlug, context.planeProjectId, { limit: 100 });
@@ -108,6 +155,7 @@ export class PlaneSdkAdapter implements PlaneAdapter {
       status: toLifecycle(displayState),
       dueDate: item.target_date ?? null,
       projectId: context.planeProjectId,
+      parentId: item.parent,
       url: itemUrl(this.baseUrl, context.workspaceSlug, context.planeProjectId, item.id),
       updatedAt: String(item.updated_at ?? new Date().toISOString()),
       archived: Boolean(item.archived_at),
@@ -129,27 +177,81 @@ function toLifecycle(status: string): LifecycleState {
 export class FakePlaneAdapter implements PlaneAdapter {
   private readonly projects: PlaneProject[] = [{ id: "demo-project", name: "Demo Project", identifier: "DEMO", workspaceSlug: "demo-workspace" }];
   private readonly items = new Map<string, PlaneItem>();
+  private readonly itemSources = new Map<string, string>();
   private readonly activities = new Map<string, PlaneActivity[]>();
+  private readonly operationCalls = new Map<FakePlaneOperation, number>();
   private counter = 0;
   fail = false;
+  failOnce: FakePlaneFailure | null = null;
   calls: string[] = [];
+  injectFailure(failure: FakePlaneFailure): void { this.failOnce = failure; }
   async listProjects(): Promise<PlaneProject[]> { this.calls.push("listProjects"); this.ensure(); return [...this.projects]; }
-  async listItems(context: ProjectContext): Promise<PlaneItem[]> { this.calls.push("listItems"); this.ensure(); return [...this.items.values()].filter((item) => item.projectId === context.planeProjectId && !item.archived); }
-  async createItem(context: ProjectContext, input: CreateItemInput): Promise<PlaneItem> { this.ensure(); const item: PlaneItem = { id: `fake-item-${++this.counter}`, identifier: `DEMO-${this.counter}`, title: input.title, description: input.description, kind: input.kind, status: input.status, dueDate: input.dueDate ?? null, projectId: context.planeProjectId, url: `https://plane.test/${this.counter}`, isSystemCreated: true, updatedAt: new Date().toISOString() }; this.items.set(item.id, item); this.calls.push(`create:${item.id}`); return item; }
-  async updateItem(_context: ProjectContext, itemId: string, input: UpdateItemInput): Promise<PlaneItem> { this.ensure(); const item = this.items.get(itemId); if (!item) throw new Error("Fake Plane item not found"); Object.assign(item, input, { updatedAt: new Date().toISOString() }); this.calls.push(`update:${itemId}`); return { ...item }; }
-  async addActivity(_context: ProjectContext, itemId: string, body: string, sourceEventId: string): Promise<PlaneActivity> { this.ensure(); const activity: PlaneActivity = { id: `fake-activity-${this.counter++}`, itemId, body, sourceEventId, createdAt: new Date().toISOString() }; this.activities.set(itemId, [...(this.activities.get(itemId) ?? []), activity]); this.calls.push(`activity:${itemId}`); return activity; }
-  async deleteItem(_context: ProjectContext, itemId: string): Promise<void> { this.ensure(); this.items.delete(itemId); this.calls.push(`delete:${itemId}`); }
+  async listItems(context: ProjectContext): Promise<PlaneItem[]> {
+    const call = this.nextCall("listItems");
+    this.calls.push("listItems"); this.ensure(); this.failIfRequested("listItems", call);
+    return [...this.items.values()].filter((item) => item.projectId === context.planeProjectId && !item.archived).map((item) => ({ ...item }));
+  }
+  async createItem(context: ProjectContext, input: CreateItemInput): Promise<PlaneItem> {
+    const call = this.nextCall("createItem");
+    this.ensure();
+    const existingId = [...this.itemSources.entries()].find(([itemId, source]) => source === input.sourceEventId && this.items.get(itemId)?.projectId === context.planeProjectId)?.[0];
+    if (existingId) { this.calls.push(`create-existing:${existingId}`); return { ...this.items.get(existingId)! }; }
+    this.failIfRequested("createItem", call, input.sourceEventId);
+    const item: PlaneItem = { id: `fake-item-${++this.counter}`, identifier: `DEMO-${this.counter}`, title: input.title, description: `${input.description}\n\n${sourceMarker(input.sourceEventId)}`, kind: input.kind, status: input.status, dueDate: input.dueDate ?? null, parentId: input.parentId, projectId: context.planeProjectId, url: `https://plane.test/${this.counter}`, isSystemCreated: true, updatedAt: new Date().toISOString() };
+    this.items.set(item.id, item);
+    this.itemSources.set(item.id, input.sourceEventId);
+    this.calls.push(`create:${item.id}`);
+    this.failIfRequested("createItem", call, input.sourceEventId, true);
+    return { ...item };
+  }
+  async updateItem(_context: ProjectContext, itemId: string, input: UpdateItemInput): Promise<PlaneItem> {
+    const call = this.nextCall("updateItem");
+    this.ensure(); const item = this.items.get(itemId); if (!item) throw new Error("Fake Plane item not found");
+    this.failIfRequested("updateItem", call);
+    Object.assign(item, input, { updatedAt: new Date().toISOString() }); this.calls.push(`update:${itemId}`);
+    this.failIfRequested("updateItem", call, undefined, true);
+    return { ...item };
+  }
+  async addActivity(_context: ProjectContext, itemId: string, body: string, sourceEventId: string): Promise<PlaneActivity> {
+    const call = this.nextCall("addActivity");
+    this.ensure();
+    const existing = this.getActivities(itemId).find((activity) => activity.sourceEventId === sourceEventId);
+    if (existing) { this.calls.push(`activity-existing:${itemId}`); return { ...existing }; }
+    this.failIfRequested("addActivity", call, sourceEventId);
+    const activity: PlaneActivity = { id: `fake-activity-${this.counter++}`, itemId, body, sourceEventId, createdAt: new Date().toISOString() };
+    this.activities.set(itemId, [...(this.activities.get(itemId) ?? []), activity]); this.calls.push(`activity:${itemId}`);
+    this.failIfRequested("addActivity", call, sourceEventId, true);
+    return { ...activity };
+  }
+  async deleteItem(_context: ProjectContext, itemId: string): Promise<void> { this.ensure(); this.items.delete(itemId); this.itemSources.delete(itemId); this.calls.push(`delete:${itemId}`); }
   async archiveItem(_context: ProjectContext, itemId: string): Promise<void> { await this.updateItem(_context, itemId, { status: "dropped" }); this.items.get(itemId)!.archived = true; }
   getActivities(itemId: string): PlaneActivity[] { return this.activities.get(itemId) ?? []; }
+  private nextCall(operation: FakePlaneOperation): number { const call = (this.operationCalls.get(operation) ?? 0) + 1; this.operationCalls.set(operation, call); return call; }
+  private failIfRequested(operation: FakePlaneOperation, call: number, sourceEventId?: string, afterWrite = false): void {
+    const failure = this.failOnce;
+    if (!failure || failure.operation !== operation || failure.call !== undefined && failure.call !== call || failure.sourceEventId !== undefined && failure.sourceEventId !== sourceEventId || Boolean(failure.afterWrite) !== afterWrite) return;
+    this.failOnce = null;
+    throw new Error(`Fake Plane injected ${operation} failure`);
+  }
   private ensure(): void { if (this.fail) throw new Error("Fake Plane unavailable"); }
 }
 
 export class EventCoordinator {
   constructor(private readonly storage: Storage, private readonly plane: PlaneAdapter) {}
 
-  async syncBatch(batch: BatchRecord): Promise<void> {
+  async syncBatch(batch: BatchRecord, claimToken?: string): Promise<void> {
     const context = this.storage.getContext(batch.projectContextId);
     if (!context) throw new Error("Project context not found for batch");
+    const pendingEvents: Array<{ event: SourceEvent; eventId: string }> = [];
+    for (const [index, event] of batch.events.entries()) {
+      const currentEventId = eventId(batch.rowId, index);
+      const reference = this.storage.addSourceReference({ batchId: batch.id, eventId: currentEventId, planeItemId: event.relatedItemId ?? null, sessionId: batch.sessionId, turnId: batch.turnId, eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: event.observedAt ?? new Date().toISOString() });
+      if (reference.projectionStatus !== "completed") pendingEvents.push({ event, eventId: currentEventId });
+    }
+    if (!pendingEvents.length) {
+      if (!this.storage.areBatchEventsComplete(batch.id, batch.events.length) || !this.storage.setBatchStatus(batch.id, "synced", undefined, claimToken)) throw new Error("Outbox batch claim lost");
+      return;
+    }
     const remoteItems = await this.plane.listItems(context);
     const cachedItems = this.storage.listCachedItems(context.id);
     const itemList = remoteItems.map((remote) => {
@@ -157,57 +259,81 @@ export class EventCoordinator {
       return cached ? { ...remote, isSystemCreated: cached.isSystemCreated } : remote;
     });
     itemList.push(...cachedItems.filter((cached) => !remoteItems.some((remote) => remote.id === cached.id)));
-    for (const [index, event] of batch.events.entries()) {
-      const currentEventId = eventId(batch.rowId, index);
-      this.storage.addSourceReference({ batchId: batch.id, eventId: currentEventId, planeItemId: event.relatedItemId ?? null, sessionId: batch.sessionId, turnId: batch.turnId, eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: event.observedAt ?? new Date().toISOString() });
-      await this.projectEvent(context, batch, currentEventId, event, itemList);
+    for (const { event, eventId: currentEventId } of pendingEvents) {
+      try {
+        this.storage.markEventAttempt(currentEventId, claimToken);
+        const planeItemId = await this.projectEvent(context, batch, currentEventId, event, itemList, claimToken);
+        this.storage.markEventCompleted(currentEventId, planeItemId, claimToken);
+      } catch (error) {
+        this.storage.markEventFailed(currentEventId, error instanceof Error ? error.message : String(error), claimToken);
+        throw error;
+      }
     }
-    this.storage.setBatchStatus(batch.id, "synced");
+    if (!this.storage.areBatchEventsComplete(batch.id, batch.events.length) || !this.storage.setBatchStatus(batch.id, "synced", undefined, claimToken)) throw new Error("Outbox batch claim lost");
   }
 
-  private async projectEvent(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[]): Promise<void> {
-    const existing = this.resolveItem(context.id, event, items);
+  private async projectEvent(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[], claimToken?: string): Promise<string | null> {
+    const existing = this.resolveItem(currentEventId, event, items);
     if (event.type === "progress" || event.type === "decision") {
       if (existing) {
         await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
-        this.storage.updateSourcePlaneItem(currentEventId, existing.id);
+        this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
+        return existing.id;
       } else if (event.type === "decision") {
         const created = await this.create(context, batch, event, currentEventId, "decision");
-        this.storage.updateSourcePlaneItem(currentEventId, created.id);
+        this.storage.updateSourcePlaneItem(currentEventId, created.id, claimToken);
         items.push(created);
+        return created.id;
       }
-      return;
+      return null;
     }
     if (event.type === "completed") {
       if (existing) {
         const owned = this.storage.getFieldOwnership(existing.id, "status");
-        if (event.userDirected || (existing.isSystemCreated && (!owned || owned.owner === "system"))) await this.plane.updateItem(context, existing.id, { status: "done" });
-        this.storage.updateSourcePlaneItem(currentEventId, existing.id);
+        if (event.userDirected || (existing.isSystemCreated && (!owned || owned.owner === "system"))) {
+          const updated = await this.plane.updateItem(context, existing.id, { status: "done" });
+          this.storage.cacheItem(context.id, updated, existing.isSystemCreated);
+        }
+        this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
+        return existing.id;
       }
-      return;
+      return null;
     }
-    if (existing && (event.relatedItemId || this.isSameSystemTitle(existing, event))) {
+    if (event.type === "plan") {
+      return this.projectPlan(context, batch, currentEventId, event, items, existing, claimToken);
+    }
+    if (existing) {
       const update: UpdateItemInput = {};
       if (existing.isSystemCreated || event.userDirected) {
         if (this.storage.getFieldOwnership(existing.id, "description")?.owner !== "user") update.description = appendDescription(existing.description, event.summary);
         if (event.dueDate && this.storage.getFieldOwnership(existing.id, "dueDate")?.owner !== "user") update.dueDate = event.dueDate;
-        if (Object.keys(update).length) await this.plane.updateItem(context, existing.id, update);
+        if (Object.keys(update).length) {
+          const updated = await this.plane.updateItem(context, existing.id, update);
+          this.storage.cacheItem(context.id, updated, existing.isSystemCreated);
+        }
       }
       await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
-      this.storage.updateSourcePlaneItem(currentEventId, existing.id);
-      return;
+      this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
+      return existing.id;
     }
     const kind = recordKindForEvent(event);
-    if (!kind) return;
+    if (!kind) return null;
     const created = await this.create(context, batch, event, currentEventId, kind);
-    this.storage.updateSourcePlaneItem(currentEventId, created.id);
+    this.storage.updateSourcePlaneItem(currentEventId, created.id, claimToken);
     items.push(created);
-    if (event.type === "plan" && event.steps?.length) {
-      for (const step of event.steps) {
-        const child = await this.plane.createItem(context, { title: step.title, description: step.summary ?? "执行步骤", kind: "task", status: "planned", parentId: created.id, sourceEventId: currentEventId });
-        this.storage.cacheItem(context.id, child, true);
-      }
+    return created.id;
+  }
+
+  private async projectPlan(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[], existing: PlaneItem | null, claimToken?: string): Promise<string> {
+    const parent = existing ?? await this.create(context, batch, event, currentEventId, "task");
+    if (!items.some((item) => item.id === parent.id)) items.push(parent);
+    this.storage.updateSourcePlaneItem(currentEventId, parent.id, claimToken);
+    for (const [index, step] of (event.steps ?? []).entries()) {
+      const child = await this.plane.createItem(context, { title: step.title, description: step.summary ?? "执行步骤", kind: "task", status: "planned", parentId: parent.id, sourceEventId: stepSourceEventId(currentEventId, index) });
+      this.storage.cacheItem(context.id, child, true);
+      if (!items.some((item) => item.id === child.id)) items.push(child);
     }
+    return parent.id;
   }
 
   private async create(context: ProjectContext, batch: BatchRecord, event: SourceEvent, currentEventId: string, kind: RecordKind): Promise<PlaneItem> {
@@ -220,13 +346,13 @@ export class EventCoordinator {
     return created;
   }
 
-  private resolveItem(contextId: string, event: SourceEvent, planeItems: PlaneItem[]): PlaneItem | null {
+  private resolveItem(currentEventId: string, event: SourceEvent, planeItems: PlaneItem[]): PlaneItem | null {
+    const reference = this.storage.getSourceReference(currentEventId);
+    if (reference?.planeItemId) return planeItems.find((item) => item.id === reference.planeItemId) ?? this.storage.getCachedItem(reference.planeItemId);
     if (event.relatedItemId) return planeItems.find((item) => item.id === event.relatedItemId || item.identifier === event.relatedItemId) ?? this.storage.getCachedItem(event.relatedItemId);
-    const wanted = normalizeTitle(event.title);
-    return planeItems.find((item) => item.isSystemCreated && normalizeTitle(item.title) === wanted) ?? null;
+    if (event.type === "plan") return planeItems.find((item) => hasSourceMarker(item.description, currentEventId)) ?? null;
+    return null;
   }
-
-  private isSameSystemTitle(item: PlaneItem, event: SourceEvent): boolean { return Boolean(item.isSystemCreated) && normalizeTitle(item.title) === normalizeTitle(event.title); }
 
   async refreshCache(context: ProjectContext): Promise<PlaneItem[]> {
     const remoteItems = await this.plane.listItems(context);

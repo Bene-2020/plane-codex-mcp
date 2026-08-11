@@ -1,23 +1,60 @@
 import Database from "better-sqlite3";
 import {
   ActiveItemSnapshot, BatchRecord, FieldName, FieldOwner, FieldOwnership, PlaneItem, ProjectContext,
-  ProjectContextInput, SourceEvent, SourceReference, SyncStatus, batchId, canonicalizeCwd, eventId,
+  ProjectContextInput, ProjectionStatus, SourceEvent, SourceReference, SyncStatus, batchId, canonicalizeCwd, eventId,
 } from "@ambient/core";
 
 interface ContextRow {
   id: number; canonical_cwd: string; plane_base_url: string; workspace_slug: string; plane_project_id: string;
   plane_project_name: string | null; auto_capture_enabled: number; created_at: string; updated_at: string;
 }
-interface BatchRow { id: number; project_context_id: string; session_id: string; turn_id: string; events_json: string; status: SyncStatus; attempts: number; last_error: string | null; }
+interface BatchRow {
+  id: number;
+  project_context_id: string;
+  session_id: string;
+  turn_id: string;
+  events_json: string;
+  status: SyncStatus;
+  attempts: number;
+  last_error: string | null;
+  next_attempt_at: string | null;
+  synced_at: string | null;
+  claim_version: number;
+  claim_token: string | null;
+  lease_until: string | null;
+}
 interface CacheRow { plane_item_id: string; identifier: string; title: string; description: string | null; kind: string | null; status: string | null; due_date: string | null; project_context_id: string; url: string | null; is_system_created: number; updated_at: string; archived: number; }
+interface SourceRow {
+  id: number;
+  batch_id: string;
+  event_id: string;
+  plane_item_id: string | null;
+  session_id: string;
+  turn_id: string;
+  event_type: SourceReference["eventType"];
+  summary: string;
+  source_excerpt: string;
+  observed_at: string;
+  created_at: string;
+  projection_status: ProjectionStatus;
+  projection_attempts: number;
+  projection_error: string | null;
+  projected_at: string | null;
+}
+
+export interface StorageOptions { leaseMs?: number; }
 
 function now(): string { return new Date().toISOString(); }
 
 export class Storage {
   readonly db: Database.Database;
-  constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project-demo.sqlite") {
+  private readonly leaseMs: number;
+
+  constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project-demo.sqlite", options: StorageOptions = {}) {
+    this.leaseMs = options.leaseMs ?? 30_000;
     this.db = new Database(filename);
     this.db.pragma("journal_mode = WAL");
+    this.db.pragma("busy_timeout = 5000");
     this.db.pragma("foreign_keys = ON");
     this.migrate();
   }
@@ -48,6 +85,9 @@ export class Storage {
         next_attempt_at TEXT,
         accepted_at TEXT NOT NULL,
         synced_at TEXT,
+        claim_version INTEGER NOT NULL DEFAULT 0,
+        claim_token TEXT,
+        lease_until TEXT,
         UNIQUE(project_context_id, session_id, turn_id)
       );
       CREATE TABLE IF NOT EXISTS source_references (
@@ -61,7 +101,11 @@ export class Storage {
         summary TEXT NOT NULL,
         source_excerpt TEXT NOT NULL,
         observed_at TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        projection_status TEXT NOT NULL DEFAULT 'pending',
+        projection_attempts INTEGER NOT NULL DEFAULT 0,
+        projection_error TEXT,
+        projected_at TEXT
       );
       CREATE TABLE IF NOT EXISTS plane_item_cache (
         plane_item_id TEXT PRIMARY KEY,
@@ -96,10 +140,30 @@ export class Storage {
         ended_at TEXT,
         UNIQUE(session_id, turn_id, hook_event_name)
       );
+    `);
+
+    this.ensureColumn("outbox_batches", "next_attempt_at", "TEXT");
+    this.ensureColumn("outbox_batches", "synced_at", "TEXT");
+    this.ensureColumn("outbox_batches", "claim_version", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("outbox_batches", "claim_token", "TEXT");
+    this.ensureColumn("outbox_batches", "lease_until", "TEXT");
+    this.ensureColumn("source_references", "projection_status", "TEXT NOT NULL DEFAULT 'pending'");
+    this.ensureColumn("source_references", "projection_attempts", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("source_references", "projection_error", "TEXT");
+    this.ensureColumn("source_references", "projected_at", "TEXT");
+    this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
+      CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_batches(status, next_attempt_at, lease_until);
       CREATE INDEX IF NOT EXISTS idx_source_batch ON source_references(batch_id);
+      CREATE INDEX IF NOT EXISTS idx_source_event ON source_references(event_id);
+      CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
       CREATE INDEX IF NOT EXISTS idx_cache_context ON plane_item_cache(project_context_id, archived, updated_at);
     `);
+  }
+
+  private ensureColumn(table: "outbox_batches" | "source_references", column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   close(): void { this.db.close(); }
@@ -143,7 +207,7 @@ export class Storage {
       const result = insert.run(batch.projectContextId, batch.sessionId, batch.turnId, JSON.stringify(batch.events), now());
       return { batchId: batchId(Number(result.lastInsertRowid)), duplicate: false };
     } catch (error) {
-      if (error instanceof Error && error.message.includes("UNIQUE constraint failed: outbox_batches.project_context_id")) {
+      if (error instanceof Error && error.message.includes("outbox_batches.project_context_id")) {
         const row = this.db.prepare("SELECT id FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(batch.projectContextId, batch.sessionId, batch.turnId) as { id: number };
         return { batchId: batchId(row.id), duplicate: true };
       }
@@ -152,31 +216,102 @@ export class Storage {
   }
 
   listPendingBatches(limit = 20): BatchRecord[] {
-    const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error FROM outbox_batches WHERE status IN ('pending','retrying','failed') AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY id LIMIT ?`).all(now(), limit) as BatchRow[];
-    return rows.map((row) => ({ rowId: row.id, id: batchId(row.id), projectContextId: row.project_context_id, sessionId: row.session_id, turnId: row.turn_id, events: JSON.parse(row.events_json) as SourceEvent[], status: row.status, attempts: row.attempts, lastError: row.last_error }));
+    const timestamp = now();
+    const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error, next_attempt_at, synced_at, claim_version, claim_token, lease_until
+      FROM outbox_batches
+      WHERE status IN ('pending','retrying','failed')
+        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)
+      ORDER BY id LIMIT ?`).all(timestamp, timestamp, limit) as BatchRow[];
+    return rows.map((row) => this.batchFromRow(row));
   }
 
-  setBatchStatus(batchIdValue: string, status: SyncStatus, error?: string): void {
-    const id = Number(batchIdValue.replace("batch_", ""));
-    this.db.prepare("UPDATE outbox_batches SET status=?, attempts=attempts+1, last_error=?, synced_at=?, next_attempt_at=? WHERE id=?")
-      .run(status, error ?? null, status === "synced" || status === "corrected" ? now() : null, status === "synced" || status === "corrected" ? null : now(), id);
+  claimPendingBatches(limit = 20, leaseMs = this.leaseMs): BatchRecord[] {
+    const timestamp = now();
+    const transaction = this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error, next_attempt_at, synced_at, claim_version, claim_token, lease_until
+        FROM outbox_batches
+        WHERE status IN ('pending','retrying','failed')
+          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+          AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)
+        ORDER BY id LIMIT ?`).all(timestamp, timestamp, limit) as BatchRow[];
+      const update = this.db.prepare(`UPDATE outbox_batches
+        SET claim_version=?, claim_token=?, lease_until=?, attempts=COALESCE(attempts,0)+1
+        WHERE id=? AND status IN ('pending','retrying','failed')
+          AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)`);
+      const claimed: BatchRecord[] = [];
+      for (const row of rows) {
+        const version = (row.claim_version ?? 0) + 1;
+        const token = `claim_${row.id}_${version}`;
+        const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
+        const result = update.run(version, token, leaseUntil, row.id, timestamp);
+        if (result.changes === 1) {
+          claimed.push(this.batchFromRow({ ...row, claim_version: version, claim_token: token, lease_until: leaseUntil, attempts: (row.attempts ?? 0) + 1 }, token));
+        }
+      }
+      return claimed;
+    });
+    return transaction.immediate() as BatchRecord[];
   }
 
-  markBatchRetrying(batchIdValue: string, error: string): void { this.setBatchStatus(batchIdValue, "retrying", error); }
-
-  addSourceReference(input: Omit<SourceReference, "id" | "createdAt">): void {
-    this.db.prepare(`INSERT OR IGNORE INTO source_references (batch_id,event_id,plane_item_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-      .run(input.batchId, input.eventId, input.planeItemId, input.sessionId, input.turnId, input.eventType, input.summary, input.sourceExcerpt, input.observedAt, now());
+  setBatchStatus(batchIdValue: string, status: SyncStatus, error?: string, claimToken?: string): boolean {
+    const id = this.parseBatchRowId(batchIdValue);
+    const timestamp = now();
+    const completed = status === "synced" || status === "corrected";
+    const ownership = claimToken
+      ? "claim_token=? AND lease_until > ?"
+      : "(claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)";
+    const result = this.db.prepare(`UPDATE outbox_batches
+      SET status=?, attempts=COALESCE(attempts,0)+${claimToken ? 0 : 1}, last_error=?, synced_at=?, next_attempt_at=?, claim_token=NULL, lease_until=NULL
+      WHERE id=? AND status NOT IN ('synced','corrected') AND ${ownership}`)
+      .run(...(claimToken ? [status, error ?? null, completed ? timestamp : null, completed ? null : timestamp, id, claimToken, timestamp] : [status, error ?? null, completed ? timestamp : null, completed ? null : timestamp, id, timestamp]));
+    return result.changes === 1;
   }
 
-  updateSourcePlaneItem(eventIdValue: string, planeItemId: string): void { this.db.prepare("UPDATE source_references SET plane_item_id=? WHERE event_id=?").run(planeItemId, eventIdValue); }
+  markBatchRetrying(batchIdValue: string, error: string, claimToken?: string): boolean { return this.setBatchStatus(batchIdValue, "retrying", error, claimToken); }
+
+  addSourceReference(input: Omit<SourceReference, "id" | "createdAt" | "projectionStatus" | "projectionAttempts" | "projectionError" | "projectedAt">): SourceReference {
+    this.db.prepare(`INSERT INTO source_references (batch_id,event_id,plane_item_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at)
+      SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM source_references WHERE event_id=?)`)
+      .run(input.batchId, input.eventId, input.planeItemId, input.sessionId, input.turnId, input.eventType, input.summary, input.sourceExcerpt, input.observedAt, now(), input.eventId);
+    const reference = this.getSourceReference(input.eventId);
+    if (!reference) throw new Error(`Source reference not found for ${input.eventId}`);
+    return reference;
+  }
+
+  getSourceReference(eventIdValue: string): SourceReference | null {
+    const row = this.db.prepare("SELECT * FROM source_references WHERE event_id=?").get(eventIdValue) as SourceRow | undefined;
+    return row ? this.sourceFromRow(row) : null;
+  }
+
+  updateSourcePlaneItem(eventIdValue: string, planeItemId: string, claimToken?: string): void {
+    if (!this.updateSourceOwned(eventIdValue, claimToken, "plane_item_id=?", [planeItemId])) throw new Error("Outbox batch claim lost");
+  }
+
+  markEventAttempt(eventIdValue: string, claimToken?: string): void {
+    if (!this.updateSourceOwned(eventIdValue, claimToken, "projection_status='pending', projection_attempts=COALESCE(projection_attempts,0)+1, projection_error=NULL", [])) throw new Error("Outbox batch claim lost");
+  }
+
+  markEventCompleted(eventIdValue: string, planeItemId: string | null, claimToken?: string): void {
+    if (!this.updateSourceOwned(eventIdValue, claimToken, "projection_status='completed', projection_error=NULL, projected_at=?, plane_item_id=COALESCE(?, plane_item_id)", [now(), planeItemId])) throw new Error("Outbox batch claim lost");
+  }
+
+  markEventFailed(eventIdValue: string, error: string, claimToken?: string): boolean {
+    return this.updateSourceOwned(eventIdValue, claimToken, "projection_status='failed', projection_error=?", [error]);
+  }
+
+  areBatchEventsComplete(batchIdValue: string, eventCount: number): boolean {
+    const batchRowId = this.parseBatchRowId(batchIdValue);
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM source_references WHERE batch_id=? AND projection_status='completed'").get(batchIdValue) as { count: number };
+    return row.count === eventCount && eventCount > 0 && batchRowId > 0;
+  }
 
   listSources(contextId: string, planeItemId?: string): SourceReference[] {
     const query = planeItemId
       ? `SELECT sr.* FROM source_references sr JOIN outbox_batches b ON b.id = CAST(REPLACE(sr.batch_id,'batch_','') AS INTEGER) WHERE b.project_context_id=? AND sr.plane_item_id=? ORDER BY sr.id DESC`
       : `SELECT sr.* FROM source_references sr JOIN outbox_batches b ON b.id = CAST(REPLACE(sr.batch_id,'batch_','') AS INTEGER) WHERE b.project_context_id=? ORDER BY sr.id DESC`;
-    const rows = (planeItemId ? this.db.prepare(query).all(contextId, planeItemId) : this.db.prepare(query).all(contextId)) as Array<{ id: number; batch_id: string; event_id: string; plane_item_id: string | null; session_id: string; turn_id: string; event_type: SourceReference["eventType"]; summary: string; source_excerpt: string; observed_at: string; created_at: string }>;
-    return rows.map((row) => ({ id: row.id, batchId: row.batch_id, eventId: row.event_id, planeItemId: row.plane_item_id, sessionId: row.session_id, turnId: row.turn_id, eventType: row.event_type, summary: row.summary, sourceExcerpt: row.source_excerpt, observedAt: row.observed_at, createdAt: row.created_at }));
+    const rows = (planeItemId ? this.db.prepare(query).all(contextId, planeItemId) : this.db.prepare(query).all(contextId)) as SourceRow[];
+    return rows.map((row) => this.sourceFromRow(row));
   }
 
   cacheItem(contextId: string, item: PlaneItem, isSystemCreated = item.isSystemCreated ?? false): void {
@@ -220,8 +355,77 @@ export class Storage {
   }
 
   listAudits(sessionId?: string): unknown[] { return (sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all()) as unknown[]; }
-  listFailedBatches(contextId: string): unknown[] { return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status IN ('failed','retrying','pending') ORDER BY id DESC").all(contextId) as unknown[]; }
-  retryBatch(id: string): void { this.db.prepare("UPDATE outbox_batches SET status='retrying', next_attempt_at=?, last_error=NULL WHERE id=?").run(now(), Number(id.replace("batch_", ""))); }
+  listFailedBatches(contextId: string): unknown[] {
+    return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status NOT IN ('synced','corrected') ORDER BY id DESC").all(contextId) as unknown[];
+  }
+
+  retryBatch(id: string, projectContextId?: string): void {
+    const rowId = this.parseBatchRowId(id);
+    const row = this.db.prepare("SELECT project_context_id, status FROM outbox_batches WHERE id=?").get(rowId) as { project_context_id: string; status: SyncStatus } | undefined;
+    if (!row) throw new Error("Outbox batch not found");
+    if (projectContextId && row.project_context_id !== projectContextId) throw new Error("Outbox batch does not belong to this project context");
+    if (row.status === "synced" || row.status === "corrected") throw new Error("Only unsynced batches can be retried");
+    const result = this.db.prepare("UPDATE outbox_batches SET status='retrying', next_attempt_at=?, last_error=NULL WHERE id=? AND status NOT IN ('synced','corrected')").run(now(), rowId);
+    if (result.changes !== 1) throw new Error("Only unsynced batches can be retried");
+  }
+
+  private parseBatchRowId(value: string): number {
+    const match = /^batch_([0-9]+)$/.exec(value);
+    if (!match) throw new Error("Invalid outbox batch id");
+    return Number(match[1]);
+  }
+
+  private batchFromRow(row: BatchRow, claimToken?: string): BatchRecord {
+    return {
+      rowId: row.id,
+      id: batchId(row.id),
+      projectContextId: row.project_context_id,
+      sessionId: row.session_id,
+      turnId: row.turn_id,
+      events: JSON.parse(row.events_json) as SourceEvent[],
+      status: row.status,
+      attempts: row.attempts ?? 0,
+      lastError: row.last_error,
+      claimToken: claimToken ?? row.claim_token ?? undefined,
+      leaseUntil: row.lease_until,
+    };
+  }
+
+  private sourceFromRow(row: SourceRow): SourceReference {
+    return {
+      id: row.id,
+      batchId: row.batch_id,
+      eventId: row.event_id,
+      planeItemId: row.plane_item_id,
+      sessionId: row.session_id,
+      turnId: row.turn_id,
+      eventType: row.event_type,
+      summary: row.summary,
+      sourceExcerpt: row.source_excerpt,
+      observedAt: row.observed_at,
+      createdAt: row.created_at,
+      projectionStatus: row.projection_status ?? "pending",
+      projectionAttempts: row.projection_attempts ?? 0,
+      projectionError: row.projection_error,
+      projectedAt: row.projected_at,
+    };
+  }
+
+  private updateSourceOwned(eventIdValue: string, claimToken: string | undefined, setSql: string, values: unknown[]): boolean {
+    const source = this.db.prepare("SELECT batch_id FROM source_references WHERE event_id=?").get(eventIdValue) as { batch_id: string } | undefined;
+    if (!source) throw new Error(`Source reference not found for ${eventIdValue}`);
+    const batchRowId = this.parseBatchRowId(source.batch_id);
+    const timestamp = now();
+    const ownership = claimToken
+      ? "claim_token=? AND lease_until > ?"
+      : "(claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)";
+    const params = claimToken
+      ? [...values, eventIdValue, batchRowId, claimToken, timestamp]
+      : [...values, eventIdValue, batchRowId, timestamp];
+    const result = this.db.prepare(`UPDATE source_references SET ${setSql}
+      WHERE event_id=? AND EXISTS (SELECT 1 FROM outbox_batches WHERE id=? AND status NOT IN ('synced','corrected') AND ${ownership})`).run(...params);
+    return result.changes === 1;
+  }
 
   private contextFromRow(row: ContextRow): ProjectContext {
     return { id: `project_${row.id}`, canonicalCwd: row.canonical_cwd, cwd: row.canonical_cwd, planeBaseUrl: row.plane_base_url, workspaceSlug: row.workspace_slug, planeProjectId: row.plane_project_id, planeProjectName: row.plane_project_name ?? undefined, autoCaptureEnabled: Boolean(row.auto_capture_enabled), createdAt: row.created_at, updatedAt: row.updated_at };

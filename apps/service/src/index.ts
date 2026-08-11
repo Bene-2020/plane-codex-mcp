@@ -6,17 +6,34 @@ import { Storage } from "@ambient/storage";
 
 export class OutboxWorker {
   private timer: NodeJS.Timeout | undefined;
+  private running: Promise<number> | undefined;
   constructor(private readonly storage: Storage, private readonly coordinator: EventCoordinator) {}
   async processOnce(): Promise<number> {
-    const batches = this.storage.listPendingBatches();
+    if (this.running) return this.running;
+    const run = this.runOnce();
+    let shared: Promise<number>;
+    shared = run.finally(() => {
+      if (this.running === shared) this.running = undefined;
+    });
+    this.running = shared;
+    return shared;
+  }
+  private async runOnce(): Promise<number> {
+    const batches = this.storage.claimPendingBatches();
     for (const batch of batches) {
-      try { await this.coordinator.syncBatch(batch); }
-      catch (error) { this.storage.setBatchStatus(batch.id, "failed", error instanceof Error ? error.message : String(error)); }
+      try {
+        await this.coordinator.syncBatch(batch, batch.claimToken);
+      } catch (error) {
+        this.storage.setBatchStatus(batch.id, "failed", error instanceof Error ? error.message : String(error), batch.claimToken);
+      }
     }
     return batches.length;
   }
-  start(): void { this.timer = setInterval(() => { void this.processOnce(); }, 5000); }
-  stop(): void { if (this.timer) clearInterval(this.timer); }
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => { void this.processOnce().catch(() => undefined); }, 5000);
+  }
+  stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
 }
 
 function jsonError(error: unknown): { error: string } { return { error: error instanceof Error ? error.message : String(error) }; }
@@ -45,7 +62,7 @@ export function createService(args: { storage?: Storage; plane?: PlaneAdapter } 
     try { const context = getContext(request.params.id); let items = storage.listAllCachedItems(context.id); if (request.query.kind) items = items.filter((item) => item.kind === request.query.kind); if (request.query.status) items = items.filter((item) => item.status === request.query.status); return items; } catch (error) { return reply.code(404).send(jsonError(error)); }
   });
   app.get<{ Params: { id: string } }>("/api/projects/:id/failures", async (request, reply) => { try { return storage.listFailedBatches(getContext(request.params.id).id); } catch (error) { return reply.code(404).send(jsonError(error)); } });
-  app.post<{ Params: { id: string; batchId: string } }>("/api/projects/:id/retry/:batchId", async (request, reply) => { try { getContext(request.params.id); storage.retryBatch(request.params.batchId); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
+  app.post<{ Params: { id: string; batchId: string } }>("/api/projects/:id/retry/:batchId", async (request, reply) => { try { getContext(request.params.id); storage.retryBatch(request.params.batchId, request.params.id); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.patch<{ Params: { id: string }; Body: { enabled: boolean } }>("/api/projects/:id/auto-capture", async (request, reply) => { try { return storage.setAutoCapture(request.params.id, request.body.enabled); } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.patch<{ Params: { itemId: string }; Body: UpdateItemInput }>("/api/items/:itemId", async (request, reply) => { try { return await coordinator.editItem(contextForItem(request.params.itemId), request.params.itemId, request.body); } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.post<{ Params: { itemId: string; targetId: string } }>("/api/items/:itemId/merge/:targetId", async (request, reply) => { try { await coordinator.mergeItems(contextForItem(request.params.itemId), request.params.itemId, request.params.targetId); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });

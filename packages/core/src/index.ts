@@ -55,6 +55,7 @@ export interface PlaneItem {
   identifier: string;
   title: string;
   description?: string;
+  parentId?: string;
   stateId?: string;
   stateName?: string;
   status?: LifecycleState;
@@ -67,6 +68,7 @@ export interface PlaneItem {
   archived?: boolean;
 }
 export interface PlaneActivity { id: string; itemId: string; body: string; createdAt: string; sourceEventId?: string; }
+export type ProjectionStatus = "pending" | "failed" | "completed";
 export interface SourceReference {
   id: number;
   batchId: string;
@@ -79,6 +81,10 @@ export interface SourceReference {
   sourceExcerpt: string;
   observedAt: string;
   createdAt: string;
+  projectionStatus: ProjectionStatus;
+  projectionAttempts: number;
+  projectionError: string | null;
+  projectedAt: string | null;
 }
 export type FieldName = "title" | "description" | "kind" | "status" | "dueDate" | "assignee" | "priority";
 export type FieldOwner = "system" | "user";
@@ -143,4 +149,16 @@ export function buildAdditionalContext(args: {
   return lines.join("\n").slice(0, 6000);
 }
 
-export interface BatchRecord { rowId: number; id: string; projectContextId: string; sessionId: string; turnId: string; events: SourceEvent[]; status: SyncStatus; attempts: number; lastError: string | null; }
+export interface BatchRecord {
+  rowId: number;
+  id: string;
+  projectContextId: string;
+  sessionId: string;
+  turnId: string;
+  events: SourceEvent[];
+  status: SyncStatus;
+  attempts: number;
+  lastError: string | null;
+  claimToken?: string;
+  leaseUntil?: string | null;
+}
