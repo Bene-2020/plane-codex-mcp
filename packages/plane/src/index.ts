@@ -183,17 +183,19 @@ export class FakePlaneAdapter implements PlaneAdapter {
   private counter = 0;
   fail = false;
   failOnce: FakePlaneFailure | null = null;
+  delayMs = 0;
+  delayOperation: FakePlaneOperation | null = null;
   calls: string[] = [];
   injectFailure(failure: FakePlaneFailure): void { this.failOnce = failure; }
   async listProjects(): Promise<PlaneProject[]> { this.calls.push("listProjects"); this.ensure(); return [...this.projects]; }
   async listItems(context: ProjectContext): Promise<PlaneItem[]> {
     const call = this.nextCall("listItems");
-    this.calls.push("listItems"); this.ensure(); this.failIfRequested("listItems", call);
+    this.calls.push("listItems"); this.ensure(); await this.delay("listItems"); this.failIfRequested("listItems", call);
     return [...this.items.values()].filter((item) => item.projectId === context.planeProjectId && !item.archived).map((item) => ({ ...item }));
   }
   async createItem(context: ProjectContext, input: CreateItemInput): Promise<PlaneItem> {
     const call = this.nextCall("createItem");
-    this.ensure();
+    this.ensure(); await this.delay("createItem");
     const existingId = [...this.itemSources.entries()].find(([itemId, source]) => source === input.sourceEventId && this.items.get(itemId)?.projectId === context.planeProjectId)?.[0];
     if (existingId) { this.calls.push(`create-existing:${existingId}`); return { ...this.items.get(existingId)! }; }
     this.failIfRequested("createItem", call, input.sourceEventId);
@@ -206,7 +208,7 @@ export class FakePlaneAdapter implements PlaneAdapter {
   }
   async updateItem(_context: ProjectContext, itemId: string, input: UpdateItemInput): Promise<PlaneItem> {
     const call = this.nextCall("updateItem");
-    this.ensure(); const item = this.items.get(itemId); if (!item) throw new Error("Fake Plane item not found");
+    this.ensure(); await this.delay("updateItem"); const item = this.items.get(itemId); if (!item) throw new Error("Fake Plane item not found");
     this.failIfRequested("updateItem", call);
     Object.assign(item, input, { updatedAt: new Date().toISOString() }); this.calls.push(`update:${itemId}`);
     this.failIfRequested("updateItem", call, undefined, true);
@@ -214,7 +216,7 @@ export class FakePlaneAdapter implements PlaneAdapter {
   }
   async addActivity(_context: ProjectContext, itemId: string, body: string, sourceEventId: string): Promise<PlaneActivity> {
     const call = this.nextCall("addActivity");
-    this.ensure();
+    this.ensure(); await this.delay("addActivity");
     const existing = this.getActivities(itemId).find((activity) => activity.sourceEventId === sourceEventId);
     if (existing) { this.calls.push(`activity-existing:${itemId}`); return { ...existing }; }
     this.failIfRequested("addActivity", call, sourceEventId);
@@ -227,6 +229,9 @@ export class FakePlaneAdapter implements PlaneAdapter {
   async archiveItem(_context: ProjectContext, itemId: string): Promise<void> { await this.updateItem(_context, itemId, { status: "dropped" }); this.items.get(itemId)!.archived = true; }
   getActivities(itemId: string): PlaneActivity[] { return this.activities.get(itemId) ?? []; }
   private nextCall(operation: FakePlaneOperation): number { const call = (this.operationCalls.get(operation) ?? 0) + 1; this.operationCalls.set(operation, call); return call; }
+  private async delay(operation: FakePlaneOperation): Promise<void> {
+    if (this.delayMs > 0 && (!this.delayOperation || this.delayOperation === operation)) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+  }
   private failIfRequested(operation: FakePlaneOperation, call: number, sourceEventId?: string, afterWrite = false): void {
     const failure = this.failOnce;
     if (!failure || failure.operation !== operation || failure.call !== undefined && failure.call !== call || failure.sourceEventId !== undefined && failure.sourceEventId !== sourceEventId || Boolean(failure.afterWrite) !== afterWrite) return;
@@ -239,7 +244,8 @@ export class FakePlaneAdapter implements PlaneAdapter {
 export class EventCoordinator {
   constructor(private readonly storage: Storage, private readonly plane: PlaneAdapter) {}
 
-  async syncBatch(batch: BatchRecord, claimToken?: string): Promise<void> {
+  async syncBatch(batch: BatchRecord, claimToken?: string, assertClaim?: () => void): Promise<void> {
+    assertClaim?.();
     const context = this.storage.getContext(batch.projectContextId);
     if (!context) throw new Error("Project context not found for batch");
     const pendingEvents: Array<{ event: SourceEvent; eventId: string }> = [];
@@ -249,10 +255,13 @@ export class EventCoordinator {
       if (reference.projectionStatus !== "completed") pendingEvents.push({ event, eventId: currentEventId });
     }
     if (!pendingEvents.length) {
+      assertClaim?.();
       if (!this.storage.areBatchEventsComplete(batch.id, batch.events.length) || !this.storage.setBatchStatus(batch.id, "synced", undefined, claimToken)) throw new Error("Outbox batch claim lost");
       return;
     }
+    assertClaim?.();
     const remoteItems = await this.plane.listItems(context);
+    assertClaim?.();
     const cachedItems = this.storage.listCachedItems(context.id);
     const itemList = remoteItems.map((remote) => {
       const cached = cachedItems.find((item) => item.id === remote.id);
@@ -261,26 +270,32 @@ export class EventCoordinator {
     itemList.push(...cachedItems.filter((cached) => !remoteItems.some((remote) => remote.id === cached.id)));
     for (const { event, eventId: currentEventId } of pendingEvents) {
       try {
+        assertClaim?.();
         this.storage.markEventAttempt(currentEventId, claimToken);
-        const planeItemId = await this.projectEvent(context, batch, currentEventId, event, itemList, claimToken);
+        const planeItemId = await this.projectEvent(context, batch, currentEventId, event, itemList, claimToken, assertClaim);
+        assertClaim?.();
         this.storage.markEventCompleted(currentEventId, planeItemId, claimToken);
       } catch (error) {
         this.storage.markEventFailed(currentEventId, error instanceof Error ? error.message : String(error), claimToken);
         throw error;
       }
     }
+    assertClaim?.();
     if (!this.storage.areBatchEventsComplete(batch.id, batch.events.length) || !this.storage.setBatchStatus(batch.id, "synced", undefined, claimToken)) throw new Error("Outbox batch claim lost");
   }
 
-  private async projectEvent(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[], claimToken?: string): Promise<string | null> {
+  private async projectEvent(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[], claimToken?: string, assertClaim?: () => void): Promise<string | null> {
+    assertClaim?.();
     const existing = this.resolveItem(currentEventId, event, items);
     if (event.type === "progress" || event.type === "decision") {
       if (existing) {
+        assertClaim?.();
         await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
+        assertClaim?.();
         this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
         return existing.id;
       } else if (event.type === "decision") {
-        const created = await this.create(context, batch, event, currentEventId, "decision");
+        const created = await this.create(context, batch, event, currentEventId, "decision", assertClaim);
         this.storage.updateSourcePlaneItem(currentEventId, created.id, claimToken);
         items.push(created);
         return created.id;
@@ -291,16 +306,19 @@ export class EventCoordinator {
       if (existing) {
         const owned = this.storage.getFieldOwnership(existing.id, "status");
         if (event.userDirected || (existing.isSystemCreated && (!owned || owned.owner === "system"))) {
+          assertClaim?.();
           const updated = await this.plane.updateItem(context, existing.id, { status: "done" });
+          assertClaim?.();
           this.storage.cacheItem(context.id, updated, existing.isSystemCreated);
         }
+        assertClaim?.();
         this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
         return existing.id;
       }
       return null;
     }
     if (event.type === "plan") {
-      return this.projectPlan(context, batch, currentEventId, event, items, existing, claimToken);
+      return this.projectPlan(context, batch, currentEventId, event, items, existing, claimToken, assertClaim);
     }
     if (existing) {
       const update: UpdateItemInput = {};
@@ -308,36 +326,45 @@ export class EventCoordinator {
         if (this.storage.getFieldOwnership(existing.id, "description")?.owner !== "user") update.description = appendDescription(existing.description, event.summary);
         if (event.dueDate && this.storage.getFieldOwnership(existing.id, "dueDate")?.owner !== "user") update.dueDate = event.dueDate;
         if (Object.keys(update).length) {
+          assertClaim?.();
           const updated = await this.plane.updateItem(context, existing.id, update);
+          assertClaim?.();
           this.storage.cacheItem(context.id, updated, existing.isSystemCreated);
         }
       }
+      assertClaim?.();
       await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
+      assertClaim?.();
       this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
       return existing.id;
     }
     const kind = recordKindForEvent(event);
     if (!kind) return null;
-    const created = await this.create(context, batch, event, currentEventId, kind);
+    const created = await this.create(context, batch, event, currentEventId, kind, assertClaim);
     this.storage.updateSourcePlaneItem(currentEventId, created.id, claimToken);
     items.push(created);
     return created.id;
   }
 
-  private async projectPlan(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[], existing: PlaneItem | null, claimToken?: string): Promise<string> {
-    const parent = existing ?? await this.create(context, batch, event, currentEventId, "task");
+  private async projectPlan(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[], existing: PlaneItem | null, claimToken?: string, assertClaim?: () => void): Promise<string> {
+    const parent = existing ?? await this.create(context, batch, event, currentEventId, "task", assertClaim);
+    assertClaim?.();
     if (!items.some((item) => item.id === parent.id)) items.push(parent);
     this.storage.updateSourcePlaneItem(currentEventId, parent.id, claimToken);
     for (const [index, step] of (event.steps ?? []).entries()) {
+      assertClaim?.();
       const child = await this.plane.createItem(context, { title: step.title, description: step.summary ?? "执行步骤", kind: "task", status: "planned", parentId: parent.id, sourceEventId: stepSourceEventId(currentEventId, index) });
+      assertClaim?.();
       this.storage.cacheItem(context.id, child, true);
       if (!items.some((item) => item.id === child.id)) items.push(child);
     }
     return parent.id;
   }
 
-  private async create(context: ProjectContext, batch: BatchRecord, event: SourceEvent, currentEventId: string, kind: RecordKind): Promise<PlaneItem> {
+  private async create(context: ProjectContext, batch: BatchRecord, event: SourceEvent, currentEventId: string, kind: RecordKind, assertClaim?: () => void): Promise<PlaneItem> {
+    assertClaim?.();
     const created = await this.plane.createItem(context, { title: event.title, description: `${event.summary}${sourceFooter(currentEventId, batch.sessionId, batch.turnId)}`, kind, status: lifecycleForEvent(event), dueDate: event.dueDate ?? null, sourceEventId: currentEventId });
+    assertClaim?.();
     this.storage.cacheItem(context.id, created, true);
     for (const field of ["title", "description", "kind", "status", "dueDate"] as const) {
       const value = field === "title" ? created.title : field === "description" ? created.description ?? null : field === "kind" ? created.kind ?? null : field === "status" ? created.status ?? null : created.dueDate ?? null;

@@ -21359,6 +21359,8 @@ var FakePlaneAdapter = class {
   counter = 0;
   fail = false;
   failOnce = null;
+  delayMs = 0;
+  delayOperation = null;
   calls = [];
   injectFailure(failure) {
     this.failOnce = failure;
@@ -21372,12 +21374,14 @@ var FakePlaneAdapter = class {
     const call = this.nextCall("listItems");
     this.calls.push("listItems");
     this.ensure();
+    await this.delay("listItems");
     this.failIfRequested("listItems", call);
     return [...this.items.values()].filter((item) => item.projectId === context.planeProjectId && !item.archived).map((item) => ({ ...item }));
   }
   async createItem(context, input) {
     const call = this.nextCall("createItem");
     this.ensure();
+    await this.delay("createItem");
     const existingId = [...this.itemSources.entries()].find(([itemId, source]) => source === input.sourceEventId && this.items.get(itemId)?.projectId === context.planeProjectId)?.[0];
     if (existingId) {
       this.calls.push(`create-existing:${existingId}`);
@@ -21396,6 +21400,7 @@ ${sourceMarker(input.sourceEventId)}`, kind: input.kind, status: input.status, d
   async updateItem(_context, itemId, input) {
     const call = this.nextCall("updateItem");
     this.ensure();
+    await this.delay("updateItem");
     const item = this.items.get(itemId);
     if (!item)
       throw new Error("Fake Plane item not found");
@@ -21408,6 +21413,7 @@ ${sourceMarker(input.sourceEventId)}`, kind: input.kind, status: input.status, d
   async addActivity(_context, itemId, body, sourceEventId) {
     const call = this.nextCall("addActivity");
     this.ensure();
+    await this.delay("addActivity");
     const existing = this.getActivities(itemId).find((activity2) => activity2.sourceEventId === sourceEventId);
     if (existing) {
       this.calls.push(`activity-existing:${itemId}`);
@@ -21437,6 +21443,10 @@ ${sourceMarker(input.sourceEventId)}`, kind: input.kind, status: input.status, d
     const call = (this.operationCalls.get(operation) ?? 0) + 1;
     this.operationCalls.set(operation, call);
     return call;
+  }
+  async delay(operation) {
+    if (this.delayMs > 0 && (!this.delayOperation || this.delayOperation === operation))
+      await new Promise((resolve) => setTimeout(resolve, this.delayMs));
   }
   failIfRequested(operation, call, sourceEventId, afterWrite = false) {
     const failure = this.failOnce;
@@ -21641,7 +21651,10 @@ var Storage = class {
       ORDER BY id LIMIT ?`).all(timestamp, timestamp, limit);
     return rows.map((row) => this.batchFromRow(row));
   }
-  claimPendingBatches(limit = 20, leaseMs = this.leaseMs) {
+  getLeaseMs() {
+    return this.leaseMs;
+  }
+  claimPendingBatches(limit = 1, leaseMs = this.leaseMs) {
     const timestamp = now();
     const transaction = this.db.transaction(() => {
       const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error, next_attempt_at, synced_at, claim_version, claim_token, lease_until
@@ -21667,6 +21680,15 @@ var Storage = class {
       return claimed;
     });
     return transaction.immediate();
+  }
+  renewBatchLease(batchIdValue, claimToken, leaseMs = this.leaseMs) {
+    const id = this.parseBatchRowId(batchIdValue);
+    const timestamp = now();
+    const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
+    const result = this.db.prepare(`UPDATE outbox_batches
+      SET lease_until=?
+      WHERE id=? AND claim_token=? AND lease_until > ? AND status NOT IN ('synced','corrected')`).run(leaseUntil, id, claimToken, timestamp);
+    return result.changes === 1;
   }
   setBatchStatus(batchIdValue, status, error2, claimToken) {
     const id = this.parseBatchRowId(batchIdValue);
@@ -21762,16 +21784,20 @@ var Storage = class {
   }
   retryBatch(id, projectContextId) {
     const rowId = this.parseBatchRowId(id);
-    const row = this.db.prepare("SELECT project_context_id, status FROM outbox_batches WHERE id=?").get(rowId);
+    const timestamp = now();
+    const row = this.db.prepare("SELECT project_context_id, status, claim_token, lease_until FROM outbox_batches WHERE id=?").get(rowId);
     if (!row)
       throw new Error("Outbox batch not found");
     if (projectContextId && row.project_context_id !== projectContextId)
       throw new Error("Outbox batch does not belong to this project context");
     if (row.status === "synced" || row.status === "corrected")
       throw new Error("Only unsynced batches can be retried");
-    const result = this.db.prepare("UPDATE outbox_batches SET status='retrying', next_attempt_at=?, last_error=NULL WHERE id=? AND status NOT IN ('synced','corrected')").run(now(), rowId);
+    const result = this.db.prepare(`UPDATE outbox_batches
+      SET status='retrying', next_attempt_at=?, last_error=NULL
+      WHERE id=? AND status NOT IN ('synced','corrected')
+        AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)`).run(timestamp, rowId, timestamp);
     if (result.changes !== 1)
-      throw new Error("Only unsynced batches can be retried");
+      throw new Error(row.claim_token && row.lease_until && row.lease_until > timestamp ? "Outbox batch is currently claimed" : "Only unsynced batches can be retried");
   }
   parseBatchRowId(value) {
     const match = /^batch_([0-9]+)$/.exec(value);

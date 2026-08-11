@@ -19,15 +19,27 @@ export class OutboxWorker {
     return shared;
   }
   private async runOnce(): Promise<number> {
-    const batches = this.storage.claimPendingBatches();
-    for (const batch of batches) {
+    const batch = this.storage.claimPendingBatches(1)[0];
+    if (!batch) return 0;
+    const claimToken = batch.claimToken!;
+    let claimLost = false;
+    const heartbeat = setInterval(() => {
+      if (claimLost) return;
       try {
-        await this.coordinator.syncBatch(batch, batch.claimToken);
-      } catch (error) {
-        this.storage.setBatchStatus(batch.id, "failed", error instanceof Error ? error.message : String(error), batch.claimToken);
+        if (!this.storage.renewBatchLease(batch.id, claimToken)) claimLost = true;
+      } catch {
+        claimLost = true;
       }
+    }, Math.max(1, Math.floor(this.storage.getLeaseMs() / 3)));
+    const assertClaim = (): void => { if (claimLost) throw new Error("Outbox batch claim lost"); };
+    try {
+      await this.coordinator.syncBatch(batch, claimToken, assertClaim);
+    } catch (error) {
+      this.storage.setBatchStatus(batch.id, "failed", error instanceof Error ? error.message : String(error), claimToken);
+    } finally {
+      clearInterval(heartbeat);
     }
-    return batches.length;
+    return 1;
   }
   start(): void {
     if (this.timer) return;

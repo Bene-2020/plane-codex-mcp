@@ -4281,7 +4281,10 @@ var Storage = class {
       ORDER BY id LIMIT ?`).all(timestamp, timestamp, limit);
     return rows.map((row) => this.batchFromRow(row));
   }
-  claimPendingBatches(limit = 20, leaseMs = this.leaseMs) {
+  getLeaseMs() {
+    return this.leaseMs;
+  }
+  claimPendingBatches(limit = 1, leaseMs = this.leaseMs) {
     const timestamp = now();
     const transaction = this.db.transaction(() => {
       const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error, next_attempt_at, synced_at, claim_version, claim_token, lease_until
@@ -4307,6 +4310,15 @@ var Storage = class {
       return claimed;
     });
     return transaction.immediate();
+  }
+  renewBatchLease(batchIdValue, claimToken, leaseMs = this.leaseMs) {
+    const id = this.parseBatchRowId(batchIdValue);
+    const timestamp = now();
+    const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
+    const result = this.db.prepare(`UPDATE outbox_batches
+      SET lease_until=?
+      WHERE id=? AND claim_token=? AND lease_until > ? AND status NOT IN ('synced','corrected')`).run(leaseUntil, id, claimToken, timestamp);
+    return result.changes === 1;
   }
   setBatchStatus(batchIdValue, status, error, claimToken) {
     const id = this.parseBatchRowId(batchIdValue);
@@ -4402,16 +4414,20 @@ var Storage = class {
   }
   retryBatch(id, projectContextId) {
     const rowId = this.parseBatchRowId(id);
-    const row = this.db.prepare("SELECT project_context_id, status FROM outbox_batches WHERE id=?").get(rowId);
+    const timestamp = now();
+    const row = this.db.prepare("SELECT project_context_id, status, claim_token, lease_until FROM outbox_batches WHERE id=?").get(rowId);
     if (!row)
       throw new Error("Outbox batch not found");
     if (projectContextId && row.project_context_id !== projectContextId)
       throw new Error("Outbox batch does not belong to this project context");
     if (row.status === "synced" || row.status === "corrected")
       throw new Error("Only unsynced batches can be retried");
-    const result = this.db.prepare("UPDATE outbox_batches SET status='retrying', next_attempt_at=?, last_error=NULL WHERE id=? AND status NOT IN ('synced','corrected')").run(now(), rowId);
+    const result = this.db.prepare(`UPDATE outbox_batches
+      SET status='retrying', next_attempt_at=?, last_error=NULL
+      WHERE id=? AND status NOT IN ('synced','corrected')
+        AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)`).run(timestamp, rowId, timestamp);
     if (result.changes !== 1)
-      throw new Error("Only unsynced batches can be retried");
+      throw new Error(row.claim_token && row.lease_until && row.lease_until > timestamp ? "Outbox batch is currently claimed" : "Only unsynced batches can be retried");
   }
   parseBatchRowId(value) {
     const match = /^batch_([0-9]+)$/.exec(value);
