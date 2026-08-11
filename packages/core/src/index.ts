@@ -1,4 +1,5 @@
 import { z } from "zod";
+export { isSessionToken, SESSION_TOKEN_LENGTH } from "./session.js";
 
 export const eventTypes = ["task", "bug", "decision", "idea", "risk", "milestone", "progress", "completed", "plan"] as const;
 export type EventType = (typeof eventTypes)[number];

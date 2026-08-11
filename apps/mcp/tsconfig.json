@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": { "composite": true, "rootDir": "src", "outDir": "dist", "declaration": true },
-  "references": [{ "path": "../../packages/core" }, { "path": "../../packages/storage" }, { "path": "../../packages/plane" }],
+  "references": [{ "path": "../../packages/core" }, { "path": "../../packages/storage" }, { "path": "../../packages/plane" }, { "path": "../service" }],
   "include": ["src/**/*.ts"]
 }

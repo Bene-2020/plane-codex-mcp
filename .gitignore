@@ -9,3 +9,6 @@ coverage/
 .DS_Store
 !plugin/runtime/
 !plugin/runtime/**
+!plugin/panel/
+!plugin/panel/dist/
+!plugin/panel/dist/**

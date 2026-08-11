@@ -304,17 +304,19 @@ Demo 面板必须展示：
 
 ## 10. Codex UI 限制
 
-理想的最终体验是项目级面板能够在 Codex 工作区旁持续显示。当前公开插件 UI 文档描述的是由 MCP 返回、显示在对话旁边的 UI，并支持内联、全屏和画中画形式；公开文档没有提供注册永久项目侧边栏的接口。
+理想的最终体验是项目级面板能够在 Codex 工作区旁持续显示。当前实现的正式入口是 MCP Apps `open_project_panel` 工具和 `ui://ambient-project/panel/v1.html` 组件资源，Panel 通过工具结果的组件私有 `_meta` 获取 localhost Service 会话。当前公开 MCP Apps/Codex 接口描述的是由 MCP 返回、显示在对话旁边的 UI，并支持内联、全屏和画中画形式；公开文档没有提供注册永久项目侧边栏的接口。
 
 因此，Demo 不依赖永久侧边栏能力。
 
 推荐的 Demo 展示方式：
 
-1. 主要验证使用与 Codex 并排打开的本地 Web 面板。
-2. 单独进行 MCP UI 宿主验收，测试内联或画中画展示。
-3. 不使用 CDP 注入。
+1. 主要验证使用 Codex MCP App 宿主加载自制 React Panel。
+2. 宿主不支持组件渲染或会话 metadata 传递时，使用 4318 本地 Web 面板降级；降级页面要求手工输入临时令牌。
+3. 不使用 CDP 注入，也不把令牌放入模型可见结果、Hook 输出或 Vite proxy。
 
 如果永久项目侧边栏成为必须满足的产品要求，后续需要在以下方案中作出选择：等待 Codex 提供正式扩展点、使用独立伴随窗口，或通过 Codex SDK/App Server 构建自有客户端。
+
+Panel 会话的具体边界和验收步骤见 [`docs/architecture/ambient-panel-session-security.md`](../architecture/ambient-panel-session-security.md)。
 
 ## 11. Demo 架构
 
@@ -531,8 +533,9 @@ Demo 在满足以下条件时视为成功：
 11. **无感边界：** 首次 Hook 信任和项目绑定可以被用户感知；后续不显示状态消息、不逐项确认、不阻塞主任务。MCP 调用仍可能出现在 Codex 可检查的活动记录中。
 12. **漏记风险：** 不强制空 MCP 调用，也不在 `Stop` 后启动第二个模型。Demo 接受可能漏记，并用真实会话捕获率判断方案是否成立。
 13. **记忆：** Demo 不实现纠错记忆或个性化记忆。
-14. **面板：** Demo 使用本地伴随 Web 面板，MCP UI 仅作为独立宿主验收实验。
-15. **周期：** 使用三个专注开发日，不在第一轮投入时间实现非公开永久侧边栏。
+14. **面板：** 正式入口是 Codex MCP App 中的自制 React Panel；4318 本地伴随页面只作为开发/宿主不支持时的降级路径。
+15. **本地会话：** Service 使用进程级 32-byte CSPRNG base64url 临时令牌保护 `/api/*`；bootstrap 只通过组件私有结果 `_meta` 传递，令牌不进入模型 content、Hook、SQLite、Plane 或日志。
+16. **周期：** 使用三个专注开发日，不使用非公开永久侧边栏注入。
 
 ## 17. 相关资料
 

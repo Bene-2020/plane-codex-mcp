@@ -3,11 +3,12 @@
 ## 本地闭环
 
 1. `pnpm install && pnpm build`。
-2. 用默认 `PLANE_MODE=fake` 启动 service 和 panel。
+2. 正式 Codex 插件不需要手工启动 Service，也不需要设置 `AMBIENT_SESSION_TOKEN`/`AMBIENT_SERVICE_BASE_URL`。每个 MCP 进程在内部生成 32-byte CSPRNG、43 位 base64url 令牌，并以动态端口 `0` 启动自己的 localhost BFF/worker；进程重启后旧令牌失效。
 3. 通过 MCP `list_projects` 查看 `Demo Project`，用户明确选择后调用 `bind_project`。
 4. 在同一 cwd 的工作回合中，由当前 Codex 判断是否产生事件并至多调用一次 `record_project_events`。
-5. service worker 每 5 秒原子 claim 一个 pending/retrying/failed 批次，并在 Plane 同步期间用 claim token heartbeat 续租；`POST /api/worker/run` 可手动触发一次，`processed` 返回本次 claim/尝试的批次数（Demo 为 `0` 或 `1`，不代表成功同步数）。
-6. 打开 `http://127.0.0.1:4318` 查看记录、来源、同步失败和字段编辑。
+5. Codex 需要展示面板时调用 `open_project_panel`，它通过官方 MCP Apps `_meta.ui.resourceUri` 加载 `ui://ambient-project/panel/v1.html`；结果 `_meta["ambient-project/bootstrap"]` 只给组件 `serviceBaseUrl`、临时令牌和 `projectContextId`。模型可见 content 不包含令牌。
+6. service worker 每 5 秒原子 claim 一个 pending/retrying/failed 批次，并在 Plane 同步期间用 claim token heartbeat 续租；`POST /api/worker/run` 可手动触发一次，processed 返回本次 claim/尝试的批次数（Demo 为 `0` 或 `1`，不代表成功同步数）。该 POST 也需要会话头。
+7. Codex App 宿主不支持组件渲染时，才运行独立开发降级：先显式设置 `AMBIENT_SESSION_TOKEN`，再运行 `pnpm dev:service` 和 `pnpm dev:panel`，打开 `http://127.0.0.1:4318` 手工输入 cwd/令牌。Vite proxy 不会注入有效令牌。
 
 ## 关键故障路径
 
@@ -20,6 +21,8 @@
 - 用户修改字段：面板编辑将字段标记为 `user`；自动协调器只追加活动或更新仍由系统拥有的字段。
 - 面板删除/归档/合并：仅用户主动点击可触发，服务端限制自动生成项；自动 MCP 没有这些高风险能力。
 - 手动 retry 仅接受 URL 项目上下文所属且尚未 `synced` 的批次。
+- 缺少或错误的 `X-Ambient-Session-Token` 统一返回 401，且写请求在 Fastify `onRequest` 鉴权前不会触及存储；401 后 Panel 清除内存会话，不会无限重试。
+- 允许的 CORS 来源只有 MCP App 沙盒的 `null`、`http://127.0.0.1:4318` 和 `http://localhost:4318`；CORS 不是认证替代。
 
 ## 真实会话评估
 
@@ -30,4 +33,4 @@
 - `falseRecord`
 - 漏记、重复、错误关联或字段覆盖说明
 
-评估脚本不替代人工标注，只计算已标注数据的捕获率、误记录率和重复记录数。MCP UI host experiment 只需记录目标 Codex 构建是否能读取 `ui://ambient-project/summary/v1.html`；不把该实验作为本地伴随面板的依赖。
+评估脚本不替代人工标注，只计算已标注数据的捕获率、误记录率和重复记录数。MCP App 验收需记录目标 Codex 构建是否能调用 `open_project_panel`、读取 `ui://ambient-project/panel/v1.html` 并把组件私有 `_meta` 传给 UI；公开接口没有永久固定项目侧边栏注册能力，因此宿主未渲染时继续使用 4318 降级页面，不把它作为项目数据链路依赖。

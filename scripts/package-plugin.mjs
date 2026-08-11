@@ -9,8 +9,10 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const pluginRoot = join(root, "plugin");
 const runtimeRoot = join(pluginRoot, "runtime");
 const runtimeNodeModules = join(runtimeRoot, "node_modules");
+const panelRoot = join(pluginRoot, "panel");
 
 await rm(runtimeRoot, { recursive: true, force: true });
+await rm(panelRoot, { recursive: true, force: true });
 await mkdir(runtimeRoot, { recursive: true });
 await writeFile(join(runtimeRoot, "package.json"), `${JSON.stringify({ private: true, type: "module" }, null, 2)}\n`);
 
@@ -19,15 +21,16 @@ const bundleOptions = {
   format: "esm",
   platform: "node",
   target: "node22",
-  external: ["better-sqlite3", "@makeplane/plane-node-sdk"],
+  external: ["better-sqlite3", "@makeplane/plane-node-sdk", "fastify", "@fastify/cors"],
   legalComments: "none",
   sourcemap: false,
 };
 
 await Promise.all([
-  build({ ...bundleOptions, entryPoints: [join(root, "apps/mcp/dist/index.js")], outfile: join(runtimeRoot, "mcp/index.js") }),
+  build({ ...bundleOptions, entryPoints: [join(root, "apps/mcp/dist/main.js")], outfile: join(runtimeRoot, "mcp/index.js") }),
   build({ ...bundleOptions, entryPoints: [join(root, "apps/hook-adapter/dist/index.js")], outfile: join(runtimeRoot, "hook-adapter/index.js") }),
 ]);
+await cp(join(root, "apps/panel/dist"), join(panelRoot, "dist"), { recursive: true });
 
 const storageRequire = createRequire(join(root, "packages/storage/package.json"));
 const sqlitePackageJson = storageRequire.resolve("better-sqlite3/package.json");
@@ -77,6 +80,7 @@ for (const packageName of ["bindings", "file-uri-to-path"]) {
 }
 
 const planeRequire = createRequire(join(root, "packages/plane/package.json"));
+const serviceRequire = createRequire(join(root, "apps/service/package.json"));
 const copiedRuntimePackages = new Set();
 function findPackageJson(requesterRequire, packageName) {
   for (const searchPath of requesterRequire.resolve.paths(packageName) ?? []) {
@@ -111,6 +115,8 @@ async function copyRuntimePackage(packageName, requesterRequire) {
 }
 
 await copyRuntimePackage("@makeplane/plane-node-sdk", planeRequire);
+await copyRuntimePackage("fastify", serviceRequire);
+await copyRuntimePackage("@fastify/cors", serviceRequire);
 await normalizeRuntimeText(runtimeRoot);
 
 const manifest = JSON.parse(await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));

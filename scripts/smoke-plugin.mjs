@@ -98,8 +98,12 @@ async function smokeMcp(entrypoint, smokeRoot) {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
     const toolsList = await request(2, "tools/list", {});
     const toolNames = toolsList.result?.tools?.map((tool) => tool.name) ?? [];
-    const expectedTools = ["list_projects", "get_binding", "bind_project", "change_binding", "record_project_events"];
+    const expectedTools = ["list_projects", "get_binding", "open_project_panel", "bind_project", "change_binding", "record_project_events"];
     if (toolsList.error || JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) throw new Error(`MCP tools/list failed: ${JSON.stringify(toolsList)}`);
+    const resourcesList = await request(3, "resources/list", {});
+    if (resourcesList.error || !resourcesList.result?.resources?.some((resource) => resource.uri === "ui://ambient-project/panel/v1.html")) throw new Error(`MCP resources/list failed: ${JSON.stringify(resourcesList)}`);
+    const resourceRead = await request(4, "resources/read", { uri: "ui://ambient-project/panel/v1.html" });
+    if (resourceRead.error || !resourceRead.result?.contents?.[0]?.text?.includes("AMBIENT PROJECT LAYER")) throw new Error("Packaged MCP App resource did not load");
   } finally {
     closing = true;
     lines.close();
@@ -115,12 +119,15 @@ try {
   const manifest = JSON.parse(await readFile(join(isolatedPlugin, ".codex-plugin", "plugin.json"), "utf8"));
   if (Object.hasOwn(manifest, "hooks")) throw new Error("Manifest must rely on default hooks/hooks.json discovery");
   const mcpConfig = JSON.parse(await readFile(join(isolatedPlugin, ".mcp.json"), "utf8"));
+  const mcpEnv = mcpConfig.mcpServers["ambient-project"].env ?? {};
+  if (Object.hasOwn(mcpEnv, "AMBIENT_SERVICE_BASE_URL") || Object.hasOwn(mcpEnv, "AMBIENT_SESSION_TOKEN")) throw new Error("Formal MCP entrypoint must own its dynamic service session");
   const mcpArg = mcpConfig.mcpServers["ambient-project"].args[0];
   if (mcpArg.includes("..")) throw new Error(`MCP command escapes plugin root: ${mcpArg}`);
   const mcpEntrypoint = assertInside(isolatedPlugin, mcpArg.replace("${PLUGIN_ROOT}", isolatedPlugin));
   const hookEntrypoint = assertInside(isolatedPlugin, join(isolatedPlugin, "runtime", "hook-adapter", "index.js"));
   await stat(mcpEntrypoint);
   await stat(hookEntrypoint);
+  await stat(join(isolatedPlugin, "panel", "dist", "index.html"));
   await stat(join(isolatedPlugin, "runtime", "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node"));
 
   const hooksConfig = JSON.parse(await readFile(join(isolatedPlugin, "hooks", "hooks.json"), "utf8"));
@@ -136,7 +143,7 @@ try {
     if (["SessionStart", "UserPromptSubmit"].includes(eventName) && payload.hookSpecificOutput?.hookEventName !== eventName) throw new Error(`${eventName} fixture did not return hookSpecificOutput`);
   }
   await smokeMcp(mcpEntrypoint, smokeRoot);
-  console.log("Plugin isolation smoke passed: plugin-only copy, MCP initialize/tools/list, and five Hook fixtures.");
+  console.log("Plugin isolation smoke passed: plugin-only copy, MCP initialize/tools/resources, packaged App resource, and five Hook fixtures.");
 } finally {
   await rm(smokeRoot, { recursive: true, force: true });
 }

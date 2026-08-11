@@ -1,12 +1,48 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import { eventBatchSchema } from "@ambient/core";
+import { eventBatchSchema, isSessionToken } from "@ambient/core";
 import { createPlaneAdapter } from "@ambient/plane";
 import type { PlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
+import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { startService } from "@ambient/service";
+import type { RunningService } from "@ambient/service";
 
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
+export const PANEL_RESOURCE_URI = "ui://ambient-project/panel/v1.html";
+export const PANEL_BOOTSTRAP_META_KEY = "ambient-project/bootstrap";
+
+export interface PanelBootstrapMetadata {
+  serviceBaseUrl: string;
+  sessionToken: string;
+  projectContextId: string;
+}
+
+export interface PanelSession {
+  serviceBaseUrl: string;
+  sessionToken: string;
+}
+
+export function panelResourcePath(): string {
+  return join(fileURLToPath(new URL(".", import.meta.url)), "../../panel/dist/index.html");
+}
+
+export function panelBootstrapMetadata(projectContextId: string, serviceBaseUrl: string, sessionToken: string): PanelBootstrapMetadata {
+  if (!isSessionToken(sessionToken)) throw new Error("Panel session token is invalid");
+  return { serviceBaseUrl, sessionToken, projectContextId };
+}
+
+function normalizeServiceBaseUrl(value: string): string {
+  const parsed = new URL(value);
+  if (!/^https?:$/.test(parsed.protocol) || !["127.0.0.1", "localhost"].includes(parsed.hostname) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("Panel service URL must point to localhost");
+  return value.replace(/\/+$/, "");
+}
+
 const bindingSchema = z.object({
   cwd: z.string().trim().min(1),
   planeBaseUrl: z.string().url().optional(),
@@ -17,20 +53,37 @@ const bindingSchema = z.object({
 });
 const bindInput = (input: z.infer<typeof bindingSchema>) => ({ ...input, planeBaseUrl: input.planeBaseUrl ?? process.env.PLANE_BASE_URL ?? "https://api.plane.so" });
 
-export interface McpServerDependencies { storage?: Storage; plane?: PlaneAdapter; }
+export interface McpServerDependencies { storage?: Storage; plane?: PlaneAdapter; panelSession?: PanelSession; }
 
 export function createMcpServer(dependencies: McpServerDependencies = {}): { server: McpServer; storage: Storage } {
   const storage = dependencies.storage ?? new Storage();
   const plane = dependencies.plane ?? createPlaneAdapter();
+  const panelSession = dependencies.panelSession ? {
+    serviceBaseUrl: normalizeServiceBaseUrl(dependencies.panelSession.serviceBaseUrl),
+    sessionToken: dependencies.panelSession.sessionToken,
+  } : undefined;
+  if (panelSession && !isSessionToken(panelSession.sessionToken)) throw new Error("Panel session token is invalid");
   const server = new McpServer({
     name: "ambient-project",
     version: "0.1.0",
   }, {
     instructions: "Maintain project context quietly. Use list_projects only to help a user choose a project, bind only after explicit choice, and record meaningful events in one non-empty batch. Do not expose Plane CRUD, delete items, reassign people, or use a second semantic model.",
   });
+  const panelConnectDomains = panelSession ? [new URL(panelSession.serviceBaseUrl).origin] : [];
 
-  // Read-only host experiment. The local companion panel remains the Demo's primary UI.
-  server.registerResource("project-panel-host-check", "ui://ambient-project/summary/v1.html", { description: "Read-only host-rendering experiment for the ambient project panel.", mimeType: "text/html;profile=mcp-app" }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "text/html;profile=mcp-app", text: "<!doctype html><meta charset=\"utf-8\"><style>body{font:14px system-ui;padding:20px;color:#332b25}code{color:#9a5c35}</style><h3>Ambient project panel</h3><p>This is a read-only MCP UI host experiment. Use the local companion panel for editing.</p><code>ui://ambient-project/summary/v1.html</code>" }] }));
+  registerAppResource(server, "ambient-project-panel", PANEL_RESOURCE_URI, {
+    description: "Ambient project records panel.",
+    mimeType: RESOURCE_MIME_TYPE,
+    _meta: { ui: { csp: { connectDomains: panelConnectDomains } } },
+  }, async (uri) => ({
+    contents: [{
+      uri: uri.href,
+      mimeType: RESOURCE_MIME_TYPE,
+      text: await readFile(panelResourcePath(), "utf8"),
+      _meta: { ui: { csp: { connectDomains: panelConnectDomains } } },
+    }],
+  }));
+  server.registerResource("project-panel-host-check", "ui://ambient-project/summary/v1.html", { description: "Legacy read-only host check; use open_project_panel for the interactive Panel.", mimeType: RESOURCE_MIME_TYPE }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: RESOURCE_MIME_TYPE, text: "<!doctype html><meta charset=\"utf-8\"><style>body{font:14px system-ui;padding:20px;color:#332b25}code{color:#9a5c35}</style><h3>Ambient project panel</h3><p>Use open_project_panel for the interactive Codex MCP App.</p><code>ui://ambient-project/panel/v1.html</code>" }] }));
 
   server.registerTool("list_projects", {
     title: "List projects",
@@ -45,6 +98,28 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
     inputSchema: z.object({ cwd: z.string().min(1) }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async ({ cwd }) => text(storage.getContextByCwd(cwd)));
+
+  registerAppTool(server, "open_project_panel", {
+    title: "Open project panel",
+    description: "Open the Ambient project panel for an explicitly identified project context.",
+    inputSchema: {
+      projectContextId: z.string().regex(/^project_[0-9]+$/).optional(),
+      cwd: z.string().trim().min(1).optional(),
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { ui: { resourceUri: PANEL_RESOURCE_URI, visibility: ["model"] } },
+  }, async (input: { projectContextId?: string; cwd?: string }) => {
+    if (!panelSession) throw new Error("Project panel session is unavailable");
+    if (!input.projectContextId && !input.cwd) throw new Error("Provide projectContextId or cwd to open the project panel");
+    const context = input.projectContextId ? storage.getContext(input.projectContextId) : storage.getContextByCwd(input.cwd!);
+    if (!context) throw new Error("Project context not found");
+    return {
+      content: [{ type: "text" as const, text: "Project panel initialized." }],
+      _meta: {
+        [PANEL_BOOTSTRAP_META_KEY]: panelBootstrapMetadata(context.id, panelSession.serviceBaseUrl, panelSession.sessionToken),
+      },
+    };
+  });
 
   server.registerTool("bind_project", {
     title: "Bind project",
@@ -79,10 +154,49 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
   return { server, storage };
 }
 
-async function main(): Promise<void> {
-  const { server } = createMcpServer();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+export interface McpRuntimeOptions {
+  sessionToken?: string;
+  storage?: Storage;
+  plane?: PlaneAdapter;
+  port?: number;
+  transport?: Transport;
 }
 
-main().catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; });
+export interface McpRuntime {
+  server: McpServer;
+  service: RunningService;
+  sessionToken: string;
+  close: () => Promise<void>;
+}
+
+export async function startMcpRuntime(options: McpRuntimeOptions = {}): Promise<McpRuntime> {
+  const sessionToken = options.sessionToken ?? randomBytes(32).toString("base64url");
+  const service = await startService({ storage: options.storage, plane: options.plane, sessionToken, host: "127.0.0.1", port: options.port ?? 0 });
+  let server: McpServer | undefined;
+  let serviceClosePromise: Promise<void> | undefined;
+  const closeService = (): Promise<void> => {
+    serviceClosePromise ??= service.close();
+    return serviceClosePromise;
+  };
+  try {
+    server = createMcpServer({ storage: service.storage, plane: service.plane, panelSession: { serviceBaseUrl: service.baseUrl, sessionToken } }).server;
+    let closePromise: Promise<void> | undefined;
+    const close = (): Promise<void> => {
+      closePromise ??= (async () => { await server!.close(); await closeService(); })();
+      return closePromise;
+    };
+    if (options.transport) {
+      const previousOnClose = options.transport.onclose;
+      options.transport.onclose = () => { previousOnClose?.(); void closeService(); };
+      await server.connect(options.transport);
+    }
+    return { server, service, sessionToken, close };
+  } catch (error) {
+    try {
+      await server?.close();
+    } finally {
+      await closeService();
+    }
+    throw error;
+  }
+}

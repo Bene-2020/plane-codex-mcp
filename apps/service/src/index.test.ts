@@ -6,7 +6,83 @@ import { EventCoordinator, FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { OutboxWorker, createService } from "./index.js";
 
+const sessionHeaders = (service: ReturnType<typeof createService>) => ({ "X-Ambient-Session-Token": service.sessionToken });
+
 describe("local service and outbox worker", () => {
+  it("keeps health anonymous and minimal", async () => {
+    const service = createService({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter() });
+    const response = await service.app.inject({ method: "GET", url: "/health" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true });
+    expect(response.body).not.toContain(service.sessionToken);
+    await service.app.close();
+  });
+
+  it("protects every API route with the temporary session token", async () => {
+    const storage = new Storage(":memory:");
+    const service = createService({ storage, plane: new FakePlaneAdapter(), sessionToken: "a".repeat(43) });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+
+    const missing = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/items` });
+    const wrong = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/items`, headers: { "X-Ambient-Session-Token": "b".repeat(43) } });
+    const unicode = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/items`, headers: { "X-Ambient-Session-Token": "界".repeat(43) } });
+    const correct = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/items`, headers: sessionHeaders(service) });
+
+    expect(missing.statusCode).toBe(401);
+    expect(wrong.statusCode).toBe(401);
+    expect(unicode.statusCode).toBe(401);
+    expect(correct.statusCode).toBe(200);
+    expect(missing.json()).toEqual({ error: "Unauthorized" });
+    expect(missing.body).not.toContain(service.sessionToken);
+    expect(JSON.stringify(missing.headers)).not.toContain(service.sessionToken);
+    await service.app.close();
+  });
+
+  it("allows only the MCP App and local development origins", async () => {
+    const service = createService({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter() });
+    const allowed = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "http://127.0.0.1:4318" } });
+    const sandboxed = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "null" } });
+    const rejected = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "https://not-the-panel.example" } });
+    const preflight = await service.app.inject({ method: "OPTIONS", url: "/api/context", headers: { origin: "http://127.0.0.1:4318", "access-control-request-method": "GET", "access-control-request-headers": "content-type,x-ambient-session-token" } });
+    expect(allowed.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:4318");
+    expect(sandboxed.headers["access-control-allow-origin"]).toBe("null");
+    expect(rejected.headers["access-control-allow-origin"]).toBeUndefined();
+    expect(preflight.statusCode).toBe(204);
+    expect(preflight.headers["access-control-allow-headers"]).toBe("Content-Type, X-Ambient-Session-Token");
+    await service.app.close();
+  });
+
+  it("rejects an unauthorized write before it can change project state", async () => {
+    const storage = new Storage(":memory:");
+    const service = createService({ storage, plane: new FakePlaneAdapter() });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+
+    const response = await service.app.inject({ method: "PATCH", url: `/api/projects/${context.id}/auto-capture`, payload: { enabled: false } });
+
+    expect(response.statusCode).toBe(401);
+    expect(storage.getContext(context.id)?.autoCaptureEnabled).toBe(true);
+    await service.app.close();
+  });
+
+  it("rotates the token when a new service starts", async () => {
+    const storageA = new Storage(":memory:");
+    const serviceA = createService({ storage: storageA, plane: new FakePlaneAdapter() });
+    const context = storageA.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const storageB = new Storage(":memory:");
+    const serviceB = createService({ storage: storageB, plane: new FakePlaneAdapter() });
+    storageB.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+
+    expect(serviceA.sessionToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(serviceB.sessionToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(serviceA.sessionToken).not.toBe(serviceB.sessionToken);
+    const oldToken = await serviceB.app.inject({ method: "GET", url: `/api/projects/${context.id}/items`, headers: { "X-Ambient-Session-Token": serviceA.sessionToken } });
+    const newToken = await serviceB.app.inject({ method: "GET", url: `/api/projects/project_1/items`, headers: sessionHeaders(serviceB) });
+    expect(oldToken.statusCode).toBe(401);
+    expect(newToken.statusCode).toBe(200);
+    await serviceA.app.close();
+    await serviceB.app.close();
+  });
+
   it("accepts a queued event, projects it, and exposes the panel summary", async () => {
     const storage = new Storage(":memory:");
     const plane = new FakePlaneAdapter();
@@ -14,7 +90,7 @@ describe("local service and outbox worker", () => {
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project", planeProjectName: "Demo" });
     storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t", events: [{ type: "task", title: "完成浏览器测试", summary: "还需要完成浏览器测试", userDirected: false, sourceExcerpt: "浏览器测试还没做" }] });
     await service.worker.processOnce();
-    const response = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/summary` });
+    const response = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/summary`, headers: sessionHeaders(service) });
     expect(response.statusCode).toBe(200);
     expect(response.json().items[0].title).toBe("完成浏览器测试");
     await service.app.close();
@@ -111,7 +187,7 @@ describe("local service and outbox worker", () => {
     const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t", events: [{ type: "task", title: "活动租约", summary: "活动租约", userDirected: false, sourceExcerpt: "活动租约" }] });
     const service = createService({ storage, plane: new FakePlaneAdapter() });
     const claim = storage.claimPendingBatches()[0]!;
-    const response = await service.app.inject({ method: "POST", url: `/api/projects/${context.id}/retry/${queued.batchId}` });
+    const response = await service.app.inject({ method: "POST", url: `/api/projects/${context.id}/retry/${queued.batchId}`, headers: sessionHeaders(service) });
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toContain("currently claimed");
     expect((storage.db.prepare("SELECT status, claim_token FROM outbox_batches WHERE id=1").get() as { status: string; claim_token: string }).claim_token).toBe(claim.claimToken);
@@ -128,7 +204,7 @@ describe("local service and outbox worker", () => {
     const queued = storage.enqueueBatch({ projectContextId: first.id, sessionId: "s", turnId: "t", events: [{ type: "task", title: "失败批次", summary: "失败批次", userDirected: false, sourceExcerpt: "失败批次" }] });
     plane.fail = true;
     await service.worker.processOnce();
-    const response = await service.app.inject({ method: "POST", url: `/api/projects/${second.id}/retry/${queued.batchId}` });
+    const response = await service.app.inject({ method: "POST", url: `/api/projects/${second.id}/retry/${queued.batchId}`, headers: sessionHeaders(service) });
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toContain("does not belong");
     expect(storage.listFailedBatches(first.id)[0]).toMatchObject({ batch_id: queued.batchId, status: "failed" });

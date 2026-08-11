@@ -1,0 +1,84 @@
+{
+  "name": "toad-cache",
+  "description": "LRU and FIFO caches for Client or Server",
+  "version": "3.7.4",
+  "homepage": "https://github.com/kibertoad/toad-cache",
+  "author": "Igor Savin <kibertoad@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kibertoad/toad-cache.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kibertoad/toad-cache/issues"
+  },
+  "files": [
+    "dist",
+    "*.d.ts",
+    "*.d.cts"
+  ],
+  "license": "MIT",
+  "source": "index.js",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./toad-cache.d.ts",
+        "default": "./dist/toad-cache.mjs"
+      },
+      "require": {
+        "types": "./toad-cache.d.cts",
+        "default": "./dist/toad-cache.cjs"
+      }
+    }
+  },
+  "main": "dist/toad-cache.cjs",
+  "types": "./toad-cache.d.ts",
+  "type": "module",
+  "sourceType": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "engineStrict": true,
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=22.13",
+      "onFail": "error"
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@vitest/coverage-v8": "^4.1.9",
+    "auto-changelog": "^2.6.0",
+    "del-cli": "^7.0.0",
+    "precise": "^5.0.1",
+    "rollup": "^4.62.2",
+    "tsd": "^0.33.0",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.9"
+  },
+  "keywords": [
+    "LRU",
+    "FIFO",
+    "cache",
+    "client",
+    "server",
+    "least",
+    "recently",
+    "used",
+    "first",
+    "browser"
+  ],
+  "scripts": {
+    "build": "del-cli dist && del-cli coverage && pnpm run rollup",
+    "benchmark": "pnpm run build && node benchmark.js",
+    "changelog": "auto-changelog -p",
+    "lint": "biome lint index.js benchmark.js src test biome.json",
+    "lint:fix": "biome check --apply index.js benchmark.js src test biome.json",
+    "rollup": "rollup --config",
+    "test": "vitest",
+    "test:coverage": "pnpm run rollup && vitest --coverage",
+    "test:ci": "pnpm run lint && pnpm run test:coverage && pnpm run test:typescript",
+    "test:typescript": "tsd",
+    "types:generate": "pnpm exec tsc index.js --declaration --allowJs --emitDeclarationOnly --outDir ."
+  }
+}

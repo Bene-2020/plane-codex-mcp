@@ -5,7 +5,7 @@
   "scripts": {
     "build": "pnpm run build:packages && pnpm run build:apps && pnpm run package:plugin",
     "build:packages": "pnpm --filter @ambient/core build && pnpm --filter @ambient/storage build && pnpm --filter @ambient/plane build",
-    "build:apps": "pnpm --filter @ambient/mcp build && pnpm --filter @ambient/service build && pnpm --filter @ambient/hook-adapter build && pnpm --filter @ambient/panel build",
+    "build:apps": "pnpm --filter @ambient/service build && pnpm --filter @ambient/mcp build && pnpm --filter @ambient/hook-adapter build && pnpm --filter @ambient/panel build",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc -p tsconfig.json --noEmit && tsc -p apps/panel/tsconfig.json --noEmit",

@@ -2,14 +2,19 @@
   "name": "@ambient/mcp",
   "version": "0.1.0",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/main.js",
   "types": "dist/index.d.ts",
-  "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx src/index.ts" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/main.ts"
+  },
   "dependencies": {
     "@ambient/core": "workspace:*",
     "@ambient/plane": "workspace:*",
+    "@ambient/service": "workspace:*",
     "@ambient/storage": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.25.20"
   }
 }

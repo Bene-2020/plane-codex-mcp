@@ -5,6 +5,7 @@ button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 .shell { min-height: 100vh; background: radial-gradient(circle at 72% -20%, #fffaf3 0, #f4f0eb 48%); }
 .loading, .empty { display: grid; place-items: center; min-height: 100vh; }
+.session-card { width: 430px; padding: 42px; border: 1px solid #e4ddd4; border-radius: 22px; background: #fffdf9; box-shadow: 0 20px 60px #51433112; }.session-card h1 { margin: 9px 0; font-size: 28px; letter-spacing: -0.04em; }.session-card p { color: #776e64; line-height: 1.6; }
 .empty-card { width: 430px; padding: 42px; border: 1px solid #e4ddd4; border-radius: 22px; background: #fffdf9; box-shadow: 0 20px 60px #51433112; }
 .empty-card h1 { margin: 9px 0; font-size: 28px; letter-spacing: -0.04em; }.empty-card p { color: #776e64; line-height: 1.6; }
 .eyebrow, .section-label { color: #9c6e4a; font-size: 10px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
