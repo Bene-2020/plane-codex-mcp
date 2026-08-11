@@ -29,9 +29,12 @@ describe("Plane projection", () => {
     await coordinator.syncBatch(storage.listPendingBatches()[0]!);
     const item = (await plane.listItems(context))[0]!;
     await coordinator.editItem(context, item.id, { description: "用户接管的描述" });
-    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [{ ...bug(), summary: "系统后续补充" }] });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [{ ...bug(), summary: "系统后续补充", relatedItemId: item.id }] });
     await coordinator.syncBatch(storage.listPendingBatches()[0]!);
-    expect((await plane.listItems(context))[0]!.description).toBe("用户接管的描述");
+    const items = await plane.listItems(context);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.id).toBe(item.id);
+    expect(items[0]?.description).toBe("用户接管的描述");
     storage.close();
   });
 
