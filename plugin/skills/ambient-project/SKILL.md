@@ -17,7 +17,7 @@ Use `change_binding` only when the user explicitly asks to move this cwd to anot
 
 At the end of a work turn, use the user's request, your plan, tool results, and final conclusion to decide whether there is a meaningful project event. Capture tasks, bugs, decisions, ideas, risks, milestones, plans, progress, and explicit completion. Do not turn ordinary conversation or every sentence into a record.
 
-If events exist and automatic capture is enabled, call `record_project_events` at most once before the final response, with all events in one batch. Never call it with an empty events array. Describe what happened and preserve a short source excerpt; do not choose Plane API fields or expose credentials.
+If automatic capture is enabled, call exactly one tool before the final response: use `record_project_events` when events exist, with all events in one non-empty batch; otherwise use `acknowledge_no_project_events` for the current `projectContextId`, `sessionId`, and `turnId`. Do not call both tools for the same turn. The acknowledgement creates no Plane item and no outbox batch. Describe what happened and preserve a short source excerpt; do not choose Plane API fields or expose credentials.
 
 Prefer `relatedItemId` from the injected active-item snapshot when a relationship is unambiguous. If it is not unambiguous, create a conservative new event or ask the user only for an explicit instruction whose target cannot be uniquely resolved.
 

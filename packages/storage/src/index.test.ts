@@ -20,6 +20,27 @@ describe("SQLite storage", () => {
     storage.close();
   });
 
+  it("keeps no-event reviews idempotent without masking a recorded turn", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+
+    expect(storage.acknowledgeNoProjectEvents({ projectContextId: context.id, sessionId: "s", turnId: "t" })).toEqual({ status: "acknowledged", duplicate: false });
+    expect(storage.acknowledgeNoProjectEvents({ projectContextId: context.id, sessionId: "s", turnId: "t" })).toEqual({ status: "acknowledged", duplicate: true });
+    expect(storage.didAcknowledgeNoProjectEvents(context.id, "s", "t")).toBe(true);
+
+    expect(storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t", events: [event] })).toEqual({ batchId: "batch_1", duplicate: false });
+    expect(storage.didRecordProjectEvents(context.id, "s", "t")).toBe(true);
+    expect(storage.didAcknowledgeNoProjectEvents(context.id, "s", "t")).toBe(false);
+    expect(storage.acknowledgeNoProjectEvents({ projectContextId: context.id, sessionId: "s", turnId: "t" })).toEqual({ status: "already_recorded", duplicate: false });
+
+    expect(storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [event] })).toEqual({ batchId: "batch_2", duplicate: false });
+    expect(storage.acknowledgeNoProjectEvents({ projectContextId: context.id, sessionId: "s", turnId: "t2" })).toEqual({ status: "already_recorded", duplicate: false });
+    expect(storage.didAcknowledgeNoProjectEvents(context.id, "s", "t2")).toBe(false);
+    expect(storage.listPendingBatches()).toHaveLength(2);
+    expect((storage.db.prepare("SELECT * FROM no_project_event_reviews").all() as unknown[])).toHaveLength(0);
+    storage.close();
+  });
+
   it("keeps only a field ownership marker, not a project-record replica", () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });

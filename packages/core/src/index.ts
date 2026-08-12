@@ -31,6 +31,13 @@ export const eventBatchSchema = z.object({
 });
 export type ProjectEventBatch = z.infer<typeof eventBatchSchema>;
 
+export const noProjectEventsReviewSchema = z.object({
+  projectContextId: z.string().regex(/^project_[0-9]+$/),
+  sessionId: z.string().trim().min(1).max(200),
+  turnId: z.string().trim().min(1).max(200),
+});
+export type NoProjectEventsReview = z.infer<typeof noProjectEventsReviewSchema>;
+
 export const projectContextInputSchema = z.object({
   cwd: z.string().trim().min(1),
   planeBaseUrl: z.string().url(),
@@ -138,7 +145,7 @@ export function buildAdditionalContext(args: {
     lines.push(`Project context: ${args.context.id} (${args.context.planeProjectName ?? args.context.planeProjectId})`);
     lines.push(`cwd: ${args.context.canonicalCwd}; session: ${args.sessionId ?? "unknown"}; turn: ${args.turnId ?? "session"}`);
     lines.push(`Automatic capture: ${args.context.autoCaptureEnabled ? "enabled" : "disabled"}.`);
-    lines.push("Before the final reply, decide from this turn's request, plan, tool results, and conclusion whether meaningful project events occurred. If so, call record_project_events once with all events; never send an empty batch.");
+    lines.push("Before the final reply, if automatic capture is enabled, decide from this turn's request, plan, tool results, and conclusion whether meaningful project events occurred. If so, call record_project_events once with all events; otherwise call acknowledge_no_project_events once. Never send an empty batch.");
     const items = (args.activeItems ?? []).slice(0, 30);
     if (items.length) {
       lines.push("Active Plane items (identifier | title | status):");

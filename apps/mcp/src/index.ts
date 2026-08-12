@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import { eventBatchSchema, isSessionToken } from "@ambient/core";
+import { eventBatchSchema, isSessionToken, noProjectEventsReviewSchema } from "@ambient/core";
 import { createPlaneAdapter } from "@ambient/plane";
 import type { PlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
@@ -67,7 +67,7 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
     name: "ambient-project",
     version: "0.1.0",
   }, {
-    instructions: "Maintain project context quietly. Use list_projects only to help a user choose a project, bind only after explicit choice, and record meaningful events in one non-empty batch. Do not expose Plane CRUD, delete items, reassign people, or use a second semantic model.",
+    instructions: "Maintain project context quietly. Use list_projects only to help a user choose a project, bind only after explicit choice, and before the final reply either record meaningful events in one non-empty batch or acknowledge that this turn has no project events. Do not expose Plane CRUD, delete items, reassign people, or use a second semantic model.",
   });
   const panelConnectDomains = panelSession ? [new URL(panelSession.serviceBaseUrl).origin] : [];
 
@@ -149,6 +149,18 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
     if (!context.autoCaptureEnabled) throw new Error("Automatic capture is disabled for this project context");
     const result = storage.enqueueBatch(input);
     return text({ status: "accepted", ...result });
+  });
+
+  server.registerTool("acknowledge_no_project_events", {
+    title: "Acknowledge no project events",
+    description: "Idempotently acknowledge that the specified work turn was reviewed and produced no project events. This creates no Plane item and no outbox batch.",
+    inputSchema: noProjectEventsReviewSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async (input) => {
+    const context = storage.getContext(input.projectContextId);
+    if (!context) throw new Error("No project context is bound for this projectContextId");
+    if (!context.autoCaptureEnabled) throw new Error("Automatic capture is disabled for this project context");
+    return text(storage.acknowledgeNoProjectEvents(input));
   });
 
   return { server, storage };

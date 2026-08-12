@@ -1,6 +1,6 @@
 import {
   ActiveItemSnapshot, BatchRecord, FieldName, FieldOwner, FieldOwnership, PlaneItem, ProjectContext,
-  ProjectContextInput, ProjectionStatus, SourceEvent, SourceReference, SyncStatus, batchId, canonicalizeCwd, eventId,
+  NoProjectEventsReview, ProjectContextInput, ProjectionStatus, SourceEvent, SourceReference, SyncStatus, batchId, canonicalizeCwd, eventId,
 } from "@ambient/core";
 import { SqliteDatabase } from "./database.js";
 
@@ -90,6 +90,14 @@ export class Storage {
         lease_until TEXT,
         UNIQUE(project_context_id, session_id, turn_id)
       );
+      CREATE TABLE IF NOT EXISTS no_project_event_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_context_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL,
+        UNIQUE(project_context_id, session_id, turn_id)
+      );
       CREATE TABLE IF NOT EXISTS source_references (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         batch_id TEXT NOT NULL,
@@ -154,6 +162,7 @@ export class Storage {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_batches(status, next_attempt_at, lease_until);
+      CREATE INDEX IF NOT EXISTS idx_no_project_event_reviews_turn ON no_project_event_reviews(project_context_id, session_id, turn_id);
       CREATE INDEX IF NOT EXISTS idx_source_batch ON source_references(batch_id);
       CREATE INDEX IF NOT EXISTS idx_source_event ON source_references(event_id);
       CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
@@ -202,17 +211,32 @@ export class Storage {
   }
 
   enqueueBatch(batch: { projectContextId: string; sessionId: string; turnId: string; events: SourceEvent[] }): { batchId: string; duplicate: boolean } {
-    const insert = this.db.prepare(`INSERT INTO outbox_batches (project_context_id, session_id, turn_id, events_json, status, accepted_at) VALUES (?, ?, ?, ?, 'pending', ?)`);
-    try {
-      const result = insert.run(batch.projectContextId, batch.sessionId, batch.turnId, JSON.stringify(batch.events), now());
-      return { batchId: batchId(Number(result.lastInsertRowid)), duplicate: false };
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("outbox_batches.project_context_id")) {
-        const row = this.db.prepare("SELECT id FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(batch.projectContextId, batch.sessionId, batch.turnId) as { id: number };
-        return { batchId: batchId(row.id), duplicate: true };
+    const transaction = this.db.transaction(() => {
+      const insert = this.db.prepare(`INSERT INTO outbox_batches (project_context_id, session_id, turn_id, events_json, status, accepted_at) VALUES (?, ?, ?, ?, 'pending', ?)`);
+      try {
+        const result = insert.run(batch.projectContextId, batch.sessionId, batch.turnId, JSON.stringify(batch.events), now());
+        this.db.prepare("DELETE FROM no_project_event_reviews WHERE project_context_id=? AND session_id=? AND turn_id=?").run(batch.projectContextId, batch.sessionId, batch.turnId);
+        return { batchId: batchId(Number(result.lastInsertRowid)), duplicate: false };
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("outbox_batches.project_context_id")) {
+          const row = this.db.prepare("SELECT id FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(batch.projectContextId, batch.sessionId, batch.turnId) as { id: number };
+          this.db.prepare("DELETE FROM no_project_event_reviews WHERE project_context_id=? AND session_id=? AND turn_id=?").run(batch.projectContextId, batch.sessionId, batch.turnId);
+          return { batchId: batchId(row.id), duplicate: true };
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
+    return transaction.immediate();
+  }
+
+  acknowledgeNoProjectEvents(review: NoProjectEventsReview): { status: "acknowledged" | "already_recorded"; duplicate: boolean } {
+    const transaction = this.db.transaction(() => {
+      const batch = this.db.prepare("SELECT 1 FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(review.projectContextId, review.sessionId, review.turnId);
+      if (batch) return { status: "already_recorded" as const, duplicate: false };
+      const result = this.db.prepare(`INSERT INTO no_project_event_reviews (project_context_id, session_id, turn_id, acknowledged_at) VALUES (?, ?, ?, ?) ON CONFLICT(project_context_id, session_id, turn_id) DO NOTHING`).run(review.projectContextId, review.sessionId, review.turnId, now());
+      return { status: "acknowledged" as const, duplicate: result.changes === 0 };
+    });
+    return transaction.immediate();
   }
 
   listPendingBatches(limit = 20): BatchRecord[] {
@@ -369,8 +393,20 @@ export class Storage {
 
   listAudits(sessionId?: string): unknown[] { return (sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all()) as unknown[]; }
 
-  didRecordProjectEvents(sessionId: string, turnId: string): boolean {
-    const row = this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND record_tool_called=1").get(sessionId, turnId);
+  didRecordProjectEvents(projectContextId: string, sessionId: string, turnId: string): boolean {
+    const batch = this.db.prepare("SELECT 1 FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(projectContextId, sessionId, turnId);
+    return Boolean(batch);
+  }
+
+  didAcknowledgeNoProjectEvents(projectContextId: string, sessionId: string, turnId: string): boolean {
+    const row = this.db.prepare(`SELECT 1 FROM no_project_event_reviews review
+      WHERE review.project_context_id=? AND review.session_id=? AND review.turn_id=?
+        AND NOT EXISTS (
+          SELECT 1 FROM outbox_batches batch
+          WHERE batch.project_context_id=review.project_context_id
+            AND batch.session_id=review.session_id
+            AND batch.turn_id=review.turn_id
+        )`).get(projectContextId, sessionId, turnId);
     return Boolean(row);
   }
   listFailedBatches(contextId: string): unknown[] {

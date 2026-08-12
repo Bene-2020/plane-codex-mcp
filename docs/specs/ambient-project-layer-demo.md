@@ -130,7 +130,7 @@ Codex Hook 不提供可直接使用的项目标识，只提供 `cwd`、`session_
 }
 ```
 
-`sessionId` 和 `turnId` 来自 Codex Hook。因为每个工作回合最多提交一个批次，服务端直接对 `projectContextId`、`sessionId`、`turnId` 建立数据库组合唯一约束，不生成 SHA 或其他哈希式幂等键。`event_id` 使用批次数据库行号和事件序号。没有有意义项目信息的回合不会产生来源事件，也不会为了证明“没有事件”而调用空写入工具。
+`sessionId` 和 `turnId` 来自 Codex Hook。因为每个工作回合最多提交一个批次，服务端直接对 `projectContextId`、`sessionId`、`turnId` 建立数据库组合唯一约束，不生成 SHA 或其他哈希式幂等键。`event_id` 使用批次数据库行号和事件序号。没有有意义项目信息的回合不会产生来源事件，也不会为了证明“没有事件”而调用空写入工具；启用自动捕获时，当前 Codex 通过 `acknowledge_no_project_events` 保存该回合已完成审查的本地标记。该标记不创建 Plane 项目记录、不进入 Outbox，并使用 `project_context_id + session_id + turn_id` 幂等。
 
 ### 6.3 项目记录
 
@@ -175,7 +175,7 @@ pending（待同步） -> synced（已同步） -> corrected（已修正）
 
 ### 7.1 总体规则
 
-当前 Codex 本来就拥有本轮的用户要求、显式计划、工具调用和工作结果。Demo 不把完整对话交给第二个模型，而是通过 Skill 和 Hook 向当前 Codex 提供项目规则、绑定、来源标识和精简 Plane 快照。Codex 在形成最终回复前判断本轮是否产生有意义的项目事件；存在事件时，最多批量调用一次 `record_project_events`。
+当前 Codex 本来就拥有本轮的用户要求、显式计划、工具调用和工作结果。Demo 不把完整对话交给第二个模型，而是通过 Skill 和 Hook 向当前 Codex 提供项目规则、绑定、来源标识和精简 Plane 快照。Codex 在形成最终回复前判断本轮是否产生有意义的项目事件；存在事件时，最多批量调用一次 `record_project_events`，否则调用一次无事件审查确认工具。
 
 “记录所有工作”指保留所有被当前 Codex 识别出的项目工作，而不是把每条消息原样复制到 Plane。Demo 接受当前 Codex 偶尔漏调用 MCP 的可能性，并把漏记率作为核心验收指标；`Stop` 不启动第二个模型或强迫 Codex 继续执行来补偿。
 
@@ -326,9 +326,9 @@ SessionStart / UserPromptSubmit
     v
 当前 Codex 正常完成用户工作
     |
-    | 本轮有项目事件时，最终回复前至多调用一次
+    | 最终回复前执行 record-or-ack：有事件记录非空批次，无事件确认审查
     v
-record_project_events（高层 MCP 工具）
+record_project_events / acknowledge_no_project_events（高层 MCP 工具）
     |
     | 可靠写入本地 Outbox 后立即返回 accepted
     v
@@ -345,7 +345,7 @@ Plane 适配器 -> Plane API -> 项目面板
 **项目 Skill**
 
 - 定义哪些信息值得成为项目事件。
-- 指导 Codex 在最终回复前批量调用 `record_project_events`。
+- 指导 Codex 在最终回复前执行 `record_project_events` 或 `acknowledge_no_project_events`。
 - 未绑定时允许自然询问用户，并调用绑定工具。
 - 自动写入成功时不要求 Codex 在回复中说明；用户明确要求的操作应简短确认。
 
@@ -388,15 +388,15 @@ Plane 适配器 -> Plane API -> 项目面板
 |---|---|---|
 | `SessionStart` | `session_id`，无 `turn_id` | 解析项目绑定，注入精简项目快照和固定规则 |
 | `UserPromptSubmit` | `session_id`、`turn_id` | 注入当前回合来源标识、绑定和必要的缓存更新 |
-| `PostToolUse` | `session_id`、`turn_id`、`tool_use_id` | 记录 `record_project_events` 等支持工具的结果，用于审计与同步状态 |
-| `Stop` | `session_id`、`turn_id` | 标记回合结束并记录是否调用 MCP；不启动第二个模型，不强迫续跑 |
+| `PostToolUse` | `session_id`、`turn_id`、`tool_use_id` | 记录 `record_project_events` 与无事件审查工具的结果，用于审计与同步状态 |
+| `Stop` | `session_id`、`turn_id` | record 或无事件审查确认后放行；两者都缺失时返回一次漏记兜底提示，不启动第二个模型 |
 | `SessionEnd` | `session_id`，无 `turn_id` | 通知后台调度仍在队列中的任务并结束会话审计；不等待网络 |
 
 Codex 直接提供 `session_id` 和回合范围内的 `turn_id`。服务端按数据库行号和事件序号分配 `event_id`，并使用 `project_context_id`、`session_id`、`turn_id` 的组合唯一约束防止重复。`SessionStart` 与 `SessionEnd` 没有 `turn_id`，因为它们属于整个工作会话。
 
 ### 11.3 原型存储
 
-Demo 可以使用名称明确的临时 SQLite 数据库，例如 `ambient-project-demo.sqlite`。它只保存项目绑定、Outbox 事件、来源引用、工作回合组合唯一约束、字段所有权和 Plane 同步元数据。
+Demo 可以使用名称明确的临时 SQLite 数据库，例如 `ambient-project-demo.sqlite`。它只保存项目绑定、Outbox 事件、无事件审查确认、来源引用、工作回合组合唯一约束、字段所有权和 Plane 同步元数据。
 
 该数据库不保存第二套用户可见项目记录，也不保存完整对话。它仅用于可靠交付和溯源，不代表正式产品的存储决策。
 
@@ -418,8 +418,9 @@ Skill 的隐式触发不是唯一可靠入口。`SessionStart` 与 `UserPromptSu
 | `bind_project` | 保存首次项目选择 | 仅在用户明确选择后调用 |
 | `change_binding` | 切换当前目录关联的项目 | 仅在用户明确要求后调用 |
 | `record_project_events` | 批量提交本轮项目事件 | 绑定并启用自动记录后可自动调用 |
+| `acknowledge_no_project_events` | 确认本轮已审查且没有项目事件；不创建 Plane 项目或 Outbox 批次 | 绑定并启用自动记录后，无事件时自动调用 |
 
-Demo 不向自动化暴露删除工作项、移动项目、改变负责人等高风险 MCP 工具。Hook 和 MCP 首次安装仍遵循 Codex 的信任流程；完成一次信任和项目绑定后，`record_project_events` 不应逐次要求确认。
+Demo 不向自动化暴露删除工作项、移动项目、改变负责人等高风险 MCP 工具。Hook 和 MCP 首次安装仍遵循 Codex 的信任流程；完成一次信任和项目绑定后，`record_project_events` 与 `acknowledge_no_project_events` 不应逐次要求确认。
 
 ### 12.2 `record_project_events` 契约
 
@@ -446,17 +447,22 @@ Demo 不向自动化暴露删除工作项、移动项目、改变负责人等高
 约束：
 
 - 每个有意义的回合至多调用一次，并把多个事件放在同一批次。
-- 没有事件时不调用空工具。
+- 没有事件时调用 `acknowledge_no_project_events`，不调用空 `record_project_events` 批次。
+- 无事件确认按 `project_context_id + session_id + turn_id` 幂等保存；重复确认不产生新行。若同回合已有事件批次，确认返回 `already_recorded`；确认后再记录事件时，成功入队会删除确认标记。
 - Codex 只描述“发生了什么”，不选择 Plane API、底层字段或重试策略。
 - MCP 在 Outbox 持久化成功后立即返回 `accepted`，Plane 同步异步执行。
 - 本地 Outbox 无法持久化时才返回真正失败。
 - 自动成功不进入正常回复；用户明确要求的操作应简短确认已记录或正在同步。
 
+### 12.2.1 `acknowledge_no_project_events` 契约
+
+该工具只接受当前绑定项目的 `projectContextId`、Hook 提供的 `sessionId` 和 `turnId`。成功后返回 `status: "acknowledged"`；相同组合键重复调用返回 `duplicate: true`，不新增数据库行。若该回合已经有事件批次，返回 `status: "already_recorded"`，不写入审查标记。它不接受事件数组、不创建 Plane 项目、不进入 Outbox。
+
 ### 12.3 失败与漏记
 
 - 上下文注入失败：继续 Codex 主任务，本轮不自动写入，面板显示异常。
 - Plane 不可用：Outbox 保留事件并后台重试，不阻塞 Codex。
-- Codex 未调用 MCP：`Stop` 只记录审计结果，不做额外语义分析。
+- Codex 未调用任一 record-or-ack 工具：`Stop` 返回一次 block 兜底提示；完成事件记录或无事件审查确认后，Stop 返回空结果，不再生成新的 hook prompt。
 - Demo 不以第二个模型补偿漏记；漏记率是验证当前方案是否成立的核心指标。
 
 ## 13. Demo 场景
@@ -521,7 +527,7 @@ Demo 在满足以下条件时视为成功：
 
 1. **真相源：** Plane 是唯一用户可见项目真相源；本地只保存绑定、Outbox、溯源和同步元数据。
 2. **语义判断：** 当前 Codex 直接判断并调用 MCP；Demo 不使用第二个语义模型。
-3. **自动写入入口：** 自动记录只使用高层 `record_project_events`，不向 Skill 暴露 Plane 底层 CRUD。
+3. **自动写入入口：** 自动事件记录只使用高层 `record_project_events`；无事件回合使用独立的 `acknowledge_no_project_events` 审查确认，不向 Skill 暴露 Plane 底层 CRUD。
 4. **项目识别：** Codex Hook 不提供项目 ID；用户首次自然选择 Plane 项目，系统按 `cwd` 复用绑定。
 5. **Hook 范围：** 暂时使用 `SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop` 和 `SessionEnd`。
 6. **动态上下文：** 精简项目快照通过 Hook `additionalContext` 注入；MCP `instructions` 只保存固定规则。

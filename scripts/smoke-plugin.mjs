@@ -106,7 +106,7 @@ async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot) {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
     const toolsList = await request(2, "tools/list", {});
     const toolNames = toolsList.result?.tools?.map((tool) => tool.name) ?? [];
-    const expectedTools = ["list_projects", "get_binding", "open_project_panel", "bind_project", "change_binding", "record_project_events"];
+    const expectedTools = ["list_projects", "get_binding", "open_project_panel", "bind_project", "change_binding", "record_project_events", "acknowledge_no_project_events"];
     if (toolsList.error || JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) throw new Error(`MCP tools/list failed: ${JSON.stringify(toolsList)}`);
     const resourcesList = await request(3, "resources/list", {});
     if (resourcesList.error || !resourcesList.result?.resources?.some((resource) => resource.uri === "ui://ambient-project/panel/v1.html")) throw new Error(`MCP resources/list failed: ${JSON.stringify(resourcesList)}`);
@@ -117,7 +117,10 @@ async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot) {
     if (projects.error || projectList?.[0]?.name !== "Demo Project") throw new Error(`Explicit fake MCP configuration did not provide the smoke project: ${JSON.stringify(projects)}`);
     const bound = await request(6, "tools/call", { name: "bind_project", arguments: { cwd: smokeRoot, planeBaseUrl: "https://api.plane.so", workspaceSlug: "smoke-workspace", planeProjectId: "demo-project", planeProjectName: "Demo Project", autoCaptureEnabled: true } });
     if (bound.error) throw new Error(`MCP bind_project failed: ${JSON.stringify(bound)}`);
-    const panel = await request(7, "tools/call", { name: "open_project_panel", arguments: { projectContextId: "project_1" } });
+    const reviewed = await request(7, "tools/call", { name: "acknowledge_no_project_events", arguments: { projectContextId: "project_1", sessionId: "smoke-session", turnId: "smoke-turn" } });
+    const reviewPayload = JSON.parse(reviewed.result?.content?.[0]?.text ?? "null");
+    if (reviewed.error || reviewPayload?.status !== "acknowledged" || reviewPayload?.duplicate !== false) throw new Error(`MCP acknowledge_no_project_events failed: ${JSON.stringify(reviewed)}`);
+    const panel = await request(8, "tools/call", { name: "open_project_panel", arguments: { projectContextId: "project_1" } });
     const bootstrap = panel.result?._meta?.["ambient-project/bootstrap"];
     if (panel.error || !bootstrap?.serviceBaseUrl || !bootstrap?.sessionToken) throw new Error(`MCP open_project_panel failed: ${JSON.stringify(panel)}`);
     const summaryResponse = await fetch(`${bootstrap.serviceBaseUrl}/api/projects/project_1/summary`, { headers: { Origin: "https://web-sandbox.oaiusercontent.com", "X-Ambient-Session-Token": bootstrap.sessionToken } });
@@ -184,7 +187,7 @@ try {
 
   const hooksConfig = JSON.parse(await readFile(join(isolatedPlugin, "hooks", "hooks.json"), "utf8"));
   if (JSON.stringify(Object.keys(hooksConfig)) !== JSON.stringify(["hooks"])) throw new Error("Hook config must use the current Codex top-level schema");
-  if (hooksConfig.hooks.PostToolUse?.[0]?.matcher !== "^mcp__ambient_project__record_project_events$") throw new Error("PostToolUse must match the host MCP tool name");
+  if (hooksConfig.hooks.PostToolUse?.[0]?.matcher !== "^mcp__ambient_project__(record_project_events|acknowledge_no_project_events)$") throw new Error("PostToolUse must match the host MCP record-or-ack tools");
   const handlers = Object.values(hooksConfig.hooks).flatMap((groups) => groups.flatMap((group) => group.hooks));
   const expectedHookCommand = '"${PLUGIN_ROOT}/runtime/bin/ambient-node" "${PLUGIN_ROOT}/runtime/hook-adapter/index.js"';
   if (handlers.length !== 5 || handlers.some((handler) => handler.command !== expectedHookCommand || Object.hasOwn(handler, "statusMessage"))) {
@@ -214,7 +217,7 @@ try {
   }
   await assertMissingConfigurationFails(mcpEntrypoint, mcpCommand, smokeRoot);
   await smokeMcp(mcpEntrypoint, smokeRoot, isolatedPlugin);
-  console.log("Plugin isolation smoke passed: macOS arm64 sidecar, PATH without node/pnpm/bun, explicit fake MCP configuration, missing-config failure, App resources, open_project_panel web-sandbox summary, and five Hook fixtures.");
+  console.log("Plugin isolation smoke passed: macOS arm64 sidecar, PATH without node/pnpm/bun, explicit fake MCP configuration, missing-config failure, App resources, open_project_panel web-sandbox summary, record-or-ack MCP tools, and five Hook fixtures.");
 } finally {
   await rm(smokeRoot, { recursive: true, force: true });
 }

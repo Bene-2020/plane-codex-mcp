@@ -23,7 +23,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^mcp__ambient_project__record_project_events$",
+        "matcher": "^mcp__ambient_project__(record_project_events|acknowledge_no_project_events)$",
         "hooks": [
           {
             "type": "command",

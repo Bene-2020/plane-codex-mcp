@@ -6,7 +6,7 @@
 2. 正式 Codex 插件不需要手工启动 Service，也不需要设置 `AMBIENT_SESSION_TOKEN`/`AMBIENT_SERVICE_BASE_URL`。每个 MCP 进程在内部生成 32-byte CSPRNG、43 位 base64url 令牌，并以动态端口 `0` 启动自己的 localhost BFF/worker；进程重启后旧令牌失效。
 3. 本地 fake smoke 必须显式设置 `PLANE_MODE=fake`，此时 `list_projects` 才会返回 `Demo Project`。正式 Codex Desktop 按 [Codex Desktop 安装与真人验收](codex-desktop-installation.md) 配置 `PLANE_MODE=sdk`、真实数据库和 Plane 凭据；正式入口缺少模式时会失败，不会伪装成 Demo。
 4. 正式环境通过 MCP `list_projects` 查看真实项目；用户明确选择后调用 `bind_project`。没有绑定时不猜测目标项目，也不写入 Plane。
-5. 在同一 cwd 的工作回合中，由当前 Codex 判断是否产生事件并至多调用一次 `record_project_events`。
+5. 在同一 cwd 的工作回合中，由当前 Codex 判断是否产生事件：有事件时至多调用一次 `record_project_events`，无事件时调用一次 `acknowledge_no_project_events`；两者都不调用时 Stop 保留漏记兜底。
 6. Codex 需要展示面板时调用 `open_project_panel`，它通过官方 MCP Apps `_meta.ui.resourceUri` 加载 `ui://ambient-project/panel/v1.html`；结果 `_meta["ambient-project/bootstrap"]` 只给组件 `serviceBaseUrl`、临时令牌和 `projectContextId`。模型可见 content 不包含令牌。
 7. service worker 每 5 秒原子 claim 一个 pending/retrying/failed 批次，并在 Plane 同步期间用 claim token heartbeat 续租；`POST /api/worker/run` 可手动触发一次，processed 返回本次 claim/尝试的批次数（不代表成功同步数）。该 POST 也需要会话头。
 8. Codex App 宿主不支持组件渲染时，才运行独立开发降级：先显式设置 `AMBIENT_SESSION_TOKEN`，再运行 `pnpm dev:service` 和 `pnpm dev:panel`，打开 `http://127.0.0.1:4318` 手工输入 cwd/令牌。Vite proxy 不会注入有效令牌。
@@ -19,6 +19,7 @@
 - 同一事件的工作项描述和活动带有稳定来源标记；计划父项和步骤、活动重放先按该标记恢复，避免远端已成功但客户端未收到响应时重复写入。
 - Hook 输入坏 JSON 或 SQLite 出错：Hook 返回空/最小 `additionalContext`，不返回 `statusMessage`、`systemMessage`，不阻塞主任务。
 - 自动捕获关闭：MCP `record_project_events` 拒绝新批次；Codex 主任务不受影响。
+- 无事件确认：MCP `acknowledge_no_project_events` 只写入当前 `project_context_id + session_id + turn_id` 的幂等审查标记，不创建 Plane 项目或 Outbox 批次；后续同回合成功记录事件会清除该标记。
 - 用户修改字段：面板编辑将字段标记为 `user`；自动协调器只追加活动或更新仍由系统拥有的字段。
 - 面板删除/归档/合并：仅用户主动点击可触发，服务端限制自动生成项；自动 MCP 没有这些高风险能力。
 - 手动 retry 仅接受 URL 项目上下文所属且尚未 `synced` 的批次。

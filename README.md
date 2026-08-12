@@ -45,7 +45,7 @@ Panel 的两条加载路径刻意分开：Codex host 收到 `App.ontoolresult` �
 
 `plugin/` 包含 `.codex-plugin/plugin.json`、`.mcp.json`、五种 Hook 配置和 `ambient-project` Skill。正式插件当前只支持 macOS arm64：`pnpm build` 将固定的 Node 22.22.1 sidecar、`runtime/bin/ambient-node` wrapper、Node 内置 `node:sqlite`、MCP/Hook bundle 和 Plane SDK 运行时一起写入 `plugin/runtime/`；不再打包 `better-sqlite3` 或任何 `.node` ABI 文件。wrapper 在其他 OS/arch 启动时直接报兼容性错误。MCP 与 Hook 都使用插件内入口，路径带引号并支持含空格的安装目录；它们不依赖用户本机的 node、pnpm、bun 或 Node ABI。MCP 配置以插件根目录为 `cwd`，`.mcp.json` 的 `env_vars` 只白名单转发宿主已经提供的变量，不能替代 Codex Desktop 的用户级持久配置。Hook 使用宿主保证的稳定 `PLUGIN_DATA/ambient.sqlite`；MCP 的 `AMBIENT_DB_PATH` 必须明确指向同一文件。Plane Key 只留在 MCP env，不进入 Hook、数据库、Panel 或模型上下文。
 
-MCP 暴露五个项目工作流工具和一个 UI bootstrap 工具：`list_projects`、`get_binding`、`open_project_panel`、`bind_project`、`change_binding`、`record_project_events`。没有自动删除、跨项目移动或分配人员的工具。Panel 资源 URI 是 `ui://ambient-project/panel/v1.html`，使用官方 `_meta.ui.resourceUri` 连接工具和组件资源；它是自制 Codex 侧边栏/宿主 UI，Plane SDK/API 不进入浏览器代码。
+MCP 暴露六个项目工作流工具和一个 UI bootstrap 工具：`list_projects`、`get_binding`、`open_project_panel`、`bind_project`、`change_binding`、`record_project_events`、`acknowledge_no_project_events`。后者只持久化当前回合“已审查且无项目事件”的幂等确认，不创建 Plane 项目记录或 Outbox 批次。没有自动删除、跨项目移动或分配人员的工具。Panel 资源 URI 是 `ui://ambient-project/panel/v1.html`，使用官方 `_meta.ui.resourceUri` 连接工具和组件资源；它是自制 Codex 侧边栏/宿主 UI，Plane SDK/API 不进入浏览器代码。
 
 ## 验证
 
@@ -74,4 +74,4 @@ pnpm smoke:plugin
 
 ## 数据边界
 
-本地 SQLite 默认文件为 `ambient-project-demo.sqlite`，由 Node 内置 `node:sqlite` 访问，只保存项目上下文、Outbox 批次、来源引用、Plane 精简缓存、字段所有权、同步元数据和 Hook 审计。Plane 是用户可见项目数据的唯一真相源。本地不保存完整 Codex transcript、源码、终端输出、评论附件或密钥。
+本地 SQLite 默认文件为 `ambient-project-demo.sqlite`，由 Node 内置 `node:sqlite` 访问，只保存项目上下文、Outbox 批次、无事件审查确认、来源引用、Plane 精简缓存、字段所有权、同步元数据和 Hook 审计。Plane 是用户可见项目数据的唯一真相源。本地不保存完整 Codex transcript、源码、终端输出、评论附件或密钥。

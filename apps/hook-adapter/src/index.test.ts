@@ -39,10 +39,10 @@ describe("hook adapter", () => {
     storage.close();
   });
 
-  it("allows the turn to stop after record_project_events was called", async () => {
+  it("allows the turn to stop after a project event batch was recorded", async () => {
     const storage = new Storage(":memory:");
-    storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", planeProjectName: "Demo" });
-    await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: "/work", session_id: "s", turn_id: "t", tool_name: "mcp__ambient_project__record_project_events" }), storage);
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", planeProjectName: "Demo" });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t", events: [{ type: "bug", title: "白屏", summary: "登录偶尔白屏", userDirected: true, sourceExcerpt: "记录这个 Bug" }] });
 
     const result = await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/work", session_id: "s", turn_id: "t", stop_hook_active: false }), storage);
 

@@ -25,6 +25,7 @@ describe("ambient MCP tools and App bootstrap", () => {
         "bind_project",
         "change_binding",
         "record_project_events",
+        "acknowledge_no_project_events",
       ]);
       expect(Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]))).toEqual({
         list_projects: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -33,6 +34,7 @@ describe("ambient MCP tools and App bootstrap", () => {
         bind_project: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
         change_binding: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         record_project_events: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        acknowledge_no_project_events: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       });
       expect(tools.find((tool) => tool.name === "open_project_panel")?._meta).toEqual({ ui: { resourceUri: PANEL_RESOURCE_URI, visibility: ["model"] }, "ui/resourceUri": PANEL_RESOURCE_URI });
     } finally {

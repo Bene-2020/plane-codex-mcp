@@ -28399,6 +28399,11 @@ var eventBatchSchema = external_exports2.object({
   turnId: external_exports2.string().trim().min(1).max(200),
   events: external_exports2.array(sourceEventSchema).min(1).max(50)
 });
+var noProjectEventsReviewSchema = external_exports2.object({
+  projectContextId: external_exports2.string().regex(/^project_[0-9]+$/),
+  sessionId: external_exports2.string().trim().min(1).max(200),
+  turnId: external_exports2.string().trim().min(1).max(200)
+});
 var projectContextInputSchema = external_exports2.object({
   cwd: external_exports2.string().trim().min(1),
   planeBaseUrl: external_exports2.string().url(),
@@ -29143,6 +29148,14 @@ var Storage = class {
         lease_until TEXT,
         UNIQUE(project_context_id, session_id, turn_id)
       );
+      CREATE TABLE IF NOT EXISTS no_project_event_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_context_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL,
+        UNIQUE(project_context_id, session_id, turn_id)
+      );
       CREATE TABLE IF NOT EXISTS source_references (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         batch_id TEXT NOT NULL,
@@ -29206,6 +29219,7 @@ var Storage = class {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_batches(status, next_attempt_at, lease_until);
+      CREATE INDEX IF NOT EXISTS idx_no_project_event_reviews_turn ON no_project_event_reviews(project_context_id, session_id, turn_id);
       CREATE INDEX IF NOT EXISTS idx_source_batch ON source_references(batch_id);
       CREATE INDEX IF NOT EXISTS idx_source_event ON source_references(event_id);
       CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
@@ -29251,17 +29265,32 @@ var Storage = class {
     return context;
   }
   enqueueBatch(batch) {
-    const insert = this.db.prepare(`INSERT INTO outbox_batches (project_context_id, session_id, turn_id, events_json, status, accepted_at) VALUES (?, ?, ?, ?, 'pending', ?)`);
-    try {
-      const result = insert.run(batch.projectContextId, batch.sessionId, batch.turnId, JSON.stringify(batch.events), now());
-      return { batchId: batchId(Number(result.lastInsertRowid)), duplicate: false };
-    } catch (error40) {
-      if (error40 instanceof Error && error40.message.includes("outbox_batches.project_context_id")) {
-        const row = this.db.prepare("SELECT id FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(batch.projectContextId, batch.sessionId, batch.turnId);
-        return { batchId: batchId(row.id), duplicate: true };
+    const transaction = this.db.transaction(() => {
+      const insert = this.db.prepare(`INSERT INTO outbox_batches (project_context_id, session_id, turn_id, events_json, status, accepted_at) VALUES (?, ?, ?, ?, 'pending', ?)`);
+      try {
+        const result = insert.run(batch.projectContextId, batch.sessionId, batch.turnId, JSON.stringify(batch.events), now());
+        this.db.prepare("DELETE FROM no_project_event_reviews WHERE project_context_id=? AND session_id=? AND turn_id=?").run(batch.projectContextId, batch.sessionId, batch.turnId);
+        return { batchId: batchId(Number(result.lastInsertRowid)), duplicate: false };
+      } catch (error40) {
+        if (error40 instanceof Error && error40.message.includes("outbox_batches.project_context_id")) {
+          const row = this.db.prepare("SELECT id FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(batch.projectContextId, batch.sessionId, batch.turnId);
+          this.db.prepare("DELETE FROM no_project_event_reviews WHERE project_context_id=? AND session_id=? AND turn_id=?").run(batch.projectContextId, batch.sessionId, batch.turnId);
+          return { batchId: batchId(row.id), duplicate: true };
+        }
+        throw error40;
       }
-      throw error40;
-    }
+    });
+    return transaction.immediate();
+  }
+  acknowledgeNoProjectEvents(review) {
+    const transaction = this.db.transaction(() => {
+      const batch = this.db.prepare("SELECT 1 FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(review.projectContextId, review.sessionId, review.turnId);
+      if (batch)
+        return { status: "already_recorded", duplicate: false };
+      const result = this.db.prepare(`INSERT INTO no_project_event_reviews (project_context_id, session_id, turn_id, acknowledged_at) VALUES (?, ?, ?, ?) ON CONFLICT(project_context_id, session_id, turn_id) DO NOTHING`).run(review.projectContextId, review.sessionId, review.turnId, now());
+      return { status: "acknowledged", duplicate: result.changes === 0 };
+    });
+    return transaction.immediate();
   }
   listPendingBatches(limit = 20) {
     const timestamp = now();
@@ -29401,8 +29430,19 @@ var Storage = class {
   listAudits(sessionId) {
     return sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all();
   }
-  didRecordProjectEvents(sessionId, turnId) {
-    const row = this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND record_tool_called=1").get(sessionId, turnId);
+  didRecordProjectEvents(projectContextId, sessionId, turnId) {
+    const batch = this.db.prepare("SELECT 1 FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(projectContextId, sessionId, turnId);
+    return Boolean(batch);
+  }
+  didAcknowledgeNoProjectEvents(projectContextId, sessionId, turnId) {
+    const row = this.db.prepare(`SELECT 1 FROM no_project_event_reviews review
+      WHERE review.project_context_id=? AND review.session_id=? AND review.turn_id=?
+        AND NOT EXISTS (
+          SELECT 1 FROM outbox_batches batch
+          WHERE batch.project_context_id=review.project_context_id
+            AND batch.session_id=review.session_id
+            AND batch.turn_id=review.turn_id
+        )`).get(projectContextId, sessionId, turnId);
     return Boolean(row);
   }
   listFailedBatches(contextId) {
@@ -29769,7 +29809,7 @@ function createMcpServer(dependencies = {}) {
     name: "ambient-project",
     version: "0.1.0"
   }, {
-    instructions: "Maintain project context quietly. Use list_projects only to help a user choose a project, bind only after explicit choice, and record meaningful events in one non-empty batch. Do not expose Plane CRUD, delete items, reassign people, or use a second semantic model."
+    instructions: "Maintain project context quietly. Use list_projects only to help a user choose a project, bind only after explicit choice, and before the final reply either record meaningful events in one non-empty batch or acknowledge that this turn has no project events. Do not expose Plane CRUD, delete items, reassign people, or use a second semantic model."
   });
   const panelConnectDomains = panelSession ? [new URL(panelSession.serviceBaseUrl).origin] : [];
   N3(server, "ambient-project-panel", PANEL_RESOURCE_URI, {
@@ -29849,6 +29889,19 @@ function createMcpServer(dependencies = {}) {
       throw new Error("Automatic capture is disabled for this project context");
     const result = storage.enqueueBatch(input);
     return text({ status: "accepted", ...result });
+  });
+  server.registerTool("acknowledge_no_project_events", {
+    title: "Acknowledge no project events",
+    description: "Idempotently acknowledge that the specified work turn was reviewed and produced no project events. This creates no Plane item and no outbox batch.",
+    inputSchema: noProjectEventsReviewSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async (input) => {
+    const context = storage.getContext(input.projectContextId);
+    if (!context)
+      throw new Error("No project context is bound for this projectContextId");
+    if (!context.autoCaptureEnabled)
+      throw new Error("Automatic capture is disabled for this project context");
+    return text(storage.acknowledgeNoProjectEvents(input));
   });
   return { server, storage };
 }

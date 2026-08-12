@@ -14,7 +14,7 @@
 Codex 正常工作
   -> Hook 静默注入项目上下文
   -> 当前 Codex 判断是否出现项目事件
-  -> record_project_events 可靠入队
+  -> record-or-ack：事件可靠入队或无事件审查确认
   -> 后台同步到 Plane
   -> 用户在伴随面板中查看和修正
 ```
@@ -79,7 +79,7 @@ see-my-work/
 1. 插件能被当前 Codex 构建发现并完成一次信任。
 2. `SessionStart` 和 `UserPromptSubmit` 返回的 `additionalContext` 能进入当前模型上下文，且不显示 `statusMessage` 或 `systemMessage`。
 3. Hook 能获得预期的 `cwd`、`session_id` 和回合范围内的 `turn_id`。
-4. 当前 Codex 能依据注入规则，在有项目事件时主动调用一个假的 `record_project_events`，普通闲聊时不调用。
+4. 当前 Codex 能依据注入规则，在有项目事件时主动调用 `record_project_events`，普通闲聊时调用 `acknowledge_no_project_events`。
 5. `PostToolUse` 能观察该 MCP 调用；`Stop` 能记录本回合是否调用过。
 6. 完成一次信任后，自动记录工具不会每次要求用户确认。
 
@@ -104,12 +104,13 @@ see-my-work/
 #### D1-2 领域契约
 
 - 定义 `ProjectContext`、`SourceEvent`、`ProjectEventBatch`、`SourceReference`、`FieldOwnership` 和 `SyncStatus`。
-- 实现并冻结五个 MCP 工具的 Zod schema：
+- 实现并冻结六个项目工作流 MCP 工具的 Zod schema：
   - `list_projects`
   - `get_binding`
   - `bind_project`
   - `change_binding`
   - `record_project_events`
+  - `acknowledge_no_project_events`
 - `record_project_events` 成功返回：
 
 ```json
@@ -136,6 +137,7 @@ see-my-work/
 | `plane_item_cache` | Hook 注入和面板只读所需的精简 Plane 快照 |
 | `field_ownership` | 每个 Plane 字段的 `system`/`user` 所有权和最后系统值摘要 |
 | `turn_audits` | 本回合是否调用记录工具、Hook 是否异常、结束时间 |
+| `no_project_event_reviews` | 本回合已完成无事件审查的幂等确认，不进入 Plane 或 Outbox |
 
 项目事件批次直接使用可读的组合唯一键：
 
@@ -154,7 +156,7 @@ projectContextId + sessionId + turnId
 | `SessionStart` | 规范化 `cwd`，读取绑定和缓存，注入固定规则与项目快照 |
 | `UserPromptSubmit` | 注入 `session_id`、`turn_id`、当前绑定和活跃工作项快照 |
 | `PostToolUse` | 只观察项目 MCP 调用结果，更新本地审计与同步提示 |
-| `Stop` | 结束回合审计；不要求继续、不启动第二个模型 |
+| `Stop` | 结束回合审计；record 或无事件审查确认后放行，两者都缺失时保留一次漏记兜底，不启动第二个模型 |
 | `SessionEnd` | 结束会话审计并唤醒 worker；不等待 Plane 网络 |
 
 Hook 请求路径禁止访问 Plane 网络。注入内容按“编号、标题、状态”排序，最多 30 个活跃项，并设置约 1,500 token 上限；超限时优先保留最近更新和显式关联项。
@@ -165,7 +167,7 @@ Hook 请求路径禁止访问 Plane 网络。注入内容按“编号、标题�
 
 - Skill 描述自然项目工作流：首次绑定、显式记录/更新/完成、安静自动捕获。
 - Skill 不把“项目、任务、看板”等狭窄关键词当成唯一触发条件。
-- `additionalContext` 每回合提醒：结合本轮用户要求、计划、工具结果和最终结论判断是否产生项目事件；有事件时最终回复前至多批量调用一次。
+- `additionalContext` 每回合提醒：结合本轮用户要求、计划、工具结果和最终结论判断是否产生项目事件；有事件时最终回复前批量调用一次 `record_project_events`，无事件时调用一次 `acknowledge_no_project_events`。
 - MCP 全局 instructions 只放稳定规则和工具边界，不放动态项目列表。
 - 自动成功不写入用户最终回复；只有用户显式要求记录/更新/完成时才简短确认。
 
@@ -212,7 +214,8 @@ Demo 的去重以“宁可出现一个可合并的新卡片，也不错误覆盖
 
 #### D2-4 Outbox worker
 
-- `record_project_events` 只负责 SQLite 事务入队，成功后立即返回。
+- `record_project_events` 只负责 SQLite 事务入队，成功后立即返回；如果此前存在同回合无事件确认，则在同一事务中清除确认标记。
+- `acknowledge_no_project_events` 只保存 `project_context_id + session_id + turn_id` 的无事件审查确认，重复调用幂等，已有或后续事件批次不能被它掩盖。
 - worker 独立取出 `pending/retrying` 批次并投射 Plane。
 - worker 每 5 秒处理一次未同步批次。失败时保存最近错误并留在队列，下次继续处理；不引入指数退避、抖动、重试次数 gate 或通用重试框架。
 - 每个 Plane 写操作携带本地 `batchId/eventId` 作为来源尾注，保证网络超时后的重放仍可识别。
@@ -289,7 +292,7 @@ Demo 的去重以“宁可出现一个可合并的新卡片，也不错误覆盖
 |---|---|
 | 单元测试 | cwd 规范化、事件 schema、组合唯一约束、投射规则、所有权判断、固定周期重试、上下文截断 |
 | Hook 契约测试 | 五种官方 payload fixture、缺字段、坏 JSON、数据库被锁、无绑定、捕获关闭 |
-| MCP 契约测试 | 五个工具的权限边界、空批次、重复批次、本地落盘失败、明确完成的歧义处理 |
+| MCP 契约测试 | 六个项目工具的权限边界、空批次、重复批次、无事件确认幂等、本地落盘失败、明确完成的歧义处理 |
 | 集成测试 | SQLite 事务、worker 崩溃恢复、Fake Plane 超时/429/500、重复网络响应 |
 | Plane 冒烟测试 | 列项目、创建/更新/评论/状态、Cloud 或目标自托管版本兼容 |
 | Codex 端到端 | 信任、首次绑定、自动记录、显式完成、闲聊不记录、Hook/MCP/Plane 故障不阻塞 |

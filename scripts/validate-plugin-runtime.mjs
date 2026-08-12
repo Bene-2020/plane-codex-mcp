@@ -19,6 +19,7 @@ if (mcpConfig.mcpServers?.["ambient-project"]?.cwd !== ".") throw new Error("MCP
 const expectedHookCommand = '"${PLUGIN_ROOT}/runtime/bin/ambient-node" "${PLUGIN_ROOT}/runtime/hook-adapter/index.js"';
 const handlers = Object.values(hooksConfig.hooks ?? {}).flatMap((groups) => groups.flatMap((group) => group.hooks ?? []));
 if (handlers.length !== 5 || handlers.some((handler) => handler.command !== expectedHookCommand)) throw new Error("All five hooks must use the packaged sidecar entrypoint");
+if (hooksConfig.hooks?.PostToolUse?.[0]?.matcher !== "^mcp__ambient_project__(record_project_events|acknowledge_no_project_events)$") throw new Error("PostToolUse must cover both record-or-ack tools");
 
 const sidecar = join(runtimeRoot, "bin", "node");
 const entrypoint = join(runtimeRoot, "bin", "ambient-node");
@@ -26,6 +27,7 @@ await access(sidecar, constants.X_OK);
 await access(entrypoint, constants.X_OK);
 const metadata = JSON.parse(await readFile(join(runtimeRoot, "runtime.json"), "utf8"));
 if (metadata.platform !== "darwin" || metadata.arch !== "arm64" || metadata.nodeVersion !== NODE_SIDECAR_VERSION) throw new Error(`Packaged runtime must declare ${NODE_SIDECAR_PLATFORM} Node ${NODE_SIDECAR_VERSION}`);
+if (!(await readFile(join(runtimeRoot, "mcp/index.js"), "utf8")).includes("acknowledge_no_project_events")) throw new Error("Packaged MCP runtime must expose acknowledge_no_project_events");
 const { stdout } = await execFile(sidecar, ["--version"]);
 if (stdout.trim() !== `v${NODE_SIDECAR_VERSION}`) throw new Error(`Packaged Node sidecar is ${stdout.trim()}, expected v${NODE_SIDECAR_VERSION}`);
 

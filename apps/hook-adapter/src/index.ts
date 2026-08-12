@@ -53,10 +53,12 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
     }
     if (eventName === "Stop") {
       storage.auditHook({ eventName, sessionId, turnId: input.turn_id, ended: true });
-      if (context?.autoCaptureEnabled && input.turn_id && !input.stop_hook_active && !storage.didRecordProjectEvents(sessionId, input.turn_id)) {
+      const didRecordProjectEvents = Boolean(context?.id && input.turn_id && storage.didRecordProjectEvents(context.id, sessionId, input.turn_id));
+      const didAcknowledgeNoProjectEvents = Boolean(context?.id && input.turn_id && storage.didAcknowledgeNoProjectEvents(context.id, sessionId, input.turn_id));
+      if (context?.autoCaptureEnabled && input.turn_id && !input.stop_hook_active && !didRecordProjectEvents && !didAcknowledgeNoProjectEvents) {
         return {
           decision: "block",
-          reason: "Before ending this turn, decide whether the user's request, your work, tool results, or conclusion created a meaningful project event. If yes, call mcp__ambient_project__record_project_events exactly once with all events for project context " + context.id + ". If no meaningful event occurred, finish without recording. Do not record ordinary conversation.",
+          reason: "Before ending this turn, decide whether the user's request, your work, tool results, or conclusion created a meaningful project event. If yes, call mcp__ambient_project__record_project_events exactly once with all events for project context " + context.id + ". If no meaningful event occurred, call mcp__ambient_project__acknowledge_no_project_events exactly once for this project context, session, and turn. Do not record ordinary conversation.",
         };
       }
       return {};

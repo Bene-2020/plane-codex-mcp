@@ -47,7 +47,7 @@ Hook 不继承 `[mcp_servers.ambient-project.env]`，而是直接使用 Codex �
 
 每次升级按固定顺序执行：构建和验证；刷新 cachebuster；同步 `plugin/` 到 marketplace；运行 `codex plugin add ambient-project-layer@ambient-local`；确认 MCP 仍使用 marketplace 的稳定 runtime 路径且数据库仍是稳定的插件数据文件；打开 Codex 的 Hook 管理界面复核并信任新的 Hook 定义；完全退出并重启 Desktop；最后用新 task 做下述验收。升级不得新建或切换数据库，已有绑定会保留。Hook 信任按定义哈希保存，因此 `hooks.json` 变化后旧信任不会自动沿用。
 
-重启后新建 task，验收必须同时满足：Hook 注入 `project_1` 而不是“未绑定”；`get_binding` 返回同一 `project_1`；`open_project_panel` 能加载 summary；调用 `record_project_events` 后 `PostToolUse` 审计的 `record_tool_called=1`。任一失败都不能判定升级成功。
+重启后新建 task，验收必须同时满足：Hook 注入 `project_1` 而不是“未绑定”；`get_binding` 返回同一 `project_1`；`open_project_panel` 能加载 summary；有事件时调用 `record_project_events` 后 `PostToolUse` 审计的 `record_tool_called=1`，无事件时调用 `acknowledge_no_project_events` 后 Stop 返回空结果且数据库没有新增 Outbox 批次。任一失败都不能判定升级成功。
 
 配置完成后用 `codex mcp get ambient-project` 检查命令、数据库路径和非敏感变量；不要打印或复制 API key。完全退出并重新启动 Codex Desktop，然后新建一个 task。已有 MCP 子进程不会自动读取修改后的配置。
 
