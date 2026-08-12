@@ -12,3 +12,8 @@ coverage/
 !plugin/panel/
 !plugin/panel/dist/
 !plugin/panel/dist/**
+
+# Pinned Node sidecar build cache and generated plugin binary. The packaging
+# script downloads the declared version and places it in plugin/runtime/bin/.
+vendor/node/
+plugin/runtime/bin/node

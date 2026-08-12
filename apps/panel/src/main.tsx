@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { createRoot } from "react-dom/client";
 import { App as McpApp } from "@modelcontextprotocol/ext-apps";
 import "./styles.css";
@@ -8,7 +8,46 @@ type Item = { id: string; identifier: string; title: string; description?: strin
 type Context = { id: string; canonicalCwd: string; planeProjectName?: string; planeProjectId: string; autoCaptureEnabled: boolean };
 type Source = { eventId: string; eventType: string; summary: string; sourceExcerpt: string; sessionId: string; turnId: string; planeItemId?: string | null };
 type Summary = { context: Context; items: Item[]; sources: Source[]; failures: Array<{ batch_id: string; status: string; attempts: number; last_error?: string }> };
-type PanelApi = ReturnType<typeof createPanelApi>;
+export type PanelApi = ReturnType<typeof createPanelApi>;
+
+interface PanelSessionSetters {
+  setSession: Dispatch<SetStateAction<PanelBootstrap | null>>;
+  setApiClient: Dispatch<SetStateAction<PanelApi | null>>;
+  setSessionError: Dispatch<SetStateAction<string>>;
+  setMessage: Dispatch<SetStateAction<string>>;
+  setLoading: Dispatch<SetStateAction<boolean>>;
+}
+
+export function attachPanelSession(next: PanelBootstrap, expireSession: () => void, setters: PanelSessionSetters): void {
+  setters.setSession(next);
+  setters.setApiClient(() => createPanelApi(next, expireSession));
+  setters.setSessionError("");
+  setters.setMessage("");
+  setters.setLoading(true);
+}
+
+export function handlePanelToolResult(result: { _meta?: unknown }, attachSession: (next: PanelBootstrap) => void, setSessionError: (message: string) => void, setLoading: (value: boolean) => void): void {
+  const next = parsePanelBootstrap(result._meta);
+  if (!next) {
+    setSessionError("没有收到安全的 MCP App 会话，请从 Codex 重新打开项目面板。");
+    setLoading(false);
+    return;
+  }
+  attachSession(next);
+}
+
+export function panelRequestError(error: unknown): string {
+  if (error instanceof TypeError) return `无法访问动态 localhost 面板服务（${error.message}）。浏览器可能拒绝了当前 Origin 的 CORS 请求；这不是项目未绑定。请重试或从 Codex 重新打开面板。`;
+  return error instanceof Error ? error.message : String(error);
+}
+
+export async function loadPanelSummary(apiClient: PanelApi, session: PanelBootstrap, sessionMode: "host" | "standalone", cwd: string, storedCwd: string | null): Promise<Summary> {
+  if (sessionMode === "host") return await apiClient<Summary>(`/api/projects/${session.projectContextId}/summary`);
+  const requestedCwd = cwd || storedCwd || ".";
+  const context = await apiClient<Context | null>(`/api/context?cwd=${encodeURIComponent(requestedCwd)}`);
+  if (!context) throw new Error(`No project is bound to ${requestedCwd}`);
+  return await apiClient<Summary>(`/api/projects/${context.id}/summary`);
+}
 
 function App() {
   const [cwd, setCwd] = useState("");
@@ -20,6 +59,7 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState("all");
   const [message, setMessage] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(true);
 
   const expireSession = () => {
@@ -28,14 +68,11 @@ function App() {
     setSummary(null);
     setSelectedId(null);
     setLoading(false);
+    setLoadError("");
     setSessionError("本地服务已重启，请从 Codex 重新初始化面板。");
   };
   const attachSession = (next: PanelBootstrap) => {
-    setSession(next);
-    setApiClient(createPanelApi(next, expireSession));
-    setSessionError("");
-    setMessage("");
-    setLoading(true);
+    attachPanelSession(next, expireSession, { setSession, setApiClient, setSessionError, setMessage, setLoading });
   };
 
   useEffect(() => {
@@ -48,13 +85,7 @@ function App() {
     let active = true;
     host.ontoolresult = (result) => {
       if (!active) return;
-      const next = parsePanelBootstrap(result._meta);
-      if (!next) {
-        setSessionError("没有收到安全的 MCP App 会话，请从 Codex 重新打开项目面板。");
-        setLoading(false);
-        return;
-      }
-      attachSession(next);
+      handlePanelToolResult(result, attachSession, setSessionError, setLoading);
     };
     void host.connect().catch(() => {
       if (!active) return;
@@ -70,23 +101,25 @@ function App() {
 
   const request = <T,>(path: string, init?: RequestInit): Promise<T> => apiClient ? apiClient<T>(path, init) : Promise.reject(new Error("Panel session is not initialized"));
   const load = async () => {
-    if (!apiClient || !session) return;
+    if (!apiClient || !session) {
+      setMessage("Panel session is not initialized. Reopen the panel from Codex.");
+      return;
+    }
     setLoading(true);
+    setMessage("");
+    setLoadError("");
     try {
-      let next: Summary;
-      if (sessionMode === "standalone") {
-        const context = await request<Context | null>(`/api/context?cwd=${encodeURIComponent(cwd || window.localStorage.getItem("ambient.cwd") || ".")}`);
-        if (!context) { setSummary(null); return; }
-        next = await request<Summary>(`/api/projects/${context.id}/summary`);
-      } else {
-        next = await request<Summary>(`/api/projects/${session.projectContextId}/summary`);
-      }
+      const next = await loadPanelSummary(apiClient, session, sessionMode, cwd, window.localStorage.getItem("ambient.cwd"));
       setSummary(next);
       setCwd(next.context.canonicalCwd);
       window.localStorage.setItem("ambient.cwd", next.context.canonicalCwd);
       setSelectedId((current) => current ?? next.items[0]?.id ?? null);
     } catch (error) {
-      if (!(error instanceof SessionExpiredError)) setMessage(error instanceof Error ? error.message : String(error));
+      if (!(error instanceof SessionExpiredError)) {
+        const detail = panelRequestError(error);
+        setMessage(detail);
+        if (!summary) setLoadError(detail);
+      }
     }
     finally { setLoading(false); }
   };
@@ -101,7 +134,7 @@ function App() {
     return <main className="shell loading"><div className="session-card"><span className="eyebrow">AMBIENT PROJECT LAYER</span><h1>Waiting for Codex</h1><p>{sessionError || "从 Codex 初始化项目面板后，这里会建立一次性的本地会话。"}</p></div></main>;
   }
   if (loading && !summary) return <main className="shell loading">Loading project panel…</main>;
-  if (!summary) return <main className="shell empty"><div className="empty-card"><span className="eyebrow">AMBIENT PROJECT LAYER</span><h1>No project context yet</h1><p>Bind this working directory from Codex with the ambient project skill, then reopen the panel.</p><label>Working directory<input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/Users/…/project" /></label><button onClick={() => void load()}>Load project</button>{message && <p className="error">{message}</p>}</div></main>;
+  if (!summary) return <main className="shell empty"><div className="empty-card"><span className="eyebrow">AMBIENT PROJECT LAYER</span>{loadError ? <><h1>Project panel unavailable</h1><p className="error">{loadError}</p><p>项目上下文未被判定为未绑定；这是一次面板服务请求失败。请重试或从 Codex 重新打开面板。</p><button onClick={() => void load()}>Retry</button></> : <><h1>No project context yet</h1><p>Bind this working directory from Codex with the ambient project skill, then reopen the panel.</p><label>Working directory<input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/Users/…/project" /></label><button onClick={() => void load()}>Load project</button>{message && <p className="error">{message}</p>}</>}</div></main>;
 
   const updateContext = async (enabled: boolean) => { await request(`/api/projects/${summary.context.id}/auto-capture`, { method: "PATCH", body: JSON.stringify({ enabled }) }); setSummary({ ...summary, context: { ...summary.context, autoCaptureEnabled: enabled } }); };
   const edit = async (patch: Partial<Item>) => { if (!selected) return; const updated = await request<Item>(`/api/items/${selected.id}`, { method: "PATCH", body: JSON.stringify(patch) }); setSummary({ ...summary, items: summary.items.map((item) => item.id === updated.id ? { ...item, ...updated } : item) }); setMessage("已保存"); };
@@ -135,4 +168,4 @@ function Detail({ item, items, sources, onEdit, onMerge, onArchive, onDelete }: 
 function FailureList({ failures, contextId, request, onDone }: { failures: Summary["failures"]; contextId: string; request: PanelApi; onDone: () => void }) { return <div className="failures">{failures.length ? failures.map((failure) => <div className="failure" key={failure.batch_id}><strong>{failure.batch_id}</strong><p>{failure.last_error ?? failure.status}</p><button className="ghost" onClick={async () => { await request(`/api/projects/${contextId}/retry/${failure.batch_id}`, { method: "POST" }); onDone(); }}>重试</button></div>) : <div className="blank">没有同步失败。</div>}</div>; }
 function labelStatus(status?: string): string { return ({ captured: "Captured", planned: "已规划", in_progress: "进行中", done: "已完成", dropped: "已放弃" } as Record<string, string>)[status ?? ""] ?? status ?? "未知"; }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
+if (typeof document !== "undefined") createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);

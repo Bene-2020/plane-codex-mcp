@@ -4104,8 +4104,60 @@ function buildAdditionalContext(args) {
   return lines.join("\n").slice(0, 6e3);
 }
 
+// packages/storage/dist/database.js
+import { DatabaseSync } from "node:sqlite";
+var SqliteStatement = class {
+  statement;
+  constructor(statement) {
+    this.statement = statement;
+  }
+  all(...values) {
+    return this.statement.all(...values);
+  }
+  get(...values) {
+    return this.statement.get(...values);
+  }
+  run(...values) {
+    const result = this.statement.run(...values);
+    return { changes: Number(result.changes), lastInsertRowid: Number(result.lastInsertRowid) };
+  }
+};
+var SqliteDatabase = class {
+  database;
+  constructor(filename) {
+    this.database = new DatabaseSync(filename);
+  }
+  prepare(sql) {
+    return new SqliteStatement(this.database.prepare(sql));
+  }
+  exec(sql) {
+    this.database.exec(sql);
+  }
+  pragma(statement) {
+    this.database.exec(`PRAGMA ${statement}`);
+  }
+  transaction(callback) {
+    const run = (begin) => {
+      this.database.exec(begin);
+      try {
+        const result = callback();
+        this.database.exec("COMMIT");
+        return result;
+      } catch (error) {
+        this.database.exec("ROLLBACK");
+        throw error;
+      }
+    };
+    const transaction = (() => run("BEGIN"));
+    transaction.immediate = () => run("BEGIN IMMEDIATE");
+    return transaction;
+  }
+  close() {
+    this.database.close();
+  }
+};
+
 // packages/storage/dist/index.js
-import Database from "better-sqlite3";
 function now() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -4114,7 +4166,7 @@ var Storage = class {
   leaseMs;
   constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project-demo.sqlite", options = {}) {
     this.leaseMs = options.leaseMs ?? 3e4;
-    this.db = new Database(filename);
+    this.db = new SqliteDatabase(filename);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
     this.db.pragma("foreign_keys = ON");
@@ -4409,6 +4461,10 @@ var Storage = class {
   listAudits(sessionId) {
     return sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all();
   }
+  didRecordProjectEvents(sessionId, turnId) {
+    const row = this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND record_tool_called=1").get(sessionId, turnId);
+    return Boolean(row);
+  }
   listFailedBatches(contextId) {
     return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status NOT IN ('synced','corrected') ORDER BY id DESC").all(contextId);
   }
@@ -4487,14 +4543,23 @@ var Storage = class {
 };
 
 // apps/hook-adapter/dist/index.js
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 function output(value) {
   process.stdout.write(`${JSON.stringify(value)}
 `);
 }
-var recordProjectEventsToolName = "mcp__ambient-project__record_project_events";
+var recordProjectEventsToolName = "mcp__ambient_project__record_project_events";
+function createHookStorage() {
+  const pluginData = process.env.PLUGIN_DATA ?? process.env.CLAUDE_PLUGIN_DATA;
+  const databasePath = pluginData ? join(pluginData, "ambient.sqlite") : process.env.AMBIENT_DB_PATH;
+  if (!databasePath)
+    throw new Error("PLUGIN_DATA or AMBIENT_DB_PATH is required for Ambient Project hooks");
+  if (pluginData)
+    mkdirSync(pluginData, { recursive: true });
+  return new Storage(databasePath);
+}
 async function handleHook(raw, providedStorage) {
   let input;
   try {
@@ -4508,7 +4573,7 @@ async function handleHook(raw, providedStorage) {
     return {};
   let storage = providedStorage;
   try {
-    storage ??= new Storage();
+    storage ??= createHookStorage();
     const cwd = input.cwd ? canonicalizeCwd(input.cwd) : void 0;
     const context = cwd ? storage.getContextByCwd(cwd) : null;
     if (eventName === "PostToolUse") {
@@ -4518,6 +4583,12 @@ async function handleHook(raw, providedStorage) {
     }
     if (eventName === "Stop") {
       storage.auditHook({ eventName, sessionId, turnId: input.turn_id, ended: true });
+      if (context?.autoCaptureEnabled && input.turn_id && !input.stop_hook_active && !storage.didRecordProjectEvents(sessionId, input.turn_id)) {
+        return {
+          decision: "block",
+          reason: "Before ending this turn, decide whether the user's request, your work, tool results, or conclusion created a meaningful project event. If yes, call mcp__ambient_project__record_project_events exactly once with all events for project context " + context.id + ". If no meaningful event occurred, finish without recording. Do not record ordinary conversation."
+        };
+      }
       return {};
     }
     if (eventName === "SessionEnd") {

@@ -5,7 +5,7 @@ import { createPlaneAdapter, EventCoordinator, PlaneAdapter, UpdateItemInput } f
 import { Storage } from "@ambient/storage";
 import { createSessionToken, matchesSessionToken, SESSION_TOKEN_HEADER } from "./session.js";
 
-export const DEFAULT_CORS_ORIGINS = ["http://127.0.0.1:4318", "http://localhost:4318", "null"] as const;
+export const DEFAULT_CORS_ORIGINS = ["https://web-sandbox.oaiusercontent.com", "http://127.0.0.1:4318", "http://localhost:4318", "null"] as const;
 
 export class OutboxWorker {
   private timer: NodeJS.Timeout | undefined;
@@ -77,8 +77,8 @@ export type RunningService = ReturnType<typeof createService> & {
 };
 
 export function createService(args: ServiceOptions = {}) {
-  const storage = args.storage ?? new Storage();
   const plane = args.plane ?? createPlaneAdapter();
+  const storage = args.storage ?? new Storage();
   const coordinator = new EventCoordinator(storage, plane);
   const worker = new OutboxWorker(storage, coordinator);
   const sessionToken = createSessionToken(args.sessionToken ?? process.env.AMBIENT_SESSION_TOKEN);

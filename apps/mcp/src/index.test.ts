@@ -1,5 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { App as McpApp } from "@modelcontextprotocol/ext-apps";
+import { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { describe, expect, it } from "vitest";
 import { FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
@@ -67,6 +69,43 @@ describe("ambient MCP tools and App bootstrap", () => {
     }
   });
 
+  it("delivers open_project_panel metadata through the real MCP App host bridge", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const sessionToken = "a".repeat(43);
+    const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter(), panelSession: { serviceBaseUrl: "http://127.0.0.1:4317", sessionToken } });
+    const client = new Client({ name: "panel-host-protocol-test", version: "0.1.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const [appTransport, bridgeTransport] = InMemoryTransport.createLinkedPair();
+    const app = new McpApp({ name: "Ambient Project Panel", version: "0.1.0" }, {}, { autoResize: false });
+    const bridge = new AppBridge(client, { name: "Codex Desktop protocol test", version: "0.1.0" }, { serverTools: {} });
+    let receivedBootstrap: unknown = null;
+    app.ontoolresult = (result) => { receivedBootstrap = result._meta?.[PANEL_BOOTSTRAP_META_KEY]; };
+
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    await bridge.connect(bridgeTransport);
+    try {
+      await app.connect(appTransport);
+      const result = await client.callTool({ name: "open_project_panel", arguments: { projectContextId: context.id } });
+      await bridge.sendToolInput({ arguments: { projectContextId: context.id } });
+      await bridge.sendToolResult(result);
+
+      expect(receivedBootstrap).toEqual({
+        serviceBaseUrl: "http://127.0.0.1:4317",
+        sessionToken,
+        projectContextId: context.id,
+      });
+      expect(JSON.stringify(result.content)).not.toContain(sessionToken);
+    } finally {
+      await appTransport.close();
+      await bridgeTransport.close();
+      await client.close();
+      await server.close();
+      storage.close();
+    }
+  });
+
   it("fails safely when no panel bootstrap session is injected", async () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
@@ -94,7 +133,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     delete process.env.AMBIENT_SESSION_TOKEN;
     delete process.env.AMBIENT_SERVICE_BASE_URL;
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const runtime = await startMcpRuntime({ storage: new Storage(":memory:"), transport: serverTransport });
+    const runtime = await startMcpRuntime({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter(), transport: serverTransport });
     const client = new Client({ name: "ambient-runtime-client", version: "0.1.0" });
     const context = runtime.service.storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     try {
@@ -118,7 +157,7 @@ describe("ambient MCP tools and App bootstrap", () => {
       else process.env.AMBIENT_SERVICE_BASE_URL = previousBaseUrl;
     }
 
-    const restarted = await startMcpRuntime({ storage: new Storage(":memory:") });
+    const restarted = await startMcpRuntime({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter() });
     try {
       expect(restarted.sessionToken).not.toBe(runtime.sessionToken);
       const oldSession = await fetch(`${restarted.service.baseUrl}/api/context`, { headers: { "X-Ambient-Session-Token": runtime.sessionToken } });
@@ -127,4 +166,5 @@ describe("ambient MCP tools and App bootstrap", () => {
       await restarted.close();
     }
   });
+
 });

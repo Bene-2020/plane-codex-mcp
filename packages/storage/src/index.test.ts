@@ -1,7 +1,7 @@
-import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { Storage } from "./index.js";
 
@@ -60,7 +60,7 @@ describe("SQLite storage", () => {
   it("migrates an old outbox schema without losing batch or source data", () => {
     const directory = mkdtempSync(join(tmpdir(), "ambient-migration-"));
     const filename = join(directory, "outbox.sqlite");
-    const old = new Database(filename);
+    const old = new DatabaseSync(filename);
     old.exec(`
       CREATE TABLE project_contexts (id INTEGER PRIMARY KEY AUTOINCREMENT, canonical_cwd TEXT NOT NULL UNIQUE, plane_base_url TEXT NOT NULL, workspace_slug TEXT NOT NULL, plane_project_id TEXT NOT NULL, plane_project_name TEXT, auto_capture_enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE outbox_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, project_context_id TEXT NOT NULL, session_id TEXT NOT NULL, turn_id TEXT NOT NULL, events_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, accepted_at TEXT NOT NULL, UNIQUE(project_context_id, session_id, turn_id));

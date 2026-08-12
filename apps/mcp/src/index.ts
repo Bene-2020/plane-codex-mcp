@@ -56,8 +56,8 @@ const bindInput = (input: z.infer<typeof bindingSchema>) => ({ ...input, planeBa
 export interface McpServerDependencies { storage?: Storage; plane?: PlaneAdapter; panelSession?: PanelSession; }
 
 export function createMcpServer(dependencies: McpServerDependencies = {}): { server: McpServer; storage: Storage } {
-  const storage = dependencies.storage ?? new Storage();
   const plane = dependencies.plane ?? createPlaneAdapter();
+  const storage = dependencies.storage ?? new Storage();
   const panelSession = dependencies.panelSession ? {
     serviceBaseUrl: normalizeServiceBaseUrl(dependencies.panelSession.serviceBaseUrl),
     sessionToken: dependencies.panelSession.sessionToken,

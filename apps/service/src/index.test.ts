@@ -38,16 +38,23 @@ describe("local service and outbox worker", () => {
     await service.app.close();
   });
 
-  it("allows only the MCP App and local development origins", async () => {
-    const service = createService({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter() });
-    const allowed = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "http://127.0.0.1:4318" } });
-    const sandboxed = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "null" } });
+  it("allows the Codex web-sandbox and development origins, but rejects an unlisted origin", async () => {
+    const storage = new Storage(":memory:");
+    const service = createService({ storage, plane: new FakePlaneAdapter(), sessionToken: "a".repeat(43) });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const webSandboxSummary = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/summary`, headers: { origin: "https://web-sandbox.oaiusercontent.com", "X-Ambient-Session-Token": service.sessionToken } });
+    const nullOrigin = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "null" } });
+    const loopback = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "http://127.0.0.1:4318" } });
     const rejected = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "https://not-the-panel.example" } });
-    const preflight = await service.app.inject({ method: "OPTIONS", url: "/api/context", headers: { origin: "http://127.0.0.1:4318", "access-control-request-method": "GET", "access-control-request-headers": "content-type,x-ambient-session-token" } });
-    expect(allowed.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:4318");
-    expect(sandboxed.headers["access-control-allow-origin"]).toBe("null");
+    const preflight = await service.app.inject({ method: "OPTIONS", url: `/api/projects/${context.id}/summary`, headers: { origin: "https://web-sandbox.oaiusercontent.com", "access-control-request-method": "GET", "access-control-request-headers": "content-type,x-ambient-session-token" } });
+    expect(webSandboxSummary.statusCode).toBe(200);
+    expect(webSandboxSummary.headers["access-control-allow-origin"]).toBe("https://web-sandbox.oaiusercontent.com");
+    expect(webSandboxSummary.json().context.id).toBe(context.id);
+    expect(nullOrigin.headers["access-control-allow-origin"]).toBe("null");
+    expect(loopback.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:4318");
     expect(rejected.headers["access-control-allow-origin"]).toBeUndefined();
     expect(preflight.statusCode).toBe(204);
+    expect(preflight.headers["access-control-allow-origin"]).toBe("https://web-sandbox.oaiusercontent.com");
     expect(preflight.headers["access-control-allow-headers"]).toBe("Content-Type, X-Ambient-Session-Token");
     await service.app.close();
   });

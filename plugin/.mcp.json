@@ -1,14 +1,16 @@
 {
   "mcpServers": {
     "ambient-project": {
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/runtime/mcp/index.js"],
-      "env": {
-        "AMBIENT_DB_PATH": "${AMBIENT_DB_PATH}",
-        "PLANE_MODE": "${PLANE_MODE}",
-        "PLANE_BASE_URL": "${PLANE_BASE_URL}",
-        "PLANE_API_KEY": "${PLANE_API_KEY}"
-      }
+      "command": "runtime/bin/ambient-node",
+      "args": ["runtime/mcp/index.js"],
+      "cwd": ".",
+      "env_vars": [
+        "AMBIENT_DB_PATH",
+        "PLANE_MODE",
+        "PLANE_BASE_URL",
+        "PLANE_API_KEY",
+        "PLANE_WORKSPACE_SLUG"
+      ]
     }
   }
 }

@@ -28461,16 +28461,40 @@ function stepSourceEventId(eventIdValue, index) {
 function itemUrl(baseUrl, workspace, project, itemId) {
   return `${baseUrl.replace(/\/$/, "")}/workspaces/${encodeURIComponent(workspace)}/projects/${encodeURIComponent(project)}/work-items/${encodeURIComponent(itemId)}`;
 }
+function bypassPlainHttpsProxyForPlane(baseUrl) {
+  const proxy = process.env.https_proxy?.trim() || process.env.HTTPS_PROXY?.trim();
+  if (!proxy || !proxy.toLowerCase().startsWith("http://"))
+    return;
+  const host = new URL(baseUrl).hostname;
+  const entries = (process.env.no_proxy ?? process.env.NO_PROXY ?? "").split(/[,\s]+/).filter(Boolean);
+  if (entries.includes("*") || entries.includes(host))
+    return;
+  process.env.no_proxy = [...entries, host].join(",");
+}
+var planeTypeNames = {
+  task: "Task",
+  bug: "Bug",
+  decision: "Decision",
+  idea: "Idea",
+  risk: "Risk",
+  milestone: "Milestone"
+};
+function kindForPlaneTypeName(name) {
+  const normalized = name.trim().toLowerCase();
+  return Object.entries(planeTypeNames).find(([, typeName]) => typeName.toLowerCase() === normalized)?.[0];
+}
 var PlaneSdkAdapter = class {
   baseUrl;
   defaultWorkspace;
   client;
   stateIds = /* @__PURE__ */ new Map();
   stateNames = /* @__PURE__ */ new Map();
-  constructor(baseUrl, apiKey, defaultWorkspace) {
+  typeIds = /* @__PURE__ */ new Map();
+  typeKinds = /* @__PURE__ */ new Map();
+  constructor(baseUrl, apiKey, defaultWorkspace, client = new PlaneClient({ baseUrl, apiKey })) {
     this.baseUrl = baseUrl;
     this.defaultWorkspace = defaultWorkspace;
-    this.client = new PlaneClient({ baseUrl, apiKey });
+    this.client = client;
   }
   async listProjects() {
     const payload = await this.client.projects.list(this.defaultWorkspace, { limit: 100 });
@@ -28478,6 +28502,7 @@ var PlaneSdkAdapter = class {
   }
   async listItems(context) {
     await this.loadStates(context);
+    await this.loadTypes(context);
     const payload = await this.client.workItems.list(context.workspaceSlug, context.planeProjectId, { limit: 100 });
     return payload.results.map((item) => this.fromSdk(context, item));
   }
@@ -28486,6 +28511,7 @@ var PlaneSdkAdapter = class {
     if (existing)
       return { ...existing, isSystemCreated: true, kind: input.kind, parentId: input.parentId ?? existing.parentId };
     const stateId = await this.resolveStateId(context, input.status);
+    const typeId = await this.resolveTypeId(context, input.kind);
     const description = `${input.description}
 
 ${sourceMarker(input.sourceEventId)}`;
@@ -28495,6 +28521,7 @@ ${sourceMarker(input.sourceEventId)}`;
         name: input.title,
         description_html: description,
         state: stateId,
+        type: typeId,
         target_date: input.dueDate ?? void 0,
         parent: input.parentId
       });
@@ -28514,13 +28541,16 @@ ${sourceMarker(input.sourceEventId)}`;
   }
   async updateItem(context, itemId, input) {
     const stateId = input.status ? await this.resolveStateId(context, input.status) : void 0;
+    const typeId = input.kind ? await this.resolveTypeId(context, input.kind) : void 0;
     const payload = await this.client.workItems.update(context.workspaceSlug, context.planeProjectId, itemId, {
       name: input.title,
       description_html: input.description,
       state: stateId,
+      type: typeId,
       target_date: input.dueDate ?? void 0
     });
-    return this.fromSdk(context, payload);
+    const updated = this.fromSdk(context, payload);
+    return input.kind ? { ...updated, kind: input.kind } : updated;
   }
   async addActivity(context, itemId, body, sourceEventId) {
     const marker = activityMarker(sourceEventId);
@@ -28575,6 +28605,34 @@ ${marker}`, "") ?? "", createdAt: String(comment.created_at ?? (/* @__PURE__ */ 
     this.stateIds.set(key, match.id);
     return match.id;
   }
+  async loadTypes(context) {
+    const types = await this.client.workItemTypes.list(context.workspaceSlug, context.planeProjectId);
+    for (const type of types) {
+      const kind = kindForPlaneTypeName(type.name);
+      if (!kind)
+        continue;
+      this.typeIds.set(this.typeKindKey(context, kind), type.id);
+      this.typeKinds.set(this.typeIdKey(context, type.id), kind);
+    }
+    return types;
+  }
+  async resolveTypeId(context, kind) {
+    const key = this.typeKindKey(context, kind);
+    const cached2 = this.typeIds.get(key);
+    if (cached2)
+      return cached2;
+    const types = await this.loadTypes(context);
+    const existing = types.find((type2) => kindForPlaneTypeName(type2.name) === kind);
+    const type = existing ?? await this.client.workItemTypes.create(context.workspaceSlug, context.planeProjectId, {
+      name: planeTypeNames[kind],
+      description: `Ambient project ${kind} records`,
+      is_active: true,
+      is_epic: false
+    });
+    this.typeIds.set(key, type.id);
+    this.typeKinds.set(this.typeIdKey(context, type.id), kind);
+    return type.id;
+  }
   fromSdk(context, item) {
     const stateId = typeof item.state === "string" ? item.state : void 0;
     const stateName = stateId ? this.stateNames.get(this.stateKey(context, stateId)) : void 0;
@@ -28587,6 +28645,7 @@ ${marker}`, "") ?? "", createdAt: String(comment.created_at ?? (/* @__PURE__ */ 
       stateId,
       stateName: displayState,
       status: toLifecycle(displayState),
+      kind: this.kindFromSdk(context, item),
       dueDate: item.target_date ?? null,
       projectId: context.planeProjectId,
       parentId: item.parent,
@@ -28598,17 +28657,37 @@ ${marker}`, "") ?? "", createdAt: String(comment.created_at ?? (/* @__PURE__ */ 
   stateKey(context, stateId) {
     return `${context.workspaceSlug}/${context.planeProjectId}/${stateId}`;
   }
+  typeKindKey(context, kind) {
+    return `${context.workspaceSlug}/${context.planeProjectId}/${kind}`;
+  }
+  typeIdKey(context, typeId) {
+    return `${context.workspaceSlug}/${context.planeProjectId}/${typeId}`;
+  }
+  kindFromSdk(context, item) {
+    const value = item;
+    if (typeof value.type === "object" && value.type !== null) {
+      const type = value.type;
+      if (typeof type.id === "string" && typeof type.name === "string") {
+        const kind = kindForPlaneTypeName(type.name);
+        if (kind)
+          this.typeKinds.set(this.typeIdKey(context, type.id), kind);
+        return kind;
+      }
+    }
+    const typeId = typeof value.type === "string" ? value.type : typeof value.type_id === "string" ? value.type_id : void 0;
+    return typeId ? this.typeKinds.get(this.typeIdKey(context, typeId)) : void 0;
+  }
 };
 function toLifecycle(status) {
   const normalized = status.toLowerCase();
   if (normalized.includes("done") || normalized.includes("complete"))
     return "done";
-  if (normalized.includes("progress") || normalized.includes("started"))
-    return "in_progress";
   if (normalized.includes("drop") || normalized.includes("cancel"))
     return "dropped";
-  if (normalized.includes("plan"))
+  if (normalized.includes("plan") || normalized.includes("todo") || normalized.includes("unstarted"))
     return "planned";
+  if (normalized.includes("progress") || normalized.includes("started"))
+    return "in_progress";
   return "captured";
 }
 var FakePlaneAdapter = class {
@@ -28779,6 +28858,15 @@ var EventCoordinator = class {
         assertClaim?.();
         await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
         assertClaim?.();
+        if (event.type === "progress" && event.relatedItemId && existing.isSystemCreated) {
+          const owned = this.storage.getFieldOwnership(existing.id, "status");
+          if (!owned || owned.owner === "system") {
+            assertClaim?.();
+            const updated = await this.plane.updateItem(context, existing.id, { status: "in_progress" });
+            assertClaim?.();
+            this.storage.cacheItem(context.id, updated, existing.isSystemCreated);
+          }
+        }
         this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
         return existing.id;
       } else if (event.type === "decision") {
@@ -28940,7 +29028,9 @@ function appendDescription(existing, next) {
 ` : ""}${next}`;
 }
 function createPlaneAdapter() {
-  const mode = process.env.PLANE_MODE ?? "fake";
+  const mode = process.env.PLANE_MODE?.trim();
+  if (!mode)
+    throw new Error("PLANE_MODE is required; use PLANE_MODE=sdk for the formal plugin or PLANE_MODE=fake only for explicit tests");
   if (mode === "fake")
     return new FakePlaneAdapter();
   if (mode !== "sdk")
@@ -28950,11 +29040,64 @@ function createPlaneAdapter() {
   const workspaceSlug = process.env.PLANE_WORKSPACE_SLUG;
   if (!baseUrl || !apiKey || !workspaceSlug)
     throw new Error("PLANE_BASE_URL, PLANE_API_KEY, and PLANE_WORKSPACE_SLUG are required when PLANE_MODE=sdk");
+  bypassPlainHttpsProxyForPlane(baseUrl);
   return new PlaneSdkAdapter(baseUrl, apiKey, workspaceSlug);
 }
 
+// packages/storage/dist/database.js
+import { DatabaseSync } from "node:sqlite";
+var SqliteStatement = class {
+  statement;
+  constructor(statement) {
+    this.statement = statement;
+  }
+  all(...values) {
+    return this.statement.all(...values);
+  }
+  get(...values) {
+    return this.statement.get(...values);
+  }
+  run(...values) {
+    const result = this.statement.run(...values);
+    return { changes: Number(result.changes), lastInsertRowid: Number(result.lastInsertRowid) };
+  }
+};
+var SqliteDatabase = class {
+  database;
+  constructor(filename) {
+    this.database = new DatabaseSync(filename);
+  }
+  prepare(sql) {
+    return new SqliteStatement(this.database.prepare(sql));
+  }
+  exec(sql) {
+    this.database.exec(sql);
+  }
+  pragma(statement) {
+    this.database.exec(`PRAGMA ${statement}`);
+  }
+  transaction(callback) {
+    const run = (begin) => {
+      this.database.exec(begin);
+      try {
+        const result = callback();
+        this.database.exec("COMMIT");
+        return result;
+      } catch (error40) {
+        this.database.exec("ROLLBACK");
+        throw error40;
+      }
+    };
+    const transaction = (() => run("BEGIN"));
+    transaction.immediate = () => run("BEGIN IMMEDIATE");
+    return transaction;
+  }
+  close() {
+    this.database.close();
+  }
+};
+
 // packages/storage/dist/index.js
-import Database from "better-sqlite3";
 function now() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -28963,7 +29106,7 @@ var Storage = class {
   leaseMs;
   constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project-demo.sqlite", options = {}) {
     this.leaseMs = options.leaseMs ?? 3e4;
-    this.db = new Database(filename);
+    this.db = new SqliteDatabase(filename);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
     this.db.pragma("foreign_keys = ON");
@@ -29258,6 +29401,10 @@ var Storage = class {
   listAudits(sessionId) {
     return sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all();
   }
+  didRecordProjectEvents(sessionId, turnId) {
+    const row = this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND record_tool_called=1").get(sessionId, turnId);
+    return Boolean(row);
+  }
   listFailedBatches(contextId) {
     return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status NOT IN ('synced','corrected') ORDER BY id DESC").all(contextId);
   }
@@ -29362,7 +29509,7 @@ function matchesSessionToken(candidate, expected) {
 }
 
 // apps/service/dist/index.js
-var DEFAULT_CORS_ORIGINS = ["http://127.0.0.1:4318", "http://localhost:4318", "null"];
+var DEFAULT_CORS_ORIGINS = ["https://web-sandbox.oaiusercontent.com", "http://127.0.0.1:4318", "http://localhost:4318", "null"];
 var OutboxWorker = class {
   storage;
   coordinator;
@@ -29431,8 +29578,8 @@ function jsonError(error40) {
   return { error: error40 instanceof Error ? error40.message : String(error40) };
 }
 function createService(args = {}) {
-  const storage = args.storage ?? new Storage();
   const plane = args.plane ?? createPlaneAdapter();
+  const storage = args.storage ?? new Storage();
   const coordinator = new EventCoordinator(storage, plane);
   const worker = new OutboxWorker(storage, coordinator);
   const sessionToken = createSessionToken(args.sessionToken ?? process.env.AMBIENT_SESSION_TOKEN);
@@ -29610,8 +29757,8 @@ var bindingSchema = external_exports2.object({
 });
 var bindInput = (input) => ({ ...input, planeBaseUrl: input.planeBaseUrl ?? process.env.PLANE_BASE_URL ?? "https://api.plane.so" });
 function createMcpServer(dependencies = {}) {
-  const storage = dependencies.storage ?? new Storage();
   const plane = dependencies.plane ?? createPlaneAdapter();
+  const storage = dependencies.storage ?? new Storage();
   const panelSession = dependencies.panelSession ? {
     serviceBaseUrl: normalizeServiceBaseUrl(dependencies.panelSession.serviceBaseUrl),
     sessionToken: dependencies.panelSession.sessionToken

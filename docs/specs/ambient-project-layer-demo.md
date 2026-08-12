@@ -145,6 +145,8 @@ Codex Hook 不提供可直接使用的项目标识，只提供 `cwd`、`session_
 
 项目记录包含种类、标题、描述、生命周期状态、来源引用、时间戳、可选截止日期和 Plane 标识。本地只保存绑定、待同步事件、来源引用、工作回合组合唯一约束和同步元数据，不维护一套与 Plane 竞争的用户可见项目记录数据库。
 
+六种项目记录映射为同名的 Plane Work Item Type：`Task`、`Bug`、`Decision`、`Idea`、`Risk`、`Milestone`。适配器在项目内复用已有同名类型，缺少时按需创建，并在 Work Item 的 `type` 字段写入类型 ID。远端刷新先读取项目 Work Item Types，再按 Work Item 的 type ID 恢复本地 `kind`；分类不依赖仅存在于 SQLite 的缓存字段。
+
 进度通常不会创建新的项目记录，而是作为活动条目附加到最相关的已有记录上。
 
 ### 6.4 生命周期与同步状态
@@ -254,20 +256,17 @@ Demo 使用 Plane 作为持久项目后端。
 
 | 项目信息 | Plane 表示方式 |
 |---|---|
-| 任务 | 工作项 |
-| Bug | 使用 Bug 类型或标签的工作项 |
-| 想法 | Intake 条目或已捕获工作项 |
-| 风险 | 使用 Risk 类型或标签的工作项 |
-| 里程碑 | Demo 阶段先使用工作项，Cycle/Module 映射延后 |
+| 任务、Bug、想法、风险 | 使用同名 Plane Work Item Type 的工作项 |
+| 里程碑 | 使用 `Milestone` Work Item Type；独立 Plane Milestone 实体映射延后 |
 | 进度 | 已有工作项的评论或活动 |
-| 决策 | 优先作为关联工作项的活动；无关联且值得独立追踪时创建带 Decision 标签的工作项 |
+| 决策 | 优先作为关联工作项的活动；无关联且值得独立追踪时创建 `Decision` Work Item Type 的工作项 |
 | 计划 | 一个父工作项，明确的执行步骤作为子工作项 |
 | 明确完成 | 更新关联工作项的状态 |
 | 来源引用 | 自动创建对象中的结构化尾注或元数据 |
 
 所有自动生成的可执行工作都进入专用的 `Captured` 工作流状态，或等价的 Plane Intake 状态。该状态用于说明记录来源并支持用户日后整理，而不要求创建前审批。
 
-Plane 适配器应尽量使用官方 SDK。由于 `/issues/` 与 `/work-items/` 在不同 Plane Cloud 或自部署版本中可能存在差异，必须针对目标版本执行冒烟测试。
+Plane 适配器使用官方 SDK 的 `workItems` 和 `workItemTypes` 资源。当前 Demo 只支持目标 Plane Cloud 的 `/work-items/` 与 `/work-item-types/` 路径，不实现 `/issues/` 探测或 fallback。
 
 自动投射遵循以下保守顺序：
 

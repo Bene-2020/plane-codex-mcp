@@ -1,8 +1,8 @@
-import Database from "better-sqlite3";
 import {
   ActiveItemSnapshot, BatchRecord, FieldName, FieldOwner, FieldOwnership, PlaneItem, ProjectContext,
   ProjectContextInput, ProjectionStatus, SourceEvent, SourceReference, SyncStatus, batchId, canonicalizeCwd, eventId,
 } from "@ambient/core";
+import { SqliteDatabase } from "./database.js";
 
 interface ContextRow {
   id: number; canonical_cwd: string; plane_base_url: string; workspace_slug: string; plane_project_id: string;
@@ -47,12 +47,12 @@ export interface StorageOptions { leaseMs?: number; }
 function now(): string { return new Date().toISOString(); }
 
 export class Storage {
-  readonly db: Database.Database;
+  readonly db: SqliteDatabase;
   private readonly leaseMs: number;
 
   constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project-demo.sqlite", options: StorageOptions = {}) {
     this.leaseMs = options.leaseMs ?? 30_000;
-    this.db = new Database(filename);
+    this.db = new SqliteDatabase(filename);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
     this.db.pragma("foreign_keys = ON");
@@ -368,6 +368,11 @@ export class Storage {
   }
 
   listAudits(sessionId?: string): unknown[] { return (sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all()) as unknown[]; }
+
+  didRecordProjectEvents(sessionId: string, turnId: string): boolean {
+    const row = this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND record_tool_called=1").get(sessionId, turnId);
+    return Boolean(row);
+  }
   listFailedBatches(contextId: string): unknown[] {
     return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status NOT IN ('synced','corrected') ORDER BY id DESC").all(contextId) as unknown[];
   }

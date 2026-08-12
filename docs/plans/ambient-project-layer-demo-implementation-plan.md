@@ -192,17 +192,17 @@ Hook 请求路径禁止访问 Plane 网络。注入内容按“编号、标题�
 
 事件投射：
 
-- `task`、`bug`、`idea`、`risk`、`milestone` -> Plane 工作项。
+- `task`、`bug`、`idea`、`risk`、`milestone` -> 带同名 Plane Work Item Type 的工作项。
 - `plan` -> 一个父项，明确步骤成为子项。
 - `progress`、有关联的 `decision` -> 评论/活动。
-- 无可靠关联但值得独立保存的 `decision` -> 带 Decision 标签的工作项。
+- 无可靠关联但值得独立保存的 `decision` -> `Decision` Work Item Type 的工作项。
 - `completed` -> 仅更新可唯一解析的关联项状态。
 
 Demo 的去重以“宁可出现一个可合并的新卡片，也不错误覆盖用户卡片”为原则。
 
 #### D2-3 字段所有权
 
-- 系统每次写入字段时保存规范化值摘要。
+- 系统每次写入字段时保存规范化原值。
 - 下一次刷新 Plane 时，如果远端字段值与最后系统值不同，则标记为 `user` 所有。
 - 用户创建的项默认所有字段归用户，只允许系统追加活动。
 - 自动流程不得改用户所有的标题、描述、负责人、优先级或截止日期。

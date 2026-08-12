@@ -1,5 +1,4 @@
 {
-  "description": "Ambient project lifecycle hooks for Codex sessions and tool calls.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
+            "command": "\"${PLUGIN_ROOT}/runtime/bin/ambient-node\" \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }
@@ -17,18 +16,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
+            "command": "\"${PLUGIN_ROOT}/runtime/bin/ambient-node\" \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "^mcp__ambient-project__record_project_events$",
+        "matcher": "^mcp__ambient_project__record_project_events$",
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
+            "command": "\"${PLUGIN_ROOT}/runtime/bin/ambient-node\" \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }
@@ -38,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
+            "command": "\"${PLUGIN_ROOT}/runtime/bin/ambient-node\" \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }
@@ -49,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
+            "command": "\"${PLUGIN_ROOT}/runtime/bin/ambient-node\" \"${PLUGIN_ROOT}/runtime/hook-adapter/index.js\""
           }
         ]
       }

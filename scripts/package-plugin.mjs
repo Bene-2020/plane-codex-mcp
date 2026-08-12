@@ -1,9 +1,10 @@
-import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { ensureNodeSidecar, nodeSidecarLicensePath, nodeSidecarPath, NODE_SIDECAR_PLATFORM, NODE_SIDECAR_VERSION } from "./fetch-node-sidecar.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const pluginRoot = join(root, "plugin");
@@ -11,6 +12,8 @@ const runtimeRoot = join(pluginRoot, "runtime");
 const runtimeNodeModules = join(runtimeRoot, "node_modules");
 const panelRoot = join(pluginRoot, "panel");
 
+if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error(`Plugin packaging currently supports macOS arm64 only; found ${process.platform}/${process.arch}.`);
+await ensureNodeSidecar();
 await rm(runtimeRoot, { recursive: true, force: true });
 await rm(panelRoot, { recursive: true, force: true });
 await mkdir(runtimeRoot, { recursive: true });
@@ -21,7 +24,7 @@ const bundleOptions = {
   format: "esm",
   platform: "node",
   target: "node22",
-  external: ["better-sqlite3", "@makeplane/plane-node-sdk", "fastify", "@fastify/cors"],
+  external: ["@makeplane/plane-node-sdk", "fastify", "@fastify/cors"],
   legalComments: "none",
   sourcemap: false,
 };
@@ -31,11 +34,6 @@ await Promise.all([
   build({ ...bundleOptions, entryPoints: [join(root, "apps/hook-adapter/dist/index.js")], outfile: join(runtimeRoot, "hook-adapter/index.js") }),
 ]);
 await cp(join(root, "apps/panel/dist"), join(panelRoot, "dist"), { recursive: true });
-
-const storageRequire = createRequire(join(root, "packages/storage/package.json"));
-const sqlitePackageJson = storageRequire.resolve("better-sqlite3/package.json");
-const sqliteRoot = dirname(sqlitePackageJson);
-const sqliteRequire = createRequire(sqlitePackageJson);
 
 function runtimeFileFilter(packageRoot, source) {
   const relativeSource = relative(packageRoot, source);
@@ -59,24 +57,6 @@ async function normalizeRuntimeText(directory) {
     const normalized = original.replace(/\r\n/g, "\n").replace(/[ \t]+$/gm, "").replace(/\n+$/g, "\n");
     if (normalized !== original) await writeFile(source, normalized);
   }
-}
-
-await mkdir(join(runtimeNodeModules, "better-sqlite3", "lib"), { recursive: true });
-await mkdir(join(runtimeNodeModules, "better-sqlite3", "build", "Release"), { recursive: true });
-await cp(join(sqliteRoot, "lib"), join(runtimeNodeModules, "better-sqlite3", "lib"), {
-  recursive: true,
-  filter: (source) => runtimeFileFilter(join(sqliteRoot, "lib"), source),
-});
-await cp(join(sqliteRoot, "package.json"), join(runtimeNodeModules, "better-sqlite3", "package.json"));
-await cp(join(sqliteRoot, "build", "Release", "better_sqlite3.node"), join(runtimeNodeModules, "better-sqlite3", "build", "Release", "better_sqlite3.node"));
-
-for (const packageName of ["bindings", "file-uri-to-path"]) {
-  const packageJson = sqliteRequire.resolve(`${packageName}/package.json`);
-  const packageRoot = dirname(packageJson);
-  await cp(packageRoot, join(runtimeNodeModules, packageName), {
-    recursive: true,
-    filter: (source) => runtimeFileFilter(packageRoot, source),
-  });
 }
 
 const planeRequire = createRequire(join(root, "packages/plane/package.json"));
@@ -117,9 +97,16 @@ async function copyRuntimePackage(packageName, requesterRequire) {
 await copyRuntimePackage("@makeplane/plane-node-sdk", planeRequire);
 await copyRuntimePackage("fastify", serviceRequire);
 await copyRuntimePackage("@fastify/cors", serviceRequire);
+await mkdir(join(runtimeRoot, "bin"), { recursive: true });
+await cp(nodeSidecarPath, join(runtimeRoot, "bin", "node"));
+await chmod(join(runtimeRoot, "bin", "node"), 0o755);
+await cp(join(root, "scripts", "ambient-node"), join(runtimeRoot, "bin", "ambient-node"));
+await chmod(join(runtimeRoot, "bin", "ambient-node"), 0o755);
+await cp(nodeSidecarLicensePath, join(runtimeRoot, "LICENSE.nodejs"));
+await writeFile(join(runtimeRoot, "runtime.json"), `${JSON.stringify({ platform: "darwin", arch: "arm64", nodeVersion: NODE_SIDECAR_VERSION, sqlite: "node:sqlite" }, null, 2)}\n`);
 await normalizeRuntimeText(runtimeRoot);
 
 const manifest = JSON.parse(await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
 const mcpBundleSize = (await stat(join(runtimeRoot, "mcp/index.js"))).size.toLocaleString();
 const hookBundleSize = (await stat(join(runtimeRoot, "hook-adapter/index.js"))).size.toLocaleString();
-console.log(`Packaged ambient-project-layer ${manifest.version}: MCP ${mcpBundleSize} B, Hook ${hookBundleSize} B, native sqlite runtime included.`);
+console.log(`Packaged ambient-project-layer ${manifest.version}: MCP ${mcpBundleSize} B, Hook ${hookBundleSize} B, ${NODE_SIDECAR_PLATFORM} Node ${NODE_SIDECAR_VERSION} sidecar included; SQLite uses node:sqlite.`);

@@ -1,7 +1,7 @@
 import { buildAdditionalContext, canonicalizeCwd } from "@ambient/core";
 import { Storage } from "@ambient/storage";
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 interface HookInput {
@@ -25,7 +25,15 @@ interface HookInput {
 
 function output(value: Record<string, unknown>): void { process.stdout.write(`${JSON.stringify(value)}\n`); }
 
-const recordProjectEventsToolName = "mcp__ambient-project__record_project_events";
+const recordProjectEventsToolName = "mcp__ambient_project__record_project_events";
+
+function createHookStorage(): Storage {
+  const pluginData = process.env.PLUGIN_DATA ?? process.env.CLAUDE_PLUGIN_DATA;
+  const databasePath = pluginData ? join(pluginData, "ambient.sqlite") : process.env.AMBIENT_DB_PATH;
+  if (!databasePath) throw new Error("PLUGIN_DATA or AMBIENT_DB_PATH is required for Ambient Project hooks");
+  if (pluginData) mkdirSync(pluginData, { recursive: true });
+  return new Storage(databasePath);
+}
 
 export async function handleHook(raw: string, providedStorage?: Storage): Promise<Record<string, unknown>> {
   let input: HookInput;
@@ -35,7 +43,7 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
   if (!eventName || !sessionId) return {};
   let storage: Storage | undefined = providedStorage;
   try {
-    storage ??= new Storage();
+    storage ??= createHookStorage();
     const cwd = input.cwd ? canonicalizeCwd(input.cwd) : undefined;
     const context = cwd ? storage.getContextByCwd(cwd) : null;
     if (eventName === "PostToolUse") {
@@ -45,6 +53,12 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
     }
     if (eventName === "Stop") {
       storage.auditHook({ eventName, sessionId, turnId: input.turn_id, ended: true });
+      if (context?.autoCaptureEnabled && input.turn_id && !input.stop_hook_active && !storage.didRecordProjectEvents(sessionId, input.turn_id)) {
+        return {
+          decision: "block",
+          reason: "Before ending this turn, decide whether the user's request, your work, tool results, or conclusion created a meaningful project event. If yes, call mcp__ambient_project__record_project_events exactly once with all events for project context " + context.id + ". If no meaningful event occurred, finish without recording. Do not record ordinary conversation.",
+        };
+      }
       return {};
     }
     if (eventName === "SessionEnd") {

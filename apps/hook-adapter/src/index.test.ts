@@ -22,8 +22,31 @@ describe("hook adapter", () => {
 
   it("audits the canonical MCP tool name from PostToolUse", async () => {
     const storage = new Storage(":memory:");
-    await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", session_id: "s", turn_id: "t", tool_name: "mcp__ambient-project__record_project_events", tool_response: { status: "accepted" } }), storage);
+    await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", session_id: "s", turn_id: "t", tool_name: "mcp__ambient_project__record_project_events", tool_response: { status: "accepted" } }), storage);
     expect(storage.listAudits("s")[0]).toMatchObject({ record_tool_called: 1, hook_event_name: "PostToolUse" });
+    storage.close();
+  });
+
+  it("continues an auto-capture turn once when no project event decision was recorded", async () => {
+    const storage = new Storage(":memory:");
+    storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", planeProjectName: "Demo" });
+
+    const first = await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/work", session_id: "s", turn_id: "t", stop_hook_active: false, last_assistant_message: "Implemented and tested the fix." }), storage);
+    const continued = await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/work", session_id: "s", turn_id: "t", stop_hook_active: true, last_assistant_message: "No meaningful event." }), storage);
+
+    expect(first).toMatchObject({ decision: "block", reason: expect.stringContaining("mcp__ambient_project__record_project_events") });
+    expect(continued).toEqual({});
+    storage.close();
+  });
+
+  it("allows the turn to stop after record_project_events was called", async () => {
+    const storage = new Storage(":memory:");
+    storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", planeProjectName: "Demo" });
+    await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: "/work", session_id: "s", turn_id: "t", tool_name: "mcp__ambient_project__record_project_events" }), storage);
+
+    const result = await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/work", session_id: "s", turn_id: "t", stop_hook_active: false }), storage);
+
+    expect(result).toEqual({});
     storage.close();
   });
 

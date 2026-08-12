@@ -3,7 +3,7 @@ import {
   RecordKind, SourceEvent, eventId, lifecycleForEvent, recordKindForEvent, sourceFooter,
 } from "@ambient/core";
 import { Storage } from "@ambient/storage";
-import { PlaneClient, State as PlaneSdkState, WorkItem as PlaneSdkWorkItem } from "@makeplane/plane-node-sdk";
+import { PlaneClient, State as PlaneSdkState, WorkItem as PlaneSdkWorkItem, WorkItemType as PlaneSdkWorkItemType } from "@makeplane/plane-node-sdk";
 
 export interface CreateItemInput { title: string; description: string; kind: RecordKind; status: LifecycleState; dueDate?: string | null; parentId?: string; sourceEventId: string; }
 export interface UpdateItemInput { title?: string; description?: string; kind?: RecordKind; status?: LifecycleState; dueDate?: string | null; }
@@ -35,14 +35,36 @@ function stepSourceEventId(eventIdValue: string, index: number): string { return
 
 function itemUrl(baseUrl: string, workspace: string, project: string, itemId: string): string { return `${baseUrl.replace(/\/$/, "")}/workspaces/${encodeURIComponent(workspace)}/projects/${encodeURIComponent(project)}/work-items/${encodeURIComponent(itemId)}`; }
 
+function bypassPlainHttpsProxyForPlane(baseUrl: string): void {
+  const proxy = process.env.https_proxy?.trim() || process.env.HTTPS_PROXY?.trim();
+  if (!proxy || !proxy.toLowerCase().startsWith("http://")) return;
+  const host = new URL(baseUrl).hostname;
+  const entries = (process.env.no_proxy ?? process.env.NO_PROXY ?? "").split(/[,\s]+/).filter(Boolean);
+  if (entries.includes("*") || entries.includes(host)) return;
+  process.env.no_proxy = [...entries, host].join(",");
+}
+
+const planeTypeNames: Record<RecordKind, string> = {
+  task: "Task",
+  bug: "Bug",
+  decision: "Decision",
+  idea: "Idea",
+  risk: "Risk",
+  milestone: "Milestone",
+};
+
+function kindForPlaneTypeName(name: string): RecordKind | undefined {
+  const normalized = name.trim().toLowerCase();
+  return (Object.entries(planeTypeNames) as Array<[RecordKind, string]>).find(([, typeName]) => typeName.toLowerCase() === normalized)?.[0];
+}
+
 export class PlaneSdkAdapter implements PlaneAdapter {
-  private readonly client: PlaneClient;
   private readonly stateIds = new Map<string, string>();
   private readonly stateNames = new Map<string, string>();
+  private readonly typeIds = new Map<string, string>();
+  private readonly typeKinds = new Map<string, RecordKind>();
 
-  constructor(private readonly baseUrl: string, apiKey: string, private readonly defaultWorkspace: string) {
-    this.client = new PlaneClient({ baseUrl, apiKey });
-  }
+  constructor(private readonly baseUrl: string, apiKey: string, private readonly defaultWorkspace: string, private readonly client = new PlaneClient({ baseUrl, apiKey })) {}
 
   async listProjects(): Promise<PlaneProject[]> {
     const payload = await this.client.projects.list(this.defaultWorkspace, { limit: 100 });
@@ -51,6 +73,7 @@ export class PlaneSdkAdapter implements PlaneAdapter {
 
   async listItems(context: ProjectContext): Promise<PlaneItem[]> {
     await this.loadStates(context);
+    await this.loadTypes(context);
     const payload = await this.client.workItems.list(context.workspaceSlug, context.planeProjectId, { limit: 100 });
     return payload.results.map((item) => this.fromSdk(context, item));
   }
@@ -59,6 +82,7 @@ export class PlaneSdkAdapter implements PlaneAdapter {
     const existing = await this.findItemBySourceEventId(context, input.sourceEventId);
     if (existing) return { ...existing, isSystemCreated: true, kind: input.kind, parentId: input.parentId ?? existing.parentId };
     const stateId = await this.resolveStateId(context, input.status);
+    const typeId = await this.resolveTypeId(context, input.kind);
     const description = `${input.description}\n\n${sourceMarker(input.sourceEventId)}`;
     let payload: PlaneSdkWorkItem;
     try {
@@ -66,6 +90,7 @@ export class PlaneSdkAdapter implements PlaneAdapter {
         name: input.title,
         description_html: description,
         state: stateId,
+        type: typeId,
         target_date: input.dueDate ?? undefined,
         parent: input.parentId,
       });
@@ -85,13 +110,16 @@ export class PlaneSdkAdapter implements PlaneAdapter {
 
   async updateItem(context: ProjectContext, itemId: string, input: UpdateItemInput): Promise<PlaneItem> {
     const stateId = input.status ? await this.resolveStateId(context, input.status) : undefined;
+    const typeId = input.kind ? await this.resolveTypeId(context, input.kind) : undefined;
     const payload = await this.client.workItems.update(context.workspaceSlug, context.planeProjectId, itemId, {
       name: input.title,
       description_html: input.description,
       state: stateId,
+      type: typeId,
       target_date: input.dueDate ?? undefined,
     });
-    return this.fromSdk(context, payload);
+    const updated = this.fromSdk(context, payload);
+    return input.kind ? { ...updated, kind: input.kind } : updated;
   }
 
   async addActivity(context: ProjectContext, itemId: string, body: string, sourceEventId: string): Promise<PlaneActivity> {
@@ -141,6 +169,34 @@ export class PlaneSdkAdapter implements PlaneAdapter {
     return match.id;
   }
 
+  private async loadTypes(context: ProjectContext): Promise<PlaneSdkWorkItemType[]> {
+    const types = await this.client.workItemTypes.list(context.workspaceSlug, context.planeProjectId);
+    for (const type of types) {
+      const kind = kindForPlaneTypeName(type.name);
+      if (!kind) continue;
+      this.typeIds.set(this.typeKindKey(context, kind), type.id);
+      this.typeKinds.set(this.typeIdKey(context, type.id), kind);
+    }
+    return types;
+  }
+
+  private async resolveTypeId(context: ProjectContext, kind: RecordKind): Promise<string> {
+    const key = this.typeKindKey(context, kind);
+    const cached = this.typeIds.get(key);
+    if (cached) return cached;
+    const types = await this.loadTypes(context);
+    const existing = types.find((type) => kindForPlaneTypeName(type.name) === kind);
+    const type = existing ?? await this.client.workItemTypes.create(context.workspaceSlug, context.planeProjectId, {
+      name: planeTypeNames[kind],
+      description: `Ambient project ${kind} records`,
+      is_active: true,
+      is_epic: false,
+    });
+    this.typeIds.set(key, type.id);
+    this.typeKinds.set(this.typeIdKey(context, type.id), kind);
+    return type.id;
+  }
+
   private fromSdk(context: ProjectContext, item: PlaneSdkWorkItem): PlaneItem {
     const stateId = typeof item.state === "string" ? item.state : undefined;
     const stateName = stateId ? this.stateNames.get(this.stateKey(context, stateId)) : undefined;
@@ -153,6 +209,7 @@ export class PlaneSdkAdapter implements PlaneAdapter {
       stateId,
       stateName: displayState,
       status: toLifecycle(displayState),
+      kind: this.kindFromSdk(context, item),
       dueDate: item.target_date ?? null,
       projectId: context.planeProjectId,
       parentId: item.parent,
@@ -163,14 +220,29 @@ export class PlaneSdkAdapter implements PlaneAdapter {
   }
 
   private stateKey(context: ProjectContext, stateId: string): string { return `${context.workspaceSlug}/${context.planeProjectId}/${stateId}`; }
+  private typeKindKey(context: ProjectContext, kind: RecordKind): string { return `${context.workspaceSlug}/${context.planeProjectId}/${kind}`; }
+  private typeIdKey(context: ProjectContext, typeId: string): string { return `${context.workspaceSlug}/${context.planeProjectId}/${typeId}`; }
+  private kindFromSdk(context: ProjectContext, item: PlaneSdkWorkItem): RecordKind | undefined {
+    const value = item as unknown as { type?: unknown; type_id?: unknown };
+    if (typeof value.type === "object" && value.type !== null) {
+      const type = value.type as { id?: unknown; name?: unknown };
+      if (typeof type.id === "string" && typeof type.name === "string") {
+        const kind = kindForPlaneTypeName(type.name);
+        if (kind) this.typeKinds.set(this.typeIdKey(context, type.id), kind);
+        return kind;
+      }
+    }
+    const typeId = typeof value.type === "string" ? value.type : typeof value.type_id === "string" ? value.type_id : undefined;
+    return typeId ? this.typeKinds.get(this.typeIdKey(context, typeId)) : undefined;
+  }
 }
 
 function toLifecycle(status: string): LifecycleState {
   const normalized = status.toLowerCase();
   if (normalized.includes("done") || normalized.includes("complete")) return "done";
-  if (normalized.includes("progress") || normalized.includes("started")) return "in_progress";
   if (normalized.includes("drop") || normalized.includes("cancel")) return "dropped";
-  if (normalized.includes("plan")) return "planned";
+  if (normalized.includes("plan") || normalized.includes("todo") || normalized.includes("unstarted")) return "planned";
+  if (normalized.includes("progress") || normalized.includes("started")) return "in_progress";
   return "captured";
 }
 
@@ -292,6 +364,15 @@ export class EventCoordinator {
         assertClaim?.();
         await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
         assertClaim?.();
+        if (event.type === "progress" && event.relatedItemId && existing.isSystemCreated) {
+          const owned = this.storage.getFieldOwnership(existing.id, "status");
+          if (!owned || owned.owner === "system") {
+            assertClaim?.();
+            const updated = await this.plane.updateItem(context, existing.id, { status: "in_progress" });
+            assertClaim?.();
+            this.storage.cacheItem(context.id, updated, existing.isSystemCreated);
+          }
+        }
         this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
         return existing.id;
       } else if (event.type === "decision") {
@@ -421,12 +502,14 @@ export class EventCoordinator {
 function appendDescription(existing: string | undefined, next: string): string { return existing?.includes(next) ? existing : `${existing ? `${existing}\n\n` : ""}${next}`; }
 
 export function createPlaneAdapter(): PlaneAdapter {
-  const mode = process.env.PLANE_MODE ?? "fake";
+  const mode = process.env.PLANE_MODE?.trim();
+  if (!mode) throw new Error("PLANE_MODE is required; use PLANE_MODE=sdk for the formal plugin or PLANE_MODE=fake only for explicit tests");
   if (mode === "fake") return new FakePlaneAdapter();
   if (mode !== "sdk") throw new Error(`Unsupported PLANE_MODE: ${mode}; use fake or sdk`);
   const baseUrl = process.env.PLANE_BASE_URL;
   const apiKey = process.env.PLANE_API_KEY;
   const workspaceSlug = process.env.PLANE_WORKSPACE_SLUG;
   if (!baseUrl || !apiKey || !workspaceSlug) throw new Error("PLANE_BASE_URL, PLANE_API_KEY, and PLANE_WORKSPACE_SLUG are required when PLANE_MODE=sdk");
+  bypassPlainHttpsProxyForPlane(baseUrl);
   return new PlaneSdkAdapter(baseUrl, apiKey, workspaceSlug);
 }

@@ -13,7 +13,7 @@ MCP server ── tools/call result._meta["ambient-project/bootstrap"]
    ▼
 MCP process: Fastify BFF + Outbox worker ◄── X-Ambient-Session-Token ── MCP App Panel
                                               │
-                                              ├─ SQLite cache / Outbox
+                                              ├─ node:sqlite cache / Outbox
                                               └─ Plane SDK/API ──► Plane
 ```
 
@@ -29,7 +29,9 @@ MCP process: Fastify BFF + Outbox worker ◄── X-Ambient-Session-Token ─�
 
 ## CORS 与开发降级
 
-默认 CORS 只允许 MCP App 沙盒的 `null` origin、`http://127.0.0.1:4318` 和 `http://localhost:4318`。CORS 只是浏览器来源约束，不能替代令牌鉴权。
+默认 CORS 精确允许 Codex MCP App 默认来源 `https://web-sandbox.oaiusercontent.com`、MCP App 的 `null` origin、`http://127.0.0.1:4318` 和 `http://localhost:4318`。其他 Origin 没有 `Access-Control-Allow-Origin`；没有 `origin:true` 或通配符。CORS 只是浏览器来源约束，不能替代令牌鉴权，summary 仍必须带 `X-Ambient-Session-Token`。
+
+浏览器 fetch/CORS 失败时，Panel 显示“无法访问动态 localhost 面板服务”及 CORS 诊断，不显示“未绑定”或要求重新绑定；401 仍表示 MCP 进程会话已过期，只有此时提示从 Codex 重新初始化。
 
 4318 独立页面是明确隔离的开发/宿主降级：独立 Service 使用固定 `SERVICE_PORT`，开发者显式设置并手工输入当前临时令牌；Vite proxy 转发 `/api` 但不会无条件注入令牌。正式 Panel bootstrap 不从 URL、localStorage、Vite proxy、环境变量或模型上下文读取令牌。
 

@@ -4,11 +4,12 @@
 
 1. `pnpm install && pnpm build`。
 2. 正式 Codex 插件不需要手工启动 Service，也不需要设置 `AMBIENT_SESSION_TOKEN`/`AMBIENT_SERVICE_BASE_URL`。每个 MCP 进程在内部生成 32-byte CSPRNG、43 位 base64url 令牌，并以动态端口 `0` 启动自己的 localhost BFF/worker；进程重启后旧令牌失效。
-3. 通过 MCP `list_projects` 查看 `Demo Project`，用户明确选择后调用 `bind_project`。
-4. 在同一 cwd 的工作回合中，由当前 Codex 判断是否产生事件并至多调用一次 `record_project_events`。
-5. Codex 需要展示面板时调用 `open_project_panel`，它通过官方 MCP Apps `_meta.ui.resourceUri` 加载 `ui://ambient-project/panel/v1.html`；结果 `_meta["ambient-project/bootstrap"]` 只给组件 `serviceBaseUrl`、临时令牌和 `projectContextId`。模型可见 content 不包含令牌。
-6. service worker 每 5 秒原子 claim 一个 pending/retrying/failed 批次，并在 Plane 同步期间用 claim token heartbeat 续租；`POST /api/worker/run` 可手动触发一次，processed 返回本次 claim/尝试的批次数（Demo 为 `0` 或 `1`，不代表成功同步数）。该 POST 也需要会话头。
-7. Codex App 宿主不支持组件渲染时，才运行独立开发降级：先显式设置 `AMBIENT_SESSION_TOKEN`，再运行 `pnpm dev:service` 和 `pnpm dev:panel`，打开 `http://127.0.0.1:4318` 手工输入 cwd/令牌。Vite proxy 不会注入有效令牌。
+3. 本地 fake smoke 必须显式设置 `PLANE_MODE=fake`，此时 `list_projects` 才会返回 `Demo Project`。正式 Codex Desktop 按 [Codex Desktop 安装与真人验收](codex-desktop-installation.md) 配置 `PLANE_MODE=sdk`、真实数据库和 Plane 凭据；正式入口缺少模式时会失败，不会伪装成 Demo。
+4. 正式环境通过 MCP `list_projects` 查看真实项目；用户明确选择后调用 `bind_project`。没有绑定时不猜测目标项目，也不写入 Plane。
+5. 在同一 cwd 的工作回合中，由当前 Codex 判断是否产生事件并至多调用一次 `record_project_events`。
+6. Codex 需要展示面板时调用 `open_project_panel`，它通过官方 MCP Apps `_meta.ui.resourceUri` 加载 `ui://ambient-project/panel/v1.html`；结果 `_meta["ambient-project/bootstrap"]` 只给组件 `serviceBaseUrl`、临时令牌和 `projectContextId`。模型可见 content 不包含令牌。
+7. service worker 每 5 秒原子 claim 一个 pending/retrying/failed 批次，并在 Plane 同步期间用 claim token heartbeat 续租；`POST /api/worker/run` 可手动触发一次，processed 返回本次 claim/尝试的批次数（不代表成功同步数）。该 POST 也需要会话头。
+8. Codex App 宿主不支持组件渲染时，才运行独立开发降级：先显式设置 `AMBIENT_SESSION_TOKEN`，再运行 `pnpm dev:service` 和 `pnpm dev:panel`，打开 `http://127.0.0.1:4318` 手工输入 cwd/令牌。Vite proxy 不会注入有效令牌。
 
 ## 关键故障路径
 
@@ -22,7 +23,8 @@
 - 面板删除/归档/合并：仅用户主动点击可触发，服务端限制自动生成项；自动 MCP 没有这些高风险能力。
 - 手动 retry 仅接受 URL 项目上下文所属且尚未 `synced` 的批次。
 - 缺少或错误的 `X-Ambient-Session-Token` 统一返回 401，且写请求在 Fastify `onRequest` 鉴权前不会触及存储；401 后 Panel 清除内存会话，不会无限重试。
-- 允许的 CORS 来源只有 MCP App 沙盒的 `null`、`http://127.0.0.1:4318` 和 `http://localhost:4318`；CORS 不是认证替代。
+- 允许的 CORS 来源只有 Codex MCP App 的 `https://web-sandbox.oaiusercontent.com`、MCP App 沙盒的 `null`、`http://127.0.0.1:4318` 和 `http://localhost:4318`；其他 Origin 被拒绝，CORS 不是认证替代，summary 仍必须带 session token。
+- 正式插件由 macOS arm64 Node 22.22.1 sidecar 启动，SQLite 使用 `node:sqlite`，不携带 `better-sqlite3.node`；Panel 的 fetch/CORS 错误显示服务访问诊断，不误导为需要重新绑定。
 
 ## 真实会话评估
 

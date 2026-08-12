@@ -1,10 +1,187 @@
 import { describe, expect, it } from "vitest";
-import { EventCoordinator, FakePlaneAdapter } from "./index.js";
+import { createPlaneAdapter, EventCoordinator, FakePlaneAdapter, PlaneSdkAdapter } from "./index.js";
 import { Storage } from "@ambient/storage";
+import { PlaneClient } from "@makeplane/plane-node-sdk";
+import { recordKinds, type RecordKind } from "@ambient/core";
 
 const bug = (title = "登录页面偶尔会白屏") => ({ type: "bug" as const, title, summary: title, userDirected: true, sourceExcerpt: title });
 
+function sdkHarness(stateDefinitions = [{ id: "state-captured", name: "Backlog", group: "backlog" }]) {
+  const types: Array<{ id: string; name: string; description?: string; is_active: boolean; is_epic: boolean }> = [];
+  const items: Array<Record<string, unknown>> = [];
+  const createPayloads: Array<Record<string, unknown>> = [];
+  const updatePayloads: Array<Record<string, unknown>> = [];
+  const client = {
+    workItemTypes: {
+      list: async () => types,
+      create: async (_workspace: string, _project: string, input: Record<string, unknown>) => {
+        const type = { id: `type-${types.length + 1}`, name: String(input.name), description: String(input.description ?? ""), is_active: true, is_epic: false };
+        types.push(type);
+        return type;
+      },
+    },
+    states: { list: async () => ({ results: stateDefinitions }) },
+    workItems: {
+      list: async () => ({ results: items }),
+      create: async (_workspace: string, project: string, input: Record<string, unknown>) => {
+        createPayloads.push(input);
+        const item = { id: `item-${items.length + 1}`, sequence_id: items.length + 1, project, ...input, updated_at: "2026-08-12T00:00:00.000Z" };
+        items.push(item);
+        return item;
+      },
+      update: async (_workspace: string, _project: string, itemId: string, input: Record<string, unknown>) => {
+        updatePayloads.push(input);
+        const item = items.find((candidate) => candidate.id === itemId)!;
+        Object.assign(item, input);
+        return item;
+      },
+    },
+  };
+  return { adapter: new PlaneSdkAdapter("https://api.plane.so", "test-key", "demo-workspace", client as unknown as PlaneClient), types, items, createPayloads, updatePayloads };
+}
+
+const sdkContext = { id: "project_1", cwd: "/work", canonicalCwd: "/work", planeBaseUrl: "https://api.plane.so", workspaceSlug: "demo-workspace", planeProjectId: "demo-project", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" };
+
 describe("Plane projection", () => {
+  it("requires an explicit Plane mode instead of silently creating a Demo Project", () => {
+    const previousMode = process.env.PLANE_MODE;
+    delete process.env.PLANE_MODE;
+    try {
+      expect(() => createPlaneAdapter()).toThrow("PLANE_MODE is required");
+    } finally {
+      if (previousMode === undefined) delete process.env.PLANE_MODE;
+      else process.env.PLANE_MODE = previousMode;
+    }
+  });
+
+  it("uses the SDK only when the host supplies an explicit SDK configuration", () => {
+    const previous = {
+      mode: process.env.PLANE_MODE,
+      baseUrl: process.env.PLANE_BASE_URL,
+      apiKey: process.env.PLANE_API_KEY,
+      workspace: process.env.PLANE_WORKSPACE_SLUG,
+    };
+    process.env.PLANE_MODE = "sdk";
+    process.env.PLANE_BASE_URL = "https://api.plane.so";
+    process.env.PLANE_API_KEY = "test-only-key";
+    process.env.PLANE_WORKSPACE_SLUG = "test-workspace";
+    try {
+      expect(createPlaneAdapter()).toBeInstanceOf(PlaneSdkAdapter);
+    } finally {
+      for (const [name, value] of Object.entries({
+        PLANE_MODE: previous.mode,
+        PLANE_BASE_URL: previous.baseUrl,
+        PLANE_API_KEY: previous.apiKey,
+        PLANE_WORKSPACE_SLUG: previous.workspace,
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  it("bypasses an HTTP HTTPS proxy for the Plane SDK host", () => {
+    const previous = {
+      mode: process.env.PLANE_MODE,
+      baseUrl: process.env.PLANE_BASE_URL,
+      apiKey: process.env.PLANE_API_KEY,
+      workspace: process.env.PLANE_WORKSPACE_SLUG,
+      httpsProxy: process.env.https_proxy,
+      httpsProxyUpper: process.env.HTTPS_PROXY,
+      noProxy: process.env.no_proxy,
+      noProxyUpper: process.env.NO_PROXY,
+    };
+    process.env.PLANE_MODE = "sdk";
+    process.env.PLANE_BASE_URL = "https://api.plane.so";
+    process.env.PLANE_API_KEY = "test-only-key";
+    process.env.PLANE_WORKSPACE_SLUG = "test-workspace";
+    process.env.https_proxy = "http://127.0.0.1:10808";
+    delete process.env.HTTPS_PROXY;
+    delete process.env.no_proxy;
+    delete process.env.NO_PROXY;
+    try {
+      expect(createPlaneAdapter()).toBeInstanceOf(PlaneSdkAdapter);
+      expect(process.env.no_proxy).toBe("api.plane.so");
+    } finally {
+      for (const [name, value] of Object.entries({
+        PLANE_MODE: previous.mode,
+        PLANE_BASE_URL: previous.baseUrl,
+        PLANE_API_KEY: previous.apiKey,
+        PLANE_WORKSPACE_SLUG: previous.workspace,
+        https_proxy: previous.httpsProxy,
+        HTTPS_PROXY: previous.httpsProxyUpper,
+        no_proxy: previous.noProxy,
+        NO_PROXY: previous.noProxyUpper,
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  it.each(recordKinds)("writes and restores the %s classification through a Plane work item type", async (kind: RecordKind) => {
+    const { adapter, types, createPayloads } = sdkHarness();
+    const created = await adapter.createItem(sdkContext, { title: `${kind} record`, description: "record", kind, status: "captured", sourceEventId: `event-${kind}` });
+    const type = types.find((candidate) => candidate.id === createPayloads[0]?.type);
+    expect(type?.name.toLowerCase()).toBe(kind);
+    expect(created.kind).toBe(kind);
+    expect((await adapter.listItems(sdkContext))[0]?.kind).toBe(kind);
+  });
+
+  it("writes a Panel reclassification back to the Plane work item type", async () => {
+    const { adapter, items, updatePayloads } = sdkHarness();
+    const created = await adapter.createItem(sdkContext, { title: "record", description: "record", kind: "task", status: "captured", sourceEventId: "event-task" });
+    const updated = await adapter.updateItem(sdkContext, created.id, { kind: "risk" });
+    expect(updatePayloads[0]?.type).toBe(items[0]?.type);
+    expect(updated.kind).toBe("risk");
+    expect((await adapter.listItems(sdkContext))[0]?.kind).toBe("risk");
+  });
+
+  it("maps real Plane Todo/unstarted states for plan parents and steps", async () => {
+    const { adapter, items, createPayloads } = sdkHarness([
+      { id: "state-backlog", name: "Backlog", group: "backlog" },
+      { id: "state-todo", name: "Todo", group: "unstarted" },
+      { id: "state-progress", name: "In Progress", group: "started" },
+      { id: "state-done", name: "Done", group: "completed" },
+      { id: "state-cancelled", name: "Cancelled", group: "cancelled" },
+    ]);
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://api.plane.so", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const coordinator = new EventCoordinator(storage, adapter);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "plan", events: [{ type: "plan", title: "发布计划", summary: "按步骤发布", userDirected: true, sourceExcerpt: "发布计划", steps: [{ title: "准备", summary: "准备环境" }, { title: "发布", summary: "发布版本" }] }] });
+
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(createPayloads.map((payload) => payload.state)).toEqual(["state-todo", "state-todo", "state-todo"]);
+    expect(items.filter((item) => item.parent).map((item) => item.state)).toEqual(["state-todo", "state-todo"]);
+    const refreshed = await coordinator.refreshCache(context);
+    expect(refreshed).toHaveLength(3);
+    expect(refreshed.every((item) => item.status === "planned")).toBe(true);
+    storage.close();
+  });
+
+  it.each([
+    ["captured", "state-backlog"],
+    ["planned", "state-todo"],
+    ["in_progress", "state-progress"],
+    ["done", "state-done"],
+    ["dropped", "state-cancelled"],
+  ] as const)("maps the %s lifecycle through the real Plane state groups", async (status, stateId) => {
+    const { adapter, createPayloads } = sdkHarness([
+      { id: "state-backlog", name: "Backlog", group: "backlog" },
+      { id: "state-todo", name: "Todo", group: "unstarted" },
+      { id: "state-progress", name: "In Progress", group: "started" },
+      { id: "state-done", name: "Done", group: "completed" },
+      { id: "state-cancelled", name: "Cancelled", group: "cancelled" },
+    ]);
+
+    const created = await adapter.createItem(sdkContext, { title: status, description: status, kind: "task", status, sourceEventId: `event-${status}` });
+
+    expect(createPayloads[0]?.state).toBe(stateId);
+    expect(created.status).toBe(status);
+    expect((await adapter.listItems(sdkContext))[0]?.status).toBe(status);
+  });
+
   it("creates one item and appends a later duplicate as activity", async () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
@@ -17,6 +194,58 @@ describe("Plane projection", () => {
     await coordinator.syncBatch(storage.listPendingBatches()[0]!);
     expect((await plane.listItems(context))).toHaveLength(1);
     expect(plane.calls.filter((call) => call.startsWith("activity:"))).toHaveLength(1);
+    storage.close();
+  });
+
+  it("advances a related system item to in_progress while recording one progress activity", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [bug()] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+    const item = (await plane.listItems(context))[0]!;
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [{ type: "progress", title: "修复白屏", summary: "开始修复", userDirected: false, relatedItemId: item.id, sourceExcerpt: "开始修复" }] });
+
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(plane.getActivities(item.id)).toHaveLength(1);
+    expect((await plane.listItems(context)).find((candidate) => candidate.id === item.id)?.status).toBe("in_progress");
+    expect(plane.calls.filter((call) => call === `update:${item.id}`)).toHaveLength(1);
+    storage.close();
+  });
+
+  it("records progress activity without overwriting a user-owned status", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [bug()] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+    const item = (await plane.listItems(context))[0]!;
+    await coordinator.editItem(context, item.id, { status: "done" });
+    plane.calls.length = 0;
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [{ type: "progress", title: "修复白屏", summary: "继续修复", userDirected: false, relatedItemId: item.id, sourceExcerpt: "继续修复" }] });
+
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(plane.getActivities(item.id)).toHaveLength(1);
+    expect((await plane.listItems(context)).find((candidate) => candidate.id === item.id)?.status).toBe("done");
+    expect(plane.calls.filter((call) => call === `update:${item.id}`)).toHaveLength(0);
+    storage.close();
+  });
+
+  it("does not create an item for an unrelated progress event", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [{ type: "progress", title: "无关联进展", summary: "记录进展", userDirected: false, sourceExcerpt: "记录进展" }] });
+
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(await plane.listItems(context)).toHaveLength(0);
+    expect(storage.listPendingBatches()).toHaveLength(0);
     storage.close();
   });
 
@@ -95,6 +324,30 @@ describe("Plane projection", () => {
     await expect(coordinator.syncBatch(storage.listPendingBatches()[0]!)).rejects.toThrow("injected addActivity failure");
     await coordinator.syncBatch(storage.listPendingBatches()[0]!);
     expect(plane.getActivities(item.id)).toHaveLength(1);
+    expect(storage.listPendingBatches()).toHaveLength(0);
+    storage.close();
+  });
+
+  it("replays a partially written progress without duplicating its activity", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [bug()] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+    const item = (await plane.listItems(context))[0]!;
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [{ type: "progress", title: "修复白屏", summary: "开始修复", userDirected: false, relatedItemId: item.id, sourceExcerpt: "开始修复" }] });
+    plane.injectFailure({ operation: "addActivity", sourceEventId: "event_2_0", afterWrite: true });
+
+    await expect(coordinator.syncBatch(storage.listPendingBatches()[0]!)).rejects.toThrow("injected addActivity failure");
+    expect(plane.getActivities(item.id)).toHaveLength(1);
+    expect((await plane.listItems(context)).find((candidate) => candidate.id === item.id)?.status).toBe("captured");
+
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(plane.getActivities(item.id)).toHaveLength(1);
+    expect((await plane.listItems(context)).find((candidate) => candidate.id === item.id)?.status).toBe("in_progress");
+    expect(plane.calls.filter((call) => call === `update:${item.id}`)).toHaveLength(1);
     expect(storage.listPendingBatches()).toHaveLength(0);
     storage.close();
   });
