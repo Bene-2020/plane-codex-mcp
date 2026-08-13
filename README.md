@@ -47,7 +47,38 @@ Panel 的两条加载路径刻意分开：Codex host 收到 `App.ontoolresult` �
 
 ## Codex 插件
 
-`plugin/` 包含 `.codex-plugin/plugin.json`、`.mcp.json`、五种 Hook 配置和 `ambient-project` Skill。正式插件当前只支持 macOS arm64：`pnpm build` 将固定的 Node 22.22.1 sidecar、`runtime/bin/ambient-node` wrapper、Node 内置 `node:sqlite`、MCP/Hook bundle 和 Plane SDK 运行时一起写入 `plugin/runtime/`；不再打包 `better-sqlite3` 或任何 `.node` ABI 文件。wrapper 在其他 OS/arch 启动时直接报兼容性错误。MCP 与 Hook 都使用插件内入口，路径带引号并支持含空格的安装目录；它们不依赖用户本机的 node、pnpm、bun 或 Node ABI。MCP 配置以插件根目录为 `cwd`，`.mcp.json` 的 `env_vars` 只白名单转发宿主已经提供的变量，不能替代 Codex Desktop 的用户级持久配置。Hook 使用宿主保证的稳定 `PLUGIN_DATA/ambient.sqlite`；MCP 的 `AMBIENT_DB_PATH` 必须明确指向同一文件。Plane Key 只留在 MCP env，不进入 Hook、数据库、Panel 或模型上下文。
+`plugin/` 包含 `.codex-plugin/plugin.json`、`.mcp.json`、五种 Hook 配置和 `ambient-project` Skill。Codex 插件的 MCP/Hook 配置是单一命令字符串，没有按宿主 OS/架构条件选择命令的字段，因此正式发布采用平台专属包：每个包只携带一个固定 Node 22.22.1 sidecar，并由安装/marketplace 选择与宿主匹配的包。支持矩阵严格为：
+
+| 包目录 | 宿主 | Node 官方归档 | sidecar | launcher |
+| --- | --- | --- | --- | --- |
+| `darwin-arm64` | macOS arm64 | `node-v22.22.1-darwin-arm64.tar.gz` | `runtime/bin/node` | `runtime/bin/ambient-node` |
+| `darwin-x64` | macOS x64 | `node-v22.22.1-darwin-x64.tar.gz` | `runtime/bin/node` | `runtime/bin/ambient-node` |
+| `linux-x64` | Linux x64 | `node-v22.22.1-linux-x64.tar.gz` | `runtime/bin/node` | `runtime/bin/ambient-node` |
+| `linux-arm64` | Linux arm64 | `node-v22.22.1-linux-arm64.tar.gz` | `runtime/bin/node` | `runtime/bin/ambient-node` |
+| `win32-x64` | Windows x64 | `node-v22.22.1-win-x64.zip` | `runtime/bin/node.exe` | `runtime/bin/ambient-node.cmd` |
+
+`pnpm build` 默认构建当前宿主的可安装包到 `plugin/`；发布全部目标时先构建应用，再运行 `pnpm package:plugin -- --all`，产物位于 `dist/plugins/ambient-project-layer/<target>/`，每个目标目录本身就是可安装插件根目录。也可以单独构建，例如 `pnpm package:plugin -- --target=linux-arm64 --output=dist/plugins/ambient-project-layer/linux-arm64`。每个包的 `runtime/runtime.json` 声明唯一 target、平台、架构、Node 版本、sidecar 文件名和 `node:sqlite`；Unix 包使用目标专属 POSIX launcher，Windows 包使用 `ambient-node.cmd` 和 `node.exe`，不会把 Unix shell wrapper 交给 Windows。
+
+包布局为：
+
+```text
+<target-package>/
+├── .codex-plugin/plugin.json
+├── .mcp.json
+├── hooks/hooks.json
+├── panel/dist/index.html
+└── runtime/
+    ├── bin/ambient-node       # Unix；Windows 为 ambient-node.cmd
+    ├── bin/node               # Unix；Windows 为 node.exe
+    ├── LICENSE.nodejs
+    ├── runtime.json
+    ├── mcp/index.js
+    └── hook-adapter/index.js
+```
+
+`pnpm validate:plugin` 验证当前 `plugin/`，验证完整平台集合使用 `node scripts/validate-plugin-runtime.mjs dist/plugins/ambient-project-layer --all`。验证器对当前原生目标执行 sidecar `--version`，对其他目标检查 manifest、runtime manifest、归档对应的 sidecar 文件名、Node license、MCP 与全部五个 Hook 的 launcher 选择，并拒绝 `.node`/`better-sqlite3` 和系统 runtime fallback。launcher 在错装到其他 OS/arch 时直接报告兼容性错误并退出，不调用用户本机的 node、pnpm 或 bun。MCP 与 Hook 都使用插件内入口，路径带引号并支持含空格的安装目录；MCP 配置以插件根目录为 `cwd`，`.mcp.json` 的 `env_vars` 只白名单转发宿主已经提供的变量，不能替代 Codex Desktop 的用户级持久配置。Hook 使用宿主保证的稳定 `PLUGIN_DATA/ambient.sqlite`；MCP 的 `AMBIENT_DB_PATH` 必须明确指向同一文件。Plane Key 只留在 MCP env，不进入 Hook、数据库、Panel 或模型上下文。
+
+仓库内的 `scripts/plugin-creator/validate_plugin.py` 与固定的 `requirements.txt` 提供可复现的 plugin-creator manifest contract 校验入口，CI 不依赖某台开发机的 `/Users/...` skill 路径。`.github/workflows/plugin-platform-native.yml` 在五个目标 runner 上分别打包并真实执行 bundled Node `--version`、MCP STDIO handshake 和五个 Hook；每个 job 使用 `fail-fast: false`，发布平台包 artifact 以及不含凭据、数据库、session token 或完整 transcript 的 `evidence.json`、`summary.md` 和 `checks.log`。
 
 安装或升级插件后，必须在 Codex 的 Hook 管理界面人工复核并信任当前版本的五个 Hook，然后再新建 task 验收。`enabled = true` 只表示 Hook 已配置，不代表它已获准执行；如果运行时信任状态为 `modified`，Codex 会在启动 Hook 进程前拦截它。即使 `hooks.json` 文本没有变化，版本化缓存路径或解析后的命令变化也可能改变定义哈希，因此不要沿用上一版本的信任结果。典型症状是 MCP 工具仍可用，但新 task 没有项目上下文注入，正式插件数据库也没有该 session 的 `SessionStart` 或 `UserPromptSubmit` 审计。重新信任后，当前 task 的下一次提示可恢复 `UserPromptSubmit`；已经错过的 `SessionStart` 不会补跑，必须再新建 task 验证完整启动链。完整步骤见 [Codex Desktop 安装与真人验收](docs/codex-desktop-installation.md)。
 

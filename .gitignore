@@ -17,3 +17,4 @@ coverage/
 # script downloads the declared version and places it in plugin/runtime/bin/.
 vendor/node/
 plugin/runtime/bin/node
+plugin/runtime/bin/node.exe

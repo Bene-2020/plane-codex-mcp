@@ -33,7 +33,7 @@ export function isInlineStatus(value: string | undefined): value is InlineStatus
   return STATUS_OPTIONS.some((option) => option.value === value);
 }
 
-export function selectRelevantItems(items: Item[], sources: Source[] = []): Item[] {
+export function selectRelevantItems(items: Item[], sources: Source[] = [], filter: InlineFilter = "all"): Item[] {
   const latestProjectionByItem = new Map<string, number>();
   for (const source of sources) {
     if (!source.planeItemId || !source.projectedAt) continue;
@@ -41,7 +41,20 @@ export function selectRelevantItems(items: Item[], sources: Source[] = []): Item
     latestProjectionByItem.set(source.planeItemId, Math.max(latestProjectionByItem.get(source.planeItemId) ?? 0, projectedAt));
   }
   const lastModifiedAt = (item: Item) => Math.max(Date.parse(item.updatedAt ?? "") || 0, latestProjectionByItem.get(item.id) ?? 0);
-  return items.filter((item) => !item.archived && isInlineStatus(item.status)).sort((left, right) => lastModifiedAt(right) - lastModifiedAt(left)).slice(0, INLINE_ITEM_LIMIT);
+  const byRecent = (left: Item, right: Item) => lastModifiedAt(right) - lastModifiedAt(left);
+  const eligibleItems = items.filter((item) => !item.archived && isInlineStatus(item.status));
+
+  if (filter !== "all") return eligibleItems.filter((item) => item.status === filter).sort(byRecent).slice(0, INLINE_ITEM_LIMIT);
+
+  const unfinishedGroups = (["in_progress", "planned", "captured"] as const).map((status) => eligibleItems.filter((item) => item.status === status).sort(byRecent));
+  const unfinishedCount = unfinishedGroups.reduce((count, group) => count + group.length, 0);
+  const done = eligibleItems.filter((item) => item.status === "done").sort(byRecent);
+  const unfinishedLimit = unfinishedCount < 4 ? unfinishedCount : done.length ? 4 : INLINE_ITEM_LIMIT;
+  const firstFromEachState = unfinishedGroups.flatMap((group) => group.slice(0, 1));
+  const remainingUnfinished = unfinishedGroups.flatMap((group) => group.slice(1));
+  const selectedUnfinished = [...firstFromEachState, ...remainingUnfinished.slice(0, unfinishedLimit - firstFromEachState.length)];
+  const selectedDone = unfinishedCount >= 4 ? done.slice(0, 1) : done;
+  return [...selectedUnfinished, ...selectedDone].slice(0, INLINE_ITEM_LIMIT);
 }
 
 export function filterVisibleItems(items: Item[], filter: InlineFilter): Item[] {
@@ -205,8 +218,7 @@ function App() {
   };
   useEffect(() => { if (apiClient) void load(); }, [apiClient, session, sessionMode]);
 
-  const relevantItems = useMemo(() => selectRelevantItems(summary?.items ?? [], summary?.sources ?? []), [summary]);
-  const visibleItems = useMemo(() => filterVisibleItems(relevantItems, filter), [relevantItems, filter]);
+  const visibleItems = useMemo(() => selectRelevantItems(summary?.items ?? [], summary?.sources ?? [], filter), [summary, filter]);
   const projectCounts = summary?.projectCounts ?? null;
   const listSummaryContent = listSummary(filter, visibleItems.length, projectCounts);
   const finishDragging = () => { setDraggedItemId(null); setDropTarget(null); };

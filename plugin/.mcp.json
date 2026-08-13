@@ -2,7 +2,9 @@
   "mcpServers": {
     "ambient-project": {
       "command": "runtime/bin/ambient-node",
-      "args": ["runtime/mcp/index.js"],
+      "args": [
+        "runtime/mcp/index.js"
+      ],
       "cwd": ".",
       "env_vars": [
         "AMBIENT_DB_PATH",

@@ -1,6 +1,9 @@
 {
+  "packageType": "platform-specific",
+  "target": "darwin-arm64",
   "platform": "darwin",
   "arch": "arm64",
   "nodeVersion": "22.22.1",
+  "sidecar": "runtime/bin/node",
   "sqlite": "node:sqlite"
 }

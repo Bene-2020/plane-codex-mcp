@@ -1,6 +1,6 @@
 # Codex Desktop 安装与真人验收
 
-这份步骤用于正式 Codex Desktop 插件。仓库里的 `.env` 和 `PLANE_MODE=fake` 只服务本地开发与隔离 smoke；GUI 启动的 MCP 使用 Codex 用户级配置，不依赖终端启动时的 `export`。正式包当前只支持 macOS arm64，插件内的 Node 22.22.1 sidecar 控制运行时版本；用户不需要安装、切换或重新编译 Node。
+这份步骤用于正式 Codex Desktop 插件。仓库里的 `.env` 和 `PLANE_MODE=fake` 只服务本地开发与隔离 smoke；GUI 启动的 MCP 使用 Codex 用户级配置，不依赖终端启动时的 `export`。正式插件采用平台专属包，支持 macOS arm64、macOS x64、Linux x64、Linux arm64 和 Windows x64；每个包内固定 Node 22.22.1 sidecar，用户不需要安装、切换或重新编译 Node。插件 manifest/MCP/Hook 没有宿主平台条件字段，所以不能把五个平台的启动命令塞进一个可自动选择的插件目录。
 
 ## 构建和安装
 
@@ -9,17 +9,32 @@
 ```bash
 pnpm install
 pnpm build
-python3 /Users/<user>/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugin
+python3 -m pip install --user -r scripts/plugin-creator/requirements.txt
+python3 scripts/plugin-creator/validate_plugin.py plugin
 node scripts/validate-plugin-runtime.mjs plugin
 pnpm smoke:plugin
+
+# 发布全部五个目标包（当前宿主原生目标仍可执行，其他目标只做结构验证）
+pnpm package:plugin -- --all
+node scripts/validate-plugin-runtime.mjs dist/plugins/ambient-project-layer --all
 ```
 
-将构建后的 `plugin/` 发布到已配置的本地 marketplace 后安装或更新插件：
+将与目标机器匹配的 `dist/plugins/ambient-project-layer/<target>/`（或当前目标的 `plugin/`）发布到已配置的本地 marketplace 后安装或更新插件。不要把整个五目标集合目录当作一个插件根目录：
 
 ```bash
 codex plugin add ambient-project-layer@ambient-local
 codex mcp get ambient-project
 ```
+
+目标目录与运行时文件名固定如下：
+
+| target | 宿主 | Node 归档 | sidecar / launcher |
+| --- | --- | --- | --- |
+| `darwin-arm64` | macOS arm64 | `node-v22.22.1-darwin-arm64.tar.gz` | `node` / `ambient-node` |
+| `darwin-x64` | macOS x64 | `node-v22.22.1-darwin-x64.tar.gz` | `node` / `ambient-node` |
+| `linux-x64` | Linux x64 | `node-v22.22.1-linux-x64.tar.gz` | `node` / `ambient-node` |
+| `linux-arm64` | Linux arm64 | `node-v22.22.1-linux-arm64.tar.gz` | `node` / `ambient-node` |
+| `win32-x64` | Windows x64 | `node-v22.22.1-win-x64.zip` | `node.exe` / `ambient-node.cmd` |
 
 安装命令成功只表示插件已启用。随后必须打开 Codex 的 Hook 管理界面，人工复核并信任 `SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop` 和 `SessionEnd`，再新建 task。不要把 `enabled` 当成已信任；未信任或被判定为 `modified` 的 Hook 会在进程启动前被宿主拦截。
 
@@ -41,13 +56,13 @@ codex mcp add ambient-project \
 
 在本机用户配置文件中，把 `[mcp_servers.ambient-project.env]` 下的 `PLANE_API_KEY` 占位值替换为真实 key，并将文件权限限制为当前用户可读写。真实 key 只应存在于该用户级配置和 MCP 进程内存；不要把它写进仓库、Panel、SQLite、Hook 输出、MCP 普通 content、模型上下文或日志。不要在该配置中加入 `AMBIENT_SESSION_TOKEN` 或 `AMBIENT_SERVICE_BASE_URL`，这两个值由每个 MCP 进程运行时生成。
 
-Hook 不继承 `[mcp_servers.ambient-project.env]`，而是直接使用 Codex 为插件提供的 `PLUGIN_DATA/ambient.sqlite`。MCP 配置只需把 `AMBIENT_DB_PATH` 指向同一文件；不要把 `PLANE_API_KEY`、session token 或其他秘密加入通用子进程环境。MCP 与 Hook 的实际命令都是插件内 `runtime/bin/ambient-node`，即使 PATH 中没有 node/pnpm/bun 也能启动；wrapper 会在非 macOS arm64 上直接退出并报告兼容性错误。
+Hook 不继承 `[mcp_servers.ambient-project.env]`，而是直接使用 Codex 为插件提供的 `PLUGIN_DATA/ambient.sqlite`。MCP 配置只需把 `AMBIENT_DB_PATH` 指向同一文件；不要把 `PLANE_API_KEY`、session token 或其他秘密加入通用子进程环境。MCP 与 Hook 的实际命令都是匹配包内的 launcher：Unix 为 `runtime/bin/ambient-node`，Windows 为 `runtime/bin/ambient-node.cmd`；即使 PATH 中没有 node/pnpm/bun 也能启动。launcher 会在错装到其他 OS/arch 时直接退出并报告兼容性错误，不会回退到系统 Node。
 
 ## 插件升级
 
 首次安装时，先启动一次新 task，让 Hook 创建稳定的 `PLUGIN_DATA/ambient.sqlite`，再把 MCP 的 `AMBIENT_DB_PATH` 配成上面的同一文件并绑定项目。不要把数据库放在版本化的插件 cache 目录中。
 
-每次升级按固定顺序执行：构建和验证；刷新 cachebuster；同步 `plugin/` 到 marketplace；运行 `codex plugin add ambient-project-layer@ambient-local`；确认 MCP 仍使用 marketplace 的稳定 runtime 路径且数据库仍是稳定的插件数据文件；打开 Codex 的 Hook 管理界面复核并信任当前版本的五个 Hook；完全退出并重启 Desktop；最后用新 task 做下述验收。升级不得新建或切换数据库，已有绑定会保留。
+每次升级按固定顺序执行：按目标宿主构建并验证对应平台包（或发布完整集合后选择目标目录）；刷新 cachebuster；同步匹配的包到 marketplace；运行 `codex plugin add ambient-project-layer@ambient-local`；确认 MCP 仍使用 marketplace 的稳定 runtime 路径且数据库仍是稳定的插件数据文件；打开 Codex 的 Hook 管理界面复核并信任当前版本的五个 Hook；完全退出并重启 Desktop；最后用新 task 做下述验收。升级不得新建或切换数据库，已有绑定会保留。
 
 Hook 信任按解析后的定义哈希保存。除 `hooks.json` 内容外，版本化缓存路径和最终命令也会参与当前定义；因此即使 Hook 文本看起来没有变化，插件升级后仍可能显示 `modified`。把“重新信任当前版本”视为每次安装或升级的必做步骤，不要只在编辑 `hooks.json` 后执行。
 
@@ -61,7 +76,9 @@ Hook 信任按解析后的定义哈希保存。除 `hooks.json` 内容外，版�
 
 如果 Codex Desktop 宿主环境带有 `https_proxy=http://...`，运行时会把配置中 Plane URL 的 HTTPS host 仅加入当前 MCP 进程的 `no_proxy`。这是针对 Plane SDK Axios 明文代理请求的传输修复，不会把代理配置、凭据或 session token 写入 Panel、SQLite、日志或模型 content；也不会改用 fake。直连 Plane 失败时会保留明确错误。
 
-插件安装/升级检查：`plugin/runtime/runtime.json` 声明 `darwin/arm64` 与 Node 22.22.1；`pnpm validate:plugin` 会拒绝缺少 sidecar、错误版本、原生 `.node` 或宿主 `node` 命令。运行时 wrapper 还会在安装包被放到其他 OS/arch 时直接报错，而不是静默回退到系统 Node。
+插件安装/升级检查：目标包的 `plugin/runtime/runtime.json` 声明对应的 target、平台/架构、Node 22.22.1、sidecar 文件名和 `node:sqlite`；`pnpm validate:plugin` 会拒绝缺少 sidecar/许可证、错误版本、原生 `.node`、错误 launcher 或宿主 `node` 命令。验证完整集合使用 `node scripts/validate-plugin-runtime.mjs dist/plugins/ambient-project-layer --all`；该命令只在当前原生目标执行 `--version`，其余目标做结构验证。运行时 launcher 在安装包被放到其他 OS/arch 时直接报错，而不是静默回退到系统 Node。
+
+当前 macOS arm64 开发机只能真实执行 `darwin-arm64` sidecar；`darwin-x64`、`linux-x64`、`linux-arm64` 和 `win32-x64` 在本机不得通过执行二进制来“模拟验收”。这些目标应使用集合验证器检查结构、manifest、launcher、sidecar 文件名/版本声明和 license，并在对应真实 OS/架构的机器上另行运行 `--version`、MCP STDIO 和五个 Hook fixture；Windows 目标还必须确认 `.cmd` launcher 能从含空格的安装路径启动。
 
 ## Hook 信任排障
 

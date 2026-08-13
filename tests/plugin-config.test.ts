@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { getExtractedNodePaths, getNodeSidecarTarget, NODE_SIDECAR_TARGET_IDS, renderLauncher } from "../scripts/node-sidecar-targets.mjs";
 
 const pluginRoot = fileURLToPath(new URL("../plugin/", import.meta.url));
 const expectedHookCommand = '"${PLUGIN_ROOT}/runtime/bin/ambient-node" "${PLUGIN_ROOT}/runtime/hook-adapter/index.js"';
@@ -25,5 +26,35 @@ describe("plugin runtime paths", () => {
     expect(handlers.map((handler) => handler.command)).toEqual(new Array(5).fill(expectedHookCommand));
     expect(handlers.every((handler) => !handler.command.includes(".."))).toBe(true);
     expect(handlers.every((handler) => !Object.hasOwn(handler, "statusMessage"))).toBe(true);
+  });
+
+  it("defines the strict five-target sidecar matrix", () => {
+    expect(NODE_SIDECAR_TARGET_IDS).toEqual(["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "win32-x64"]);
+    const expectedTargets = [
+      ["darwin-arm64", "node-v22.22.1-darwin-arm64.tar.gz", "bin/node", "node", "ambient-node"],
+      ["darwin-x64", "node-v22.22.1-darwin-x64.tar.gz", "bin/node", "node", "ambient-node"],
+      ["linux-x64", "node-v22.22.1-linux-x64.tar.gz", "bin/node", "node", "ambient-node"],
+      ["linux-arm64", "node-v22.22.1-linux-arm64.tar.gz", "bin/node", "node", "ambient-node"],
+      ["win32-x64", "node-v22.22.1-win-x64.zip", "node.exe", "node.exe", "ambient-node.cmd"],
+    ] as const;
+
+    for (const [targetId, archiveName, archiveSidecarRelativePath, sidecarFile, launcherFile] of expectedTargets) {
+      const target = getNodeSidecarTarget(targetId);
+      expect(target).toMatchObject({ archiveName, archiveSidecarRelativePath, archiveLicenseRelativePath: "LICENSE", sidecarFile, launcherFile });
+      expect(getExtractedNodePaths("/tmp/extracted", target)).toEqual({
+        sidecar: `/tmp/extracted/${target.extractDirectory}/${archiveSidecarRelativePath}`,
+        license: `/tmp/extracted/${target.extractDirectory}/LICENSE`,
+      });
+    }
+    expect(() => getNodeSidecarTarget("linux-arm64-musl")).toThrow(/Supported targets/);
+  });
+
+  it("renders a Windows cmd launcher with a space-safe internal sidecar path", () => {
+    const launcher = renderLauncher(getNodeSidecarTarget("win32-x64"));
+    expect(launcher).toContain("@echo off");
+    expect(launcher).toContain("%~dp0");
+    expect(launcher).toContain("node.exe");
+    expect(launcher).toContain("%*");
+    expect(launcher).not.toContain("/bin/sh");
   });
 });

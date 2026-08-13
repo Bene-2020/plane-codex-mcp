@@ -26,7 +26,7 @@
 - 手动 retry 仅接受 URL 项目上下文所属且尚未 `synced` 的批次。
 - 缺少或错误的 `X-Ambient-Session-Token` 统一返回 401，且写请求在 Fastify `onRequest` 鉴权前不会触及存储；401 后 Panel 清除内存会话，不会无限重试。
 - 允许的 CORS 来源包括 Codex MCP App 的 `https://web-sandbox.oaiusercontent.com`、Desktop 沙盒的 `codex-sandbox://<mcp-server-subdomain>.web-sandbox.oaiusercontent.com`、MCP App 沙盒的 `null`、`http://127.0.0.1:4318` 和 `http://localhost:4318`；其他 Origin 被拒绝，CORS 不是认证替代，summary 仍必须带 session token。
-- 正式插件由 macOS arm64 Node 22.22.1 sidecar 启动，SQLite 使用 `node:sqlite`，不携带 `better-sqlite3.node`；Panel 的 fetch/CORS 错误显示服务访问诊断，不误导为需要重新绑定。
+- 正式插件按宿主选择平台专属 Node 22.22.1 sidecar：macOS arm64、macOS x64、Linux x64、Linux arm64 使用 POSIX `runtime/bin/ambient-node`，Windows x64 使用 `runtime/bin/ambient-node.cmd` 与 `node.exe`。SQLite 使用 `node:sqlite`，不携带 `better-sqlite3.node`；错装包会明确报告 OS/架构不兼容，不回退系统 Node。Panel 的 fetch/CORS 错误显示服务访问诊断，不误导为需要重新绑定。
 
 ## 真实会话评估
 

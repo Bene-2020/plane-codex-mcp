@@ -168,8 +168,8 @@ describe("inline project card behavior", () => {
   it("limits the Inline payload and keeps status counts stable while filtering", () => {
     const relevant = selectRelevantItems(items);
     expect(relevant).toHaveLength(5);
-    expect(filterVisibleItems(relevant, "done")).toHaveLength(2);
-    expect(getStatusCounts(relevant)).toEqual({ captured: 1, planned: 1, in_progress: 1, done: 2 });
+    expect(filterVisibleItems(relevant, "done")).toHaveLength(1);
+    expect(getStatusCounts(relevant)).toEqual({ captured: 2, planned: 1, in_progress: 1, done: 1 });
     expect(STATUS_OPTIONS.map((option) => option.label)).toEqual(["Backlog", "Todo", "In Progress", "Done"]);
   });
 
@@ -180,18 +180,45 @@ describe("inline project card behavior", () => {
     expect(moveProjectCount(counts, "planned", "in_progress")).toEqual({ total: 42, byStatus: { captured: 6, planned: 7, in_progress: 11, done: 18 } });
   });
 
-  it("orders recent items by the latest Plane update or completed Ambient projection", () => {
+  it("prioritizes unfinished states, uses effective recency, and keeps the latest Done result", () => {
     const datedItems = items.map((item, index) => ({ ...item, updatedAt: `2026-08-13T0${index}:00:00.000Z` }));
     const sources = [{ eventId: "event_1_0", eventType: "decision", summary: "New decision", sourceExcerpt: "Decision", sessionId: "session_1", turnId: "turn_1", planeItemId: "1", createdAt: "2026-08-13T10:00:00.000Z", projectedAt: "2026-08-13T10:01:00.000Z" }];
 
-    expect(selectRelevantItems(datedItems, sources).map((item) => item.id)).toEqual(["1", "6", "5", "4", "3"]);
+    expect(selectRelevantItems(datedItems, sources).map((item) => item.id)).toEqual(["3", "2", "1", "6", "5"]);
+  });
+
+  it("keeps one item from every non-empty unfinished state before priority fill", () => {
+    const competingItems = [
+      { id: "ip-1", identifier: "DEMO-IP-1", title: "Newest in progress", status: "in_progress", updatedAt: "2026-08-13T10:00:00.000Z" },
+      { id: "ip-2", identifier: "DEMO-IP-2", title: "Second in progress", status: "in_progress", updatedAt: "2026-08-13T09:00:00.000Z" },
+      { id: "ip-3", identifier: "DEMO-IP-3", title: "Third in progress", status: "in_progress", updatedAt: "2026-08-13T08:00:00.000Z" },
+      { id: "ip-4", identifier: "DEMO-IP-4", title: "Fourth in progress", status: "in_progress", updatedAt: "2026-08-13T07:00:00.000Z" },
+      { id: "todo-1", identifier: "DEMO-TODO-1", title: "Todo item", status: "planned", updatedAt: "2026-08-13T06:00:00.000Z" },
+      { id: "backlog-1", identifier: "DEMO-BACKLOG-1", title: "Backlog item", status: "captured", updatedAt: "2026-08-13T05:00:00.000Z" },
+      { id: "done-1", identifier: "DEMO-DONE-1", title: "Done item", status: "done", updatedAt: "2026-08-13T11:00:00.000Z" },
+    ];
+
+    expect(selectRelevantItems(competingItems).map((item) => item.id)).toEqual(["ip-1", "todo-1", "backlog-1", "ip-2", "done-1"]);
+  });
+
+  it("selects a single status from its complete active collection", () => {
+    const backlogItems = [
+      ...items,
+      { id: "8", identifier: "DEMO-8", title: "Recent backlog item", status: "captured", updatedAt: "2026-08-13T08:00:00.000Z" },
+      { id: "9", identifier: "DEMO-9", title: "Another backlog item", status: "captured", updatedAt: "2026-08-13T07:00:00.000Z" },
+      { id: "10", identifier: "DEMO-10", title: "Third backlog item", status: "captured", updatedAt: "2026-08-13T06:00:00.000Z" },
+      { id: "11", identifier: "DEMO-11", title: "Fourth backlog item", status: "captured", updatedAt: "2026-08-13T05:00:00.000Z" },
+      { id: "12", identifier: "DEMO-12", title: "Fifth backlog item", status: "captured", updatedAt: "2026-08-13T04:00:00.000Z" },
+    ];
+
+    expect(selectRelevantItems(backlogItems, [], "captured").map((item) => item.id)).toEqual(["8", "9", "10", "11", "12"]);
   });
 
   it("models optimistic status movement and complete rollback data", () => {
     const relevant = selectRelevantItems(items);
     const moved = updateItemStatus(relevant, "1", "done");
     expect(moved.find((item) => item.id === "1")?.status).toBe("done");
-    expect(getStatusCounts(moved)).toEqual({ captured: 0, planned: 1, in_progress: 1, done: 3 });
+    expect(getStatusCounts(moved)).toEqual({ captured: 1, planned: 1, in_progress: 1, done: 2 });
     const rolledBack = updateItemStatus(moved, "1", "captured");
     expect(rolledBack.find((item) => item.id === "1")?.status).toBe("captured");
   });

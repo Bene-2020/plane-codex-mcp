@@ -1,0 +1,148 @@
+name: Platform-native plugin validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  platform-native:
+    name: ${{ matrix.target }} on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: win32-x64
+            runner: windows-2025
+    env:
+      TARGET: ${{ matrix.target }}
+      PACKAGE_ROOT: ${{ github.workspace }}/dist/plugins/ambient-project-layer/${{ matrix.target }}
+      EVIDENCE_DIR: ${{ github.workspace }}/ci-evidence/${{ matrix.target }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+
+      - name: Set up Node.js for build tooling
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.1
+          cache: pnpm
+
+      - name: Diff check
+        id: diff_check
+        continue-on-error: true
+        run: git diff --check
+
+      - name: Install dependencies
+        id: install
+        continue-on-error: true
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        id: build_packages
+        continue-on-error: true
+        run: pnpm run build:packages
+
+      - name: Build applications
+        id: build_apps
+        continue-on-error: true
+        run: pnpm run build:apps
+
+      - name: Install plugin-creator validator dependency
+        id: validator_dependency
+        continue-on-error: true
+        run: python -m pip install --disable-pip-version-check --user -r scripts/plugin-creator/requirements.txt
+
+      - name: Package target
+        id: package
+        continue-on-error: true
+        run: node scripts/package-plugin.mjs --target "${{ matrix.target }}" --output "${{ env.PACKAGE_ROOT }}"
+
+      - name: Validate plugin manifest
+        id: manifest
+        continue-on-error: true
+        run: python scripts/plugin-creator/validate_plugin.py "${{ env.PACKAGE_ROOT }}"
+
+      - name: Validate packaged runtime and layout
+        id: runtime
+        continue-on-error: true
+        run: node scripts/validate-plugin-runtime.mjs "${{ env.PACKAGE_ROOT }}"
+
+      - name: Execute bundled Node --version
+        id: bundled_node
+        continue-on-error: true
+        run: node scripts/check-bundled-node.mjs "${{ env.PACKAGE_ROOT }}"
+
+      - name: Run native MCP STDIO and five Hook smoke
+        id: smoke
+        continue-on-error: true
+        run: node scripts/smoke-plugin.mjs --plugin-root "${{ env.PACKAGE_ROOT }}" --evidence-output "${{ env.EVIDENCE_DIR }}/smoke.json"
+
+      - name: Write structured evidence and job summary
+        if: always()
+        env:
+          CHECK_DIFF_CHECK: ${{ steps.diff_check.outcome }}
+          CHECK_INSTALL: ${{ steps.install.outcome }}
+          CHECK_BUILD_PACKAGES: ${{ steps.build_packages.outcome }}
+          CHECK_BUILD_APPS: ${{ steps.build_apps.outcome }}
+          CHECK_VALIDATOR_DEPENDENCY: ${{ steps.validator_dependency.outcome }}
+          CHECK_PACKAGE: ${{ steps.package.outcome }}
+          CHECK_MANIFEST: ${{ steps.manifest.outcome }}
+          CHECK_RUNTIME: ${{ steps.runtime.outcome }}
+          CHECK_BUNDLED_NODE: ${{ steps.bundled_node.outcome }}
+          CHECK_SMOKE: ${{ steps.smoke.outcome }}
+        run: node scripts/ci/write-platform-evidence.mjs --target "${{ matrix.target }}" --package-root "${{ env.PACKAGE_ROOT }}" --evidence-dir "${{ env.EVIDENCE_DIR }}" --smoke-evidence "${{ env.EVIDENCE_DIR }}/smoke.json"
+
+      - name: Upload platform plugin package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ambient-project-layer-${{ matrix.target }}-plugin
+          path: ${{ env.PACKAGE_ROOT }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload platform evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ambient-project-layer-${{ matrix.target }}-evidence
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail the platform job if a check failed
+        if: always()
+        env:
+          CHECK_DIFF_CHECK: ${{ steps.diff_check.outcome }}
+          CHECK_INSTALL: ${{ steps.install.outcome }}
+          CHECK_BUILD_PACKAGES: ${{ steps.build_packages.outcome }}
+          CHECK_BUILD_APPS: ${{ steps.build_apps.outcome }}
+          CHECK_VALIDATOR_DEPENDENCY: ${{ steps.validator_dependency.outcome }}
+          CHECK_PACKAGE: ${{ steps.package.outcome }}
+          CHECK_MANIFEST: ${{ steps.manifest.outcome }}
+          CHECK_RUNTIME: ${{ steps.runtime.outcome }}
+          CHECK_BUNDLED_NODE: ${{ steps.bundled_node.outcome }}
+          CHECK_SMOKE: ${{ steps.smoke.outcome }}
+        run: node scripts/ci/fail-if-check-failed.mjs

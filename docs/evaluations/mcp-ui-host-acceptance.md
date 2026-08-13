@@ -29,7 +29,9 @@ mime: text/html;profile=mcp-app
 
 ## SMWC-14 / SMWC-15 复测基线
 
-正式插件包固定 macOS arm64 Node 22.22.1 sidecar，并使用 Node 内置 `node:sqlite`；因此宿主 Node 22/25 的 ABI 差异不再参与启动。BFF allowlist 精确包含 `https://web-sandbox.oaiusercontent.com` 以及 Codex Desktop 的 `codex-sandbox://*.web-sandbox.oaiusercontent.com`，保留 `X-Ambient-Session-Token`，恶意 Origin 没有 CORS 响应头。Panel 对 fetch/CORS 失败显示 localhost 服务/CORS 诊断，不提示重新绑定。
+正式插件按宿主安装平台专属 Node 22.22.1 sidecar，支持 macOS arm64、macOS x64、Linux x64、Linux arm64 和 Windows x64；Unix 使用 `runtime/bin/ambient-node`，Windows 使用 `runtime/bin/ambient-node.cmd` 与 `node.exe`，均使用 Node 内置 `node:sqlite`。因此宿主 Node 22/25 的 ABI 差异不再参与启动。BFF allowlist 精确包含 `https://web-sandbox.oaiusercontent.com` 以及 Codex Desktop 的 `codex-sandbox://*.web-sandbox.oaiusercontent.com`，保留 `X-Ambient-Session-Token`，恶意 Origin 没有 CORS 响应头。Panel 对 fetch/CORS 失败显示 localhost 服务/CORS 诊断，不提示重新绑定。
+
+平台包结构验收由 `node scripts/validate-plugin-runtime.mjs dist/plugins/ambient-project-layer --all` 负责：当前原生 macOS arm64 执行 sidecar `--version`，其他四个目标静态核对 `runtime.json`、Node 官方归档对应的 sidecar 文件名、`LICENSE.nodejs`、MCP 命令和五个 Hook 命令；`pnpm smoke:plugin` 还核对五目标 launcher 选择，并在原生包真实运行 MCP 与五个 Hook。当前开发机无法真实执行 macOS x64、Linux x64、Linux arm64 或 Windows x64 二进制，需在对应真实机完成 MCP STDIO、五 Hook 和 Windows `.cmd` 含空格路径验收。
 
 ## SMWC-25 生产 Desktop 动态 localhost 复测
 
