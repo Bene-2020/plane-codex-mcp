@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,6 +60,16 @@ async function runValidator(command, argumentsList) {
       error: error.message,
     };
   }
+}
+
+async function restoreUnixExecutableModes(packageRoot, target) {
+  if (target.platform === "win32") return { status: "not-required", files: [] };
+  const files = [
+    join(packageRoot, "runtime/bin", target.sidecarFile),
+    join(packageRoot, "runtime/bin", target.launcherFile),
+  ];
+  await Promise.all(files.map((path) => chmod(path, 0o755)));
+  return { status: "passed", files: files.map((path) => relative(packageRoot, path).split(sep).join("/")) };
 }
 
 const options = parseArguments(process.argv.slice(2));
@@ -149,13 +159,27 @@ try {
 }
 
 if (report.manifestAndLayout?.status === "passed") {
-  const python = process.platform === "win32" ? "python" : "python3";
-  report.validators.pluginManifest = await runValidator(python, [join(repositoryRoot, "scripts/plugin-creator/validate_plugin.py"), packageRoot]);
-  report.validators.runtime = await runValidator(process.execPath, [join(repositoryRoot, "scripts/validate-plugin-runtime.mjs"), packageRoot]);
-  report.validators.bundledNode = isNativeTarget
-    ? await runValidator(process.execPath, [join(repositoryRoot, "scripts/check-bundled-node.mjs"), packageRoot])
-    : { status: "not-run", reason: `target ${options.target} is not native to this verifier` };
+  try {
+    report.downloadedPermissions = await restoreUnixExecutableModes(packageRoot, target);
+  } catch (error) {
+    report.downloadedPermissions = { status: "failed", files: [], error: error.message };
+  }
+  if (report.downloadedPermissions.status === "passed" || report.downloadedPermissions.status === "not-required") {
+    const python = process.platform === "win32" ? "python" : "python3";
+    report.validators.pluginManifest = await runValidator(python, [join(repositoryRoot, "scripts/plugin-creator/validate_plugin.py"), packageRoot]);
+    report.validators.runtime = await runValidator(process.execPath, [join(repositoryRoot, "scripts/validate-plugin-runtime.mjs"), packageRoot]);
+    report.validators.bundledNode = isNativeTarget
+      ? await runValidator(process.execPath, [join(repositoryRoot, "scripts/check-bundled-node.mjs"), packageRoot])
+      : { status: "not-run", reason: `target ${options.target} is not native to this verifier` };
+  } else {
+    report.validators = {
+      pluginManifest: { status: "not-run" },
+      runtime: { status: "not-run" },
+      bundledNode: { status: "not-run" },
+    };
+  }
 } else {
+  report.downloadedPermissions = { status: "not-run", files: [] };
   report.validators = {
     pluginManifest: { status: "not-run" },
     runtime: { status: "not-run" },
@@ -165,13 +189,15 @@ if (report.manifestAndLayout?.status === "passed") {
 
 const validatorStatuses = Object.values(report.validators).map((validator) => validator.status);
 const validatorsPassed = validatorStatuses.every((status) => status === "passed" || (!options["require-native"] && status === "not-run"));
+const permissionsPassed = report.downloadedPermissions?.status === "passed" || report.downloadedPermissions?.status === "not-required";
 report.artifactIntegrity = {
-  status: [report.requiredFiles.status, report.hiddenManifestFiles.status, report.sensitiveFiles.status, report.manifestAndLayout?.status].every((status) => status === "passed") && validatorsPassed && (!options["require-native"] || isNativeTarget) ? "passed" : "failed",
+  status: [report.requiredFiles.status, report.hiddenManifestFiles.status, report.sensitiveFiles.status, report.manifestAndLayout?.status].every((status) => status === "passed") && permissionsPassed && validatorsPassed && (!options["require-native"] || isNativeTarget) ? "passed" : "failed",
   downloadedAndValidated: true,
   requiredFiles: report.requiredFiles.status,
   hiddenManifestFiles: report.hiddenManifestFiles.status,
   sensitiveFiles: report.sensitiveFiles.status,
   manifestAndLayout: report.manifestAndLayout?.status ?? "failed",
+  downloadedPermissions: report.downloadedPermissions?.status ?? "not-run",
   validators: report.validators,
 };
 report.status = report.artifactIntegrity.status;
