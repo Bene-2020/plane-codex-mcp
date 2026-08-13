@@ -397,5 +397,5 @@ try {
   }
   console.log(`Plugin isolation smoke passed: ${target.id} sidecar, ${staticSelection}, PATH without node/pnpm/bun, explicit fake MCP configuration, missing-config failure, App resources, open_project_panel server-tool bridge and web-sandbox summary, record-or-ack MCP tools, and five Hook fixtures.`);
 } finally {
-  await rm(smokeRoot, { recursive: true, force: true });
+  await rm(smokeRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
