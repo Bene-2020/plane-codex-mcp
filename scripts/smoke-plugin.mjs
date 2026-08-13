@@ -1,12 +1,14 @@
 import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { getNodeSidecarTarget, getNodeSidecarTargetForHost, NODE_SIDECAR_TARGET_IDS, renderLauncher } from "./node-sidecar-targets.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const execFile = promisify(execFileCallback);
 const sourcePlugin = join(root, "plugin");
 const fixtureRoot = join(root, "fixtures", "hooks");
 const fixtures = {
@@ -79,7 +81,15 @@ let isolatedPath;
 async function terminateChild(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const closed = new Promise((resolveClosed) => child.once("close", resolveClosed));
-  child.kill("SIGTERM");
+  if (process.platform === "win32") {
+    try {
+      await execFile("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+    } catch (error) {
+      if (child.exitCode === null && child.signalCode === null) throw error;
+    }
+  } else {
+    child.kill("SIGTERM");
+  }
   await Promise.race([
     closed,
     new Promise((_, reject) => setTimeout(() => reject(new Error("Plugin process did not exit after SIGTERM")), 6_000)),
