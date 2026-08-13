@@ -49,7 +49,7 @@ const options = parseArguments(process.argv.slice(2));
 
 function shellInvocation(commandLine) {
   if (process.platform === "win32") {
-    return { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", commandLine] };
+    return { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", `"${commandLine}"`] };
   }
   return { command: "/bin/sh", args: ["-c", commandLine] };
 }
