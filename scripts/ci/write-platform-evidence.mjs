@@ -38,6 +38,7 @@ const packageRoot = resolve(options["package-root"]);
 const evidenceDir = resolve(options["evidence-dir"]);
 const runtime = await readJsonIfPresent(resolve(packageRoot, "runtime/runtime.json"));
 const smoke = options["smoke-evidence"] ? await readJsonIfPresent(resolve(options["smoke-evidence"])) : undefined;
+const artifactReport = options["artifact-report"] ? await readJsonIfPresent(resolve(options["artifact-report"])) : undefined;
 const runId = process.env.GITHUB_RUN_ID ?? "local";
 const serverUrl = process.env.GITHUB_SERVER_URL ?? "https://github.com";
 const repository = process.env.GITHUB_REPOSITORY ?? "local/repository";
@@ -53,7 +54,16 @@ const checks = {
   packageValidation: outcome("runtime"),
   bundledNodeVersion: outcome("bundled-node"),
   mcpSmoke: outcome("smoke"),
+  artifactDownload: outcome("artifact-download"),
 };
+const artifactIntegrityStep = outcome("artifact-integrity");
+const artifactIntegrity = {
+  status: checks.artifactDownload.status === "passed" && artifactIntegrityStep.status === "passed" && artifactReport?.status === "passed" ? "passed" : "failed",
+  outcome: checks.artifactDownload.status === "passed" && artifactIntegrityStep.status === "passed" && artifactReport?.status === "passed" ? "success" : "failure",
+  step: artifactIntegrityStep,
+  report: artifactReport?.artifactIntegrity ?? { status: "not recorded" },
+};
+checks.artifactIntegrity = artifactIntegrity;
 const evidence = {
   schemaVersion: 1,
   status: Object.values(checks).every((check) => check.status === "passed") ? "passed" : "failed",
@@ -80,6 +90,8 @@ const evidence = {
     sqlite: runtime.sqlite,
   } : undefined,
   checks,
+  artifactIntegrity,
+  hiddenManifestFiles: artifactReport?.hiddenManifestFiles ?? { status: "not recorded", expected: [".mcp.json", ".codex-plugin/plugin.json"] },
   smoke: smoke ? {
     mcp: smoke.checks?.mcp,
     hooks: smoke.checks?.hooks,
@@ -97,6 +109,8 @@ const evidence = {
     `node scripts/validate-plugin-runtime.mjs dist/plugins/ambient-project-layer/${options.target}`,
     `node scripts/check-bundled-node.mjs dist/plugins/ambient-project-layer/${options.target}`,
     `node scripts/smoke-plugin.mjs --plugin-root dist/plugins/ambient-project-layer/${options.target} --evidence-output evidence/smoke.json`,
+    `actions/download-artifact@v4 ambient-project-layer-${options.target}-plugin`,
+    `node scripts/ci/validate-uploaded-plugin-artifact.mjs --root artifact-check/${options.target} --target ${options.target} --report evidence/artifact-integrity.json --require-native`,
   ],
   artifact: {
     plugin: `ambient-project-layer-${options.target}-plugin`,
@@ -118,6 +132,8 @@ const markdown = `# Native plugin validation — ${options.target}\n\n` +
   `| PATH excludes system node/pnpm/bun | ${smoke?.checks?.pathWithoutSystemNodePnpmBun?.status ?? "not recorded"} |\n` +
   `| Package copied/executed from path with spaces | ${smoke?.checks?.pathWithSpaces?.status ?? "not recorded"} |\n` +
   `| Runtime metadata, LICENSE, layout, launcher and package validation | ${checks.packageValidation.status} |\n` +
+  `| Uploaded plugin artifact downloaded and validated | ${artifactIntegrity.status} |\n` +
+  `| Hidden .mcp.json and .codex-plugin/plugin.json retained | ${evidence.hiddenManifestFiles.status} |\n` +
   `| Plugin-creator validator dependency | ${checks.validatorDependency.status} |\n` +
   `| Plugin manifest validation | ${checks.manifestValidation.status} |\n` +
   `| diff-check | ${checks.diffCheck.status} |\n\n` +

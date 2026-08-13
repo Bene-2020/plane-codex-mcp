@@ -75,6 +75,7 @@ function runtimeFileFilter(packageRoot, source) {
   const relativeSource = relative(packageRoot, source);
   const pathParts = relativeSource.split(sep);
   const fileName = pathParts.at(-1);
+  if (pathParts.some((part) => part.startsWith("."))) return false;
   if (pathParts.includes("node_modules") || ["test", "tests", "__tests__"].some((part) => pathParts.includes(part))) return false;
   if (fileName === "tsconfig.json" || fileName === "bench.js" || fileName === "eslint.config.mjs") return false;
   if (statSync(source).isDirectory()) return true;

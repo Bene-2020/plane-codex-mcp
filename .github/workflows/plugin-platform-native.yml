@@ -34,6 +34,8 @@ jobs:
       TARGET: ${{ matrix.target }}
       PACKAGE_ROOT: ${{ github.workspace }}/dist/plugins/ambient-project-layer/${{ matrix.target }}
       EVIDENCE_DIR: ${{ github.workspace }}/ci-evidence/${{ matrix.target }}
+      ARTIFACT_CHECK_ROOT: ${{ github.workspace }}/artifact-check/${{ matrix.target }}
+      ARTIFACT_REPORT: ${{ github.workspace }}/ci-evidence/${{ matrix.target }}/artifact-integrity.json
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -99,6 +101,31 @@ jobs:
         continue-on-error: true
         run: node scripts/smoke-plugin.mjs --plugin-root "${{ env.PACKAGE_ROOT }}" --evidence-output "${{ env.EVIDENCE_DIR }}/smoke.json"
 
+      - name: Upload platform plugin package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ambient-project-layer-${{ matrix.target }}-plugin
+          path: ${{ env.PACKAGE_ROOT }}
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 30
+
+      - name: Download uploaded plugin artifact for integrity validation
+        id: artifact_download
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ambient-project-layer-${{ matrix.target }}-plugin
+          path: ${{ env.ARTIFACT_CHECK_ROOT }}
+
+      - name: Validate downloaded plugin artifact integrity
+        id: artifact_integrity
+        if: always()
+        continue-on-error: true
+        run: node scripts/ci/validate-uploaded-plugin-artifact.mjs --root "${{ env.ARTIFACT_CHECK_ROOT }}" --target "${{ matrix.target }}" --report "${{ env.ARTIFACT_REPORT }}" --require-native
+
       - name: Write structured evidence and job summary
         if: always()
         env:
@@ -112,16 +139,9 @@ jobs:
           CHECK_RUNTIME: ${{ steps.runtime.outcome }}
           CHECK_BUNDLED_NODE: ${{ steps.bundled_node.outcome }}
           CHECK_SMOKE: ${{ steps.smoke.outcome }}
-        run: node scripts/ci/write-platform-evidence.mjs --target "${{ matrix.target }}" --package-root "${{ env.PACKAGE_ROOT }}" --evidence-dir "${{ env.EVIDENCE_DIR }}" --smoke-evidence "${{ env.EVIDENCE_DIR }}/smoke.json"
-
-      - name: Upload platform plugin package
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ambient-project-layer-${{ matrix.target }}-plugin
-          path: ${{ env.PACKAGE_ROOT }}
-          if-no-files-found: warn
-          retention-days: 30
+          CHECK_ARTIFACT_DOWNLOAD: ${{ steps.artifact_download.outcome }}
+          CHECK_ARTIFACT_INTEGRITY: ${{ steps.artifact_integrity.outcome }}
+        run: node scripts/ci/write-platform-evidence.mjs --target "${{ matrix.target }}" --package-root "${{ env.PACKAGE_ROOT }}" --evidence-dir "${{ env.EVIDENCE_DIR }}" --smoke-evidence "${{ env.EVIDENCE_DIR }}/smoke.json" --artifact-report "${{ env.ARTIFACT_REPORT }}"
 
       - name: Upload platform evidence
         if: always()
@@ -145,4 +165,6 @@ jobs:
           CHECK_RUNTIME: ${{ steps.runtime.outcome }}
           CHECK_BUNDLED_NODE: ${{ steps.bundled_node.outcome }}
           CHECK_SMOKE: ${{ steps.smoke.outcome }}
+          CHECK_ARTIFACT_DOWNLOAD: ${{ steps.artifact_download.outcome }}
+          CHECK_ARTIFACT_INTEGRITY: ${{ steps.artifact_integrity.outcome }}
         run: node scripts/ci/fail-if-check-failed.mjs

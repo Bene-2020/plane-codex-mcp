@@ -9,6 +9,8 @@ const checks = [
   "RUNTIME",
   "BUNDLED_NODE",
   "SMOKE",
+  "ARTIFACT_DOWNLOAD",
+  "ARTIFACT_INTEGRITY",
 ];
 const failed = checks.filter((name) => process.env[`CHECK_${name}`] !== "success");
 if (failed.length) throw new Error(`Platform validation failed: ${failed.join(", ")}`);
