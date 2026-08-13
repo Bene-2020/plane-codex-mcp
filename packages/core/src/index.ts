@@ -81,6 +81,7 @@ export interface SourceReference {
   id: number;
   batchId: string;
   eventId: string;
+  remoteSourceId: string;
   planeItemId: string | null;
   sessionId: string;
   turnId: string;
@@ -113,6 +114,9 @@ export function normalizeTitle(title: string): string {
 
 export function eventId(batchRowId: number, index: number): string { return `event_${batchRowId}_${index}`; }
 export function batchId(batchRowId: number): string { return `batch_${batchRowId}`; }
+export function remoteSourceId(projectContextId: string, sessionId: string, turnId: string, index: number): string {
+  return [projectContextId, sessionId, turnId, String(index)].map(encodeURIComponent).join(":");
+}
 
 export function lifecycleForEvent(event: SourceEvent): LifecycleState {
   if (event.type === "completed") return "done";

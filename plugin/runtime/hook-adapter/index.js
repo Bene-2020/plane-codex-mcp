@@ -4220,6 +4220,7 @@ var Storage = class {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         batch_id TEXT NOT NULL,
         event_id TEXT NOT NULL UNIQUE,
+        remote_source_id TEXT NOT NULL UNIQUE,
         plane_item_id TEXT,
         session_id TEXT NOT NULL,
         turn_id TEXT NOT NULL,
@@ -4276,12 +4277,14 @@ var Storage = class {
     this.ensureColumn("source_references", "projection_attempts", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("source_references", "projection_error", "TEXT");
     this.ensureColumn("source_references", "projected_at", "TEXT");
+    this.ensureColumn("source_references", "remote_source_id", "TEXT");
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_batches(status, next_attempt_at, lease_until);
       CREATE INDEX IF NOT EXISTS idx_no_project_event_reviews_turn ON no_project_event_reviews(project_context_id, session_id, turn_id);
       CREATE INDEX IF NOT EXISTS idx_source_batch ON source_references(batch_id);
       CREATE INDEX IF NOT EXISTS idx_source_event ON source_references(event_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_source_remote ON source_references(remote_source_id);
       CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
       CREATE INDEX IF NOT EXISTS idx_cache_context ON plane_item_cache(project_context_id, archived, updated_at);
     `);
@@ -4415,11 +4418,15 @@ var Storage = class {
     return this.setBatchStatus(batchIdValue, "retrying", error, claimToken);
   }
   addSourceReference(input) {
-    this.db.prepare(`INSERT INTO source_references (batch_id,event_id,plane_item_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at)
-      SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM source_references WHERE event_id=?)`).run(input.batchId, input.eventId, input.planeItemId, input.sessionId, input.turnId, input.eventType, input.summary, input.sourceExcerpt, input.observedAt, now(), input.eventId);
+    this.db.prepare(`INSERT INTO source_references (batch_id,event_id,remote_source_id,plane_item_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at)
+      SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM source_references WHERE event_id=?)`).run(input.batchId, input.eventId, input.remoteSourceId, input.planeItemId, input.sessionId, input.turnId, input.eventType, input.summary, input.sourceExcerpt, input.observedAt, now(), input.eventId);
     const reference = this.getSourceReference(input.eventId);
     if (!reference)
       throw new Error(`Source reference not found for ${input.eventId}`);
+    if (!reference.remoteSourceId)
+      throw new Error(`Source reference ${input.eventId} has not been migrated; run pnpm migrate:source-ids`);
+    if (reference.remoteSourceId !== input.remoteSourceId)
+      throw new Error(`Remote source identity mismatch for ${input.eventId}`);
     return reference;
   }
   getSourceReference(eventIdValue) {
@@ -4551,6 +4558,7 @@ var Storage = class {
       id: row.id,
       batchId: row.batch_id,
       eventId: row.event_id,
+      remoteSourceId: row.remote_source_id ?? "",
       planeItemId: row.plane_item_id,
       sessionId: row.session_id,
       turnId: row.turn_id,

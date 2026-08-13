@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, normalizeTitle } from "./index.js";
+import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, normalizeTitle, remoteSourceId } from "./index.js";
 
 describe("core project contracts", () => {
   it("normalizes cwd without changing its identity", () => {
@@ -13,6 +13,10 @@ describe("core project contracts", () => {
 
   it("rejects empty event batches at the MCP boundary", () => {
     expect(() => eventBatchSchema.parse({ projectContextId: "project_1", sessionId: "s", turnId: "t", events: [] })).toThrow();
+  });
+
+  it("builds a readable remote identity without using the local database row id", () => {
+    expect(remoteSourceId("project_1", "session:one", "turn/one", 2)).toBe("project_1:session%3Aone:turn%2Fone:2");
   });
 
   it("keeps injected context compact and omits source content", () => {

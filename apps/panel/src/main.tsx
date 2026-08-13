@@ -2,13 +2,82 @@ import { StrictMode, useEffect, useMemo, useState, type Dispatch, type SetStateA
 import { createRoot } from "react-dom/client";
 import { App as McpApp } from "@modelcontextprotocol/ext-apps";
 import "./styles.css";
-import { createPanelApi, PANEL_BOOTSTRAP_META_KEY, parsePanelBootstrap, SessionExpiredError, type PanelBootstrap } from "./session";
+import { createPanelApi, createPanelToolApi, PANEL_BOOTSTRAP_META_KEY, parsePanelBootstrap, SessionExpiredError, type PanelBootstrap, type PanelServerToolCall } from "./session";
 
-type Item = { id: string; identifier: string; title: string; description?: string; kind?: string; status?: string; dueDate?: string | null; url?: string; isSystemCreated?: boolean; archived?: boolean; updatedAt?: string };
-type Context = { id: string; canonicalCwd: string; planeProjectName?: string; planeProjectId: string; autoCaptureEnabled: boolean };
-type Source = { eventId: string; eventType: string; summary: string; sourceExcerpt: string; sessionId: string; turnId: string; planeItemId?: string | null };
-type Summary = { context: Context; items: Item[]; sources: Source[]; failures: Array<{ batch_id: string; status: string; attempts: number; last_error?: string }> };
+export type InlineStatus = "captured" | "planned" | "in_progress" | "done";
+export type InlineFilter = "all" | InlineStatus;
+export const INLINE_ITEM_LIMIT = 5;
+
+export const STATUS_OPTIONS = [
+  { value: "captured", label: "Backlog", cardLabel: "Captured", tone: "captured" },
+  { value: "planned", label: "Todo", cardLabel: "Todo", tone: "planned" },
+  { value: "in_progress", label: "In Progress", cardLabel: "In Progress", tone: "in-progress" },
+  { value: "done", label: "Done", cardLabel: "Done", tone: "done" },
+] as const satisfies ReadonlyArray<{ value: InlineStatus; label: string; cardLabel: string; tone: string }>;
+
+export type Item = { id: string; identifier: string; title: string; description?: string; kind?: string; status?: string; dueDate?: string | null; url?: string; isSystemCreated?: boolean; archived?: boolean; updatedAt?: string };
+export type Context = { id: string; canonicalCwd: string; planeProjectName?: string; planeProjectId: string; planeBaseUrl?: string; workspaceSlug?: string; autoCaptureEnabled: boolean };
+export type Source = { eventId: string; eventType: string; summary: string; sourceExcerpt: string; sessionId: string; turnId: string; planeItemId?: string | null; createdAt: string; projectedAt?: string | null };
+export type ProjectCounts = { total: number; byStatus: Record<InlineStatus, number> };
+export type Summary = { context: Context; items: Item[]; projectCounts: ProjectCounts | null; sources: Source[]; failures: Array<{ batch_id: string; status: string; attempts: number; last_error?: string }> };
 export type PanelApi = ReturnType<typeof createPanelApi>;
+
+export type StatusOperation = {
+  phase: "saving" | "synced" | "error";
+  previousStatus: InlineStatus;
+  nextStatus: InlineStatus;
+  error?: string;
+};
+
+export function isInlineStatus(value: string | undefined): value is InlineStatus {
+  return STATUS_OPTIONS.some((option) => option.value === value);
+}
+
+export function selectRelevantItems(items: Item[], sources: Source[] = []): Item[] {
+  const latestProjectionByItem = new Map<string, number>();
+  for (const source of sources) {
+    if (!source.planeItemId || !source.projectedAt) continue;
+    const projectedAt = Date.parse(source.projectedAt);
+    latestProjectionByItem.set(source.planeItemId, Math.max(latestProjectionByItem.get(source.planeItemId) ?? 0, projectedAt));
+  }
+  const lastModifiedAt = (item: Item) => Math.max(Date.parse(item.updatedAt ?? "") || 0, latestProjectionByItem.get(item.id) ?? 0);
+  return items.filter((item) => !item.archived && isInlineStatus(item.status)).sort((left, right) => lastModifiedAt(right) - lastModifiedAt(left)).slice(0, INLINE_ITEM_LIMIT);
+}
+
+export function filterVisibleItems(items: Item[], filter: InlineFilter): Item[] {
+  return filter === "all" ? items : items.filter((item) => item.status === filter);
+}
+
+export function getStatusCounts(items: Item[]): Record<InlineStatus, number> {
+  return STATUS_OPTIONS.reduce((counts, option) => {
+    counts[option.value] = items.filter((item) => item.status === option.value).length;
+    return counts;
+  }, {} as Record<InlineStatus, number>);
+}
+
+export function moveProjectCount(counts: ProjectCounts, previousStatus: InlineStatus, nextStatus: InlineStatus): ProjectCounts {
+  return { total: counts.total, byStatus: { ...counts.byStatus, [previousStatus]: counts.byStatus[previousStatus] - 1, [nextStatus]: counts.byStatus[nextStatus] + 1 } };
+}
+
+export function listSummary(filter: InlineFilter, visibleCount: number, counts: ProjectCounts | null): { title: string; detail: string } {
+  const title = filter === "all" ? "相关工作项" : `${STATUS_OPTIONS.find((option) => option.value === filter)?.label} 相关工作项`;
+  if (!counts) return { title, detail: `显示 ${visibleCount} / 项目计数暂不可用` };
+  return { title, detail: `显示 ${visibleCount} / ${filter === "all" ? `项目共 ${counts.total}` : `该状态共 ${counts.byStatus[filter]}`}` };
+}
+
+export function updateItemStatus(items: Item[], itemId: string, status: InlineStatus): Item[] {
+  return items.map((item) => item.id === itemId ? { ...item, status } : item);
+}
+
+export function projectPlaneUrl(context: Context): string {
+  if (!context.planeBaseUrl || !context.workspaceSlug) return "#";
+  const url = new URL(context.planeBaseUrl);
+  if (url.hostname === "api.plane.so") url.hostname = "app.plane.so";
+  url.pathname = `/${encodeURIComponent(context.workspaceSlug)}/projects/${encodeURIComponent(context.planeProjectId)}/issues`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
 
 interface PanelSessionSetters {
   setSession: Dispatch<SetStateAction<PanelBootstrap | null>>;
@@ -18,9 +87,9 @@ interface PanelSessionSetters {
   setLoading: Dispatch<SetStateAction<boolean>>;
 }
 
-export function attachPanelSession(next: PanelBootstrap, expireSession: () => void, setters: PanelSessionSetters): void {
+export function attachPanelSession(next: PanelBootstrap, expireSession: () => void, setters: PanelSessionSetters, apiFactory: (session: PanelBootstrap, onUnauthorized: () => void) => PanelApi = createPanelApi): void {
   setters.setSession(next);
-  setters.setApiClient(() => createPanelApi(next, expireSession));
+  setters.setApiClient(() => apiFactory(next, expireSession));
   setters.setSessionError("");
   setters.setMessage("");
   setters.setLoading(true);
@@ -56,17 +125,19 @@ function App() {
   const [sessionError, setSessionError] = useState("");
   const [apiClient, setApiClient] = useState<PanelApi | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState<InlineFilter>("all");
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<InlineStatus | null>(null);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [statusOperations, setStatusOperations] = useState<Record<string, StatusOperation>>({});
 
   const expireSession = () => {
     setSession(null);
     setApiClient(null);
     setSummary(null);
-    setSelectedId(null);
     setLoading(false);
     setLoadError("");
     setSessionError("本地服务已重启，请从 Codex 重新初始化面板。");
@@ -82,10 +153,11 @@ function App() {
       return;
     }
     const host = new McpApp({ name: "Ambient Project Panel", version: "0.1.0" });
+    const hostApiFactory = (_next: PanelBootstrap, onUnauthorized: () => void): PanelApi => createPanelToolApi(host.callServerTool.bind(host) as PanelServerToolCall, onUnauthorized);
     let active = true;
     host.ontoolresult = (result) => {
       if (!active) return;
-      handlePanelToolResult(result, attachSession, setSessionError, setLoading);
+      handlePanelToolResult(result, (next) => attachPanelSession(next, expireSession, { setSession, setApiClient, setSessionError, setMessage, setLoading }, hostApiFactory), setSessionError, setLoading);
     };
     void host.connect().catch(() => {
       if (!active) return;
@@ -98,6 +170,16 @@ function App() {
       void host.close().catch(() => undefined);
     };
   }, []);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+    const closeMenu = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(`[data-status-menu-card="${openMenuId}"]`)) setOpenMenuId(null);
+    };
+    document.addEventListener("pointerdown", closeMenu);
+    return () => document.removeEventListener("pointerdown", closeMenu);
+  }, [openMenuId]);
 
   const request = <T,>(path: string, init?: RequestInit): Promise<T> => apiClient ? apiClient<T>(path, init) : Promise.reject(new Error("Panel session is not initialized"));
   const load = async () => {
@@ -113,59 +195,199 @@ function App() {
       setSummary(next);
       setCwd(next.context.canonicalCwd);
       window.localStorage.setItem("ambient.cwd", next.context.canonicalCwd);
-      setSelectedId((current) => current ?? next.items[0]?.id ?? null);
     } catch (error) {
       if (!(error instanceof SessionExpiredError)) {
         const detail = panelRequestError(error);
         setMessage(detail);
         if (!summary) setLoadError(detail);
       }
-    }
-    finally { setLoading(false); }
+    } finally { setLoading(false); }
   };
   useEffect(() => { if (apiClient) void load(); }, [apiClient, session, sessionMode]);
 
-  const selected = summary?.items.find((item) => item.id === selectedId) ?? null;
-  const filteredItems = useMemo(() => (summary?.items ?? []).filter((item) => filter === "all" || item.kind === filter || item.status === filter || (filter === "ideaRisk" && (item.kind === "idea" || item.kind === "risk"))), [summary, filter]);
-  const counts = { captured: summary?.items.filter((item) => item.status === "captured").length ?? 0, in_progress: summary?.items.filter((item) => item.status === "in_progress").length ?? 0, bug: summary?.items.filter((item) => item.kind === "bug").length ?? 0, decision: summary?.items.filter((item) => item.kind === "decision").length ?? 0, ideaRisk: summary?.items.filter((item) => item.kind === "idea" || item.kind === "risk").length ?? 0 };
+  const relevantItems = useMemo(() => selectRelevantItems(summary?.items ?? [], summary?.sources ?? []), [summary]);
+  const visibleItems = useMemo(() => filterVisibleItems(relevantItems, filter), [relevantItems, filter]);
+  const projectCounts = summary?.projectCounts ?? null;
+  const listSummaryContent = listSummary(filter, visibleItems.length, projectCounts);
+  const finishDragging = () => { setDraggedItemId(null); setDropTarget(null); };
+
+  const moveItem = async (itemId: string, nextStatus: InlineStatus) => {
+    if (!summary) return;
+    const item = summary.items.find((candidate) => candidate.id === itemId);
+    if (!item) return;
+    const previousStatus = isInlineStatus(item.status) ? item.status : "captured";
+    if (previousStatus === nextStatus || statusOperations[itemId]?.phase === "saving") {
+      setOpenMenuId(null);
+      finishDragging();
+      return;
+    }
+    setOpenMenuId(null);
+    finishDragging();
+    setSummary((current) => current ? { ...current, items: updateItemStatus(current.items, itemId, nextStatus), projectCounts: current.projectCounts ? moveProjectCount(current.projectCounts, previousStatus, nextStatus) : null } : current);
+    setStatusOperations((current) => ({ ...current, [itemId]: { phase: "saving", previousStatus, nextStatus } }));
+    try {
+      const updated = await request<Item>(`/api/items/${encodeURIComponent(itemId)}/status`, { method: "PATCH", body: JSON.stringify({ status: nextStatus }) });
+      setSummary((current) => current ? { ...current, items: current.items.map((candidate) => candidate.id === itemId ? { ...candidate, ...updated, status: updated.status ?? nextStatus } : candidate) } : current);
+      setStatusOperations((current) => ({ ...current, [itemId]: { phase: "synced", previousStatus, nextStatus } }));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setSummary((current) => current ? { ...current, items: updateItemStatus(current.items, itemId, previousStatus), projectCounts: current.projectCounts ? moveProjectCount(current.projectCounts, nextStatus, previousStatus) : null } : current);
+      setStatusOperations((current) => ({ ...current, [itemId]: { phase: "error", previousStatus, nextStatus, error: detail } }));
+    } finally {
+      finishDragging();
+    }
+  };
 
   if (!session) {
     if (sessionMode === "standalone") return <StandaloneConnect cwd={cwd} tokenError={sessionError} onCwdChange={setCwd} onConnect={(token) => { const next = parsePanelBootstrap({ [PANEL_BOOTSTRAP_META_KEY]: { serviceBaseUrl: window.location.origin, sessionToken: token, projectContextId: "project_0" } }); if (!next) { setSessionError("请输入 43 位 base64url 临时会话令牌。"); return; } attachSession(next); }} />;
-    return <main className="shell loading"><div className="session-card"><span className="eyebrow">AMBIENT PROJECT LAYER</span><h1>Waiting for Codex</h1><p>{sessionError || "从 Codex 初始化项目面板后，这里会建立一次性的本地会话。"}</p></div></main>;
+    return <StateShell title="Waiting for Codex" message={sessionError || "从 Codex 初始化项目面板后，这里会建立一次性的本地会话。"} />;
   }
-  if (loading && !summary) return <main className="shell loading">Loading project panel…</main>;
-  if (!summary) return <main className="shell empty"><div className="empty-card"><span className="eyebrow">AMBIENT PROJECT LAYER</span>{loadError ? <><h1>Project panel unavailable</h1><p className="error">{loadError}</p><p>项目上下文未被判定为未绑定；这是一次面板服务请求失败。请重试或从 Codex 重新打开面板。</p><button onClick={() => void load()}>Retry</button></> : <><h1>No project context yet</h1><p>Bind this working directory from Codex with the ambient project skill, then reopen the panel.</p><label>Working directory<input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/Users/…/project" /></label><button onClick={() => void load()}>Load project</button>{message && <p className="error">{message}</p>}</>}</div></main>;
+  if (loading && !summary) return <LoadingShell />;
+  if (!summary) return <StateShell title="Project panel unavailable" message={loadError || "项目摘要暂时不可用，请从 Codex 重新打开面板。"} error onRetry={() => void load()} />;
 
-  const updateContext = async (enabled: boolean) => { await request(`/api/projects/${summary.context.id}/auto-capture`, { method: "PATCH", body: JSON.stringify({ enabled }) }); setSummary({ ...summary, context: { ...summary.context, autoCaptureEnabled: enabled } }); };
-  const edit = async (patch: Partial<Item>) => { if (!selected) return; const updated = await request<Item>(`/api/items/${selected.id}`, { method: "PATCH", body: JSON.stringify(patch) }); setSummary({ ...summary, items: summary.items.map((item) => item.id === updated.id ? { ...item, ...updated } : item) }); setMessage("已保存"); };
-  const archive = async () => { if (!selected || !window.confirm("归档这条系统生成的记录？")) return; await request(`/api/items/${selected.id}/archive`, { method: "POST" }); await load(); setMessage("已归档"); };
-  const remove = async () => { if (!selected || !window.confirm("删除这条系统生成的记录？此操作会同步到 Plane。")) return; await request(`/api/items/${selected.id}`, { method: "DELETE" }); await load(); setMessage("已删除"); };
-  const merge = async (targetId: string) => { if (!selected || !window.confirm("把当前记录合并到选中的目标记录？")) return; await request(`/api/items/${selected.id}/merge/${targetId}`, { method: "POST" }); await load(); setMessage("已合并"); };
+  const projectName = summary.context.planeProjectName ?? summary.context.planeProjectId;
+  const planeUrl = projectPlaneUrl(summary.context);
+  const syncHealthy = summary.failures.length === 0;
 
   return <main className="shell">
-    <header className="topbar"><div><span className="eyebrow">AMBIENT PROJECT LAYER</span><h1>{summary.context.planeProjectName ?? summary.context.planeProjectId}</h1><p className="path">{summary.context.canonicalCwd}</p></div><div className="top-actions"><span className={`sync ${summary.failures.length ? "warning" : "ok"}`}>{summary.failures.length ? `${summary.failures.length} 个待同步` : "同步正常"}</span><label className="toggle"><input type="checkbox" checked={summary.context.autoCaptureEnabled} onChange={(e) => void updateContext(e.target.checked)} /><span />自动捕获</label><button className="ghost" onClick={() => void load()}>刷新</button></div></header>
-    <section className="layout">
-      <aside className="sidebar"><p className="section-label">项目视图</p><button className={filter === "all" ? "nav active" : "nav"} onClick={() => setFilter("all")}>全部 <b>{summary.items.length}</b></button><button className={filter === "captured" ? "nav active" : "nav"} onClick={() => setFilter("captured")}>Captured <b>{counts.captured}</b></button><button className={filter === "in_progress" ? "nav active" : "nav"} onClick={() => setFilter("in_progress")}>进行中 <b>{counts.in_progress}</b></button><button className={filter === "bug" ? "nav active" : "nav"} onClick={() => setFilter("bug")}>Bug <b>{counts.bug}</b></button><button className={filter === "decision" ? "nav active" : "nav"} onClick={() => setFilter("decision")}>决定 <b>{counts.decision}</b></button><button className={filter === "ideaRisk" ? "nav active" : "nav"} onClick={() => setFilter("ideaRisk")}>想法 / 风险 <b>{counts.ideaRisk}</b></button><p className="section-label lower">同步</p><button className={filter === "failures" ? "nav active" : "nav"} onClick={() => setFilter("failures")}>失败记录 <b>{summary.failures.length}</b></button><div className="sidebar-note">系统安静地记录有意义的工作。面板只在你主动打开时出现。</div></aside>
-      <section className="list-pane"><div className="list-head"><div><p className="section-label">项目记录</p><h2>{filter === "all" ? "全部记录" : filter}</h2></div><span className="muted">{filteredItems.length} 条</span></div>{filter === "failures" ? <FailureList failures={summary.failures} contextId={summary.context.id} request={request} onDone={() => void load()} /> : <><div className="items">{filteredItems.map((item) => <button key={item.id} className={`item ${item.id === selectedId ? "selected" : ""}`} onClick={() => setSelectedId(item.id)}><div className="item-top"><span className={`kind ${item.kind ?? "task"}`}>{item.kind ?? "task"}</span><span className="muted">{item.identifier}</span></div><strong>{item.title}</strong><div className="item-bottom"><span>{labelStatus(item.status)}</span><span>{item.isSystemCreated ? "自动捕获" : "用户创建"}</span></div></button>)}{!filteredItems.length && <div className="blank">这里还没有记录。</div>}</div><div className="recent"><p className="section-label">最近进展</p>{summary.sources.slice(0, 4).map((source) => <div className="recent-row" key={source.eventId}><span>{source.eventType}</span><p>{source.summary}</p></div>)}</div></>}</section>
-      <aside className="detail-pane">{selected ? <Detail item={selected} items={summary.items} sources={summary.sources.filter((source) => source.planeItemId === selected.id)} onEdit={edit} onMerge={merge} onArchive={archive} onDelete={remove} /> : <div className="blank">选择一条记录查看详情。</div>}{message && <div className="toast">{message}</div>}</aside>
+    <section className="inline-card" aria-label="Ambient project inline card">
+      <header className="card-header">
+        <div className="project-heading">
+          <h1>{projectName}</h1>
+          <span className={`sync-health ${syncHealthy ? "healthy" : "unhealthy"}`}><span className="sync-dot" aria-hidden="true" />{syncHealthy ? "同步正常" : `${summary.failures.length} 个待同步`}</span>
+        </div>
+      </header>
+
+      <div className="card-content">
+        <div className="filter-group" role="tablist" aria-label="项目状态筛选">
+          <button type="button" role="tab" aria-selected={filter === "all"} className="filter-all" onClick={() => setFilter("all")}>
+            <span>全部</span><span className="filter-count">{projectCounts?.total ?? "—"}</span>
+          </button>
+          <div className="status-rail" aria-label="状态筛选和拖放目标">
+            {STATUS_OPTIONS.map((option) => <button
+              key={option.value}
+              type="button"
+              role="tab"
+              aria-selected={filter === option.value}
+              aria-label={`${option.label}，${projectCounts?.byStatus[option.value] ?? "计数暂不可用"}`}
+              className={`status-target tone-${option.tone}`}
+              data-active-drop={dropTarget === option.value ? "true" : undefined}
+              onClick={() => setFilter(option.value)}
+              onDragEnter={(event) => { if (draggedItemId) { event.preventDefault(); setDropTarget(option.value); } }}
+              onDragOver={(event) => { if (draggedItemId) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropTarget(option.value); } }}
+              onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget((current) => current === option.value ? null : current); }}
+              onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const itemId = draggedItemId ?? event.dataTransfer.getData("text/plain"); finishDragging(); if (itemId) void moveItem(itemId, option.value); }}
+            >
+              <span className="status-target-label">{option.label}</span>
+              <span className="status-target-count">{projectCounts?.byStatus[option.value] ?? "—"}</span>
+            </button>)}
+          </div>
+        </div>
+
+        <div className="list-summary">
+          <span className="list-summary-title">{listSummaryContent.title}</span>
+          <span className="list-summary-count">{listSummaryContent.detail}</span>
+        </div>
+
+        <div className="work-list" aria-live="polite">
+          {visibleItems.map((item) => {
+            const status = isInlineStatus(item.status) ? item.status : "captured";
+            const option = STATUS_OPTIONS.find((candidate) => candidate.value === status) ?? STATUS_OPTIONS[0];
+            const operation = statusOperations[item.id];
+            return <article
+              key={item.id}
+              className={`work-item ${draggedItemId === item.id ? "is-dragging" : ""}`}
+              draggable={operation?.phase !== "saving"}
+              aria-label={`${item.identifier} ${item.title}`}
+              onDragStart={(event) => { if (operation?.phase === "saving") { event.preventDefault(); return; } setDraggedItemId(item.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", item.id); setOpenMenuId(null); }}
+              onDragEnd={finishDragging}
+            >
+              <div className="work-item-main">
+                <div className="work-item-meta">
+                  <span className="work-item-identifier">{item.identifier}</span>
+                  <span className="status-menu-wrap" data-status-menu-card={item.id}>
+                    <button type="button" className={`status-chip tone-${option.tone}`} aria-haspopup="menu" aria-expanded={openMenuId === item.id} aria-label={`更改 ${item.identifier} 状态`} onClick={(event) => { event.stopPropagation(); setOpenMenuId((current) => current === item.id ? null : item.id); }}>
+                      <span className="status-chip-dot" aria-hidden="true" />{option.cardLabel}<span className="status-chip-chevron" aria-hidden="true" />
+                    </button>
+                    {openMenuId === item.id && <div className="status-menu" role="menu" aria-label={`${item.identifier} 状态选项`}>
+                      {STATUS_OPTIONS.map((nextOption) => <button key={nextOption.value} type="button" role="menuitem" className={nextOption.value === status ? "is-current" : ""} onClick={() => void moveItem(item.id, nextOption.value)}>
+                        <span className={`menu-dot tone-${nextOption.tone}`} aria-hidden="true" />{nextOption.label}{nextOption.value === status && <span className="menu-check" aria-hidden="true">✓</span>}
+                      </button>)}
+                    </div>}
+                  </span>
+                </div>
+                <h2>{item.title}</h2>
+                {operation && <div className={`sync-status ${operation.phase}`} role={operation.phase === "error" ? "alert" : "status"}>
+                  {operation.phase === "saving" && "保存中"}
+                  {operation.phase === "synced" && "已同步"}
+                  {operation.phase === "error" && `同步失败：${operation.error}`}
+                </div>}
+              </div>
+              <span className="drag-hint" aria-hidden="true">⠿</span>
+            </article>;
+          })}
+          {!visibleItems.length && <div className="empty-list">当前状态下没有工作项</div>}
+        </div>
+      </div>
+
+      <footer className="card-footer">
+        <a className="plane-cta" href={planeUrl} target="_blank" rel="noreferrer">在 Plane 中打开 ↗</a>
+      </footer>
+    </section>
+  </main>;
+}
+
+function StateShell({ title, message, error = false, onRetry }: { title: string; message: string; error?: boolean; onRetry?: () => void }) {
+  return <main className="shell state-shell"><section className="state-card"><span className="eyebrow">AMBIENT PROJECT LAYER</span><h1>{title}</h1><p className={error ? "error" : undefined}>{message}</p>{onRetry && <button type="button" className="secondary-button" onClick={onRetry}>重试</button>}</section></main>;
+}
+
+export function LoadingShell() {
+  return <main className="shell loading-shell">
+    <section className="inline-card loading-card" aria-busy="true" aria-label="正在加载项目面板">
+      <header className="card-header loading-header" aria-hidden="true">
+        <div className="loading-heading">
+          <span className="skeleton skeleton-project-name" />
+          <span className="loading-sync"><span className="skeleton skeleton-sync-dot" /><span className="skeleton skeleton-sync-label" /></span>
+        </div>
+      </header>
+
+      <div className="card-content">
+        <div className="filter-group loading-filters" aria-hidden="true">
+          <span className="skeleton skeleton-filter-all" />
+          <div className="status-rail">
+            {STATUS_OPTIONS.map((option) => <span key={option.value} className="skeleton skeleton-status-target" />)}
+          </div>
+        </div>
+
+        <div className="list-summary loading-summary" role="status">
+          <span className="list-summary-title">正在读取相关工作项</span>
+          <span className="skeleton skeleton-summary-count" aria-hidden="true" />
+        </div>
+
+        <div className="work-list loading-work-list" aria-hidden="true">
+          {Array.from({ length: INLINE_ITEM_LIMIT }, (_, index) => <article key={index} className="work-item loading-work-item">
+            <div className="work-item-main">
+              <div className="work-item-meta">
+                <span className="skeleton skeleton-identifier" />
+                <span className="skeleton skeleton-status-chip" />
+              </div>
+              <span className={`skeleton skeleton-item-title skeleton-item-title-${index + 1}`} />
+            </div>
+            <span className="skeleton skeleton-drag-hint" />
+          </article>)}
+        </div>
+      </div>
+
+      <footer className="card-footer loading-footer" aria-hidden="true">
+        <span className="skeleton skeleton-cta" />
+      </footer>
     </section>
   </main>;
 }
 
 function StandaloneConnect({ cwd, tokenError, onCwdChange, onConnect }: { cwd: string; tokenError: string; onCwdChange: (value: string) => void; onConnect: (token: string) => void }) {
   const [token, setToken] = useState("");
-  return <main className="shell empty"><div className="empty-card"><span className="eyebrow">LOCAL DEVELOPMENT MODE</span><h1>Connect project panel</h1><p>独立 4318 页面只用于开发降级；正式 Codex App 会话从组件私有 metadata 初始化。</p><label>Working directory<input value={cwd} onChange={(e) => onCwdChange(e.target.value)} placeholder="/Users/…/project" /></label><label>Temporary session token<input value={token} onChange={(e) => setToken(e.target.value)} placeholder="43 位 base64url 令牌" spellCheck={false} /></label><button onClick={() => onConnect(token)}>Connect</button>{tokenError && <p className="error">{tokenError}</p>}</div></main>;
+  return <main className="shell state-shell"><section className="state-card connect-card"><span className="eyebrow">LOCAL DEVELOPMENT MODE</span><h1>Connect project panel</h1><p>独立 4318 页面只用于开发降级；正式 Codex App 会话从组件私有 metadata 初始化。</p><label>Working directory<input value={cwd} onChange={(event) => onCwdChange(event.target.value)} placeholder="/Users/…/project" /></label><label>Temporary session token<input value={token} onChange={(event) => setToken(event.target.value)} placeholder="43 位 base64url 令牌" spellCheck={false} /></label><button type="button" className="plane-cta" onClick={() => onConnect(token)}>Connect</button>{tokenError && <p className="error">{tokenError}</p>}</section></main>;
 }
-
-function Detail({ item, items, sources, onEdit, onMerge, onArchive, onDelete }: { item: Item; items: Item[]; sources: Source[]; onEdit: (patch: Partial<Item>) => Promise<void>; onMerge: (targetId: string) => Promise<void>; onArchive: () => Promise<void>; onDelete: () => Promise<void> }) {
-  const [title, setTitle] = useState(item.title); const [description, setDescription] = useState(item.description ?? ""); const [status, setStatus] = useState(item.status ?? "captured"); const [kind, setKind] = useState(item.kind ?? "task"); const [dueDate, setDueDate] = useState(item.dueDate ?? "");
-  const [mergeTarget, setMergeTarget] = useState("");
-  useEffect(() => { setTitle(item.title); setDescription(item.description ?? ""); setStatus(item.status ?? "captured"); setKind(item.kind ?? "task"); setDueDate(item.dueDate ?? ""); }, [item.id, item.title, item.description, item.status, item.kind, item.dueDate]);
-  const save = () => onEdit({ title, description, status, kind, dueDate: dueDate || null });
-  return <div className="detail"><div className="detail-head"><div><span className={`kind ${kind}`}>{kind}</span><span className="muted id">{item.identifier}</span></div>{item.url && <a href={item.url} target="_blank" rel="noreferrer">打开 Plane ↗</a>}</div><label>标题<input value={title} onChange={(e) => setTitle(e.target.value)} /></label><label>描述<textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={6} /></label><div className="field-grid"><label>种类<select value={kind} onChange={(e) => setKind(e.target.value)}>{["task", "bug", "decision", "idea", "risk", "milestone"].map((v) => <option key={v}>{v}</option>)}</select></label><label>状态<select value={status} onChange={(e) => setStatus(e.target.value)}>{["captured", "planned", "in_progress", "done", "dropped"].map((v) => <option key={v}>{v}</option>)}</select></label></div><label>截止日期<input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></label><button className="primary full" onClick={() => void save()}>保存修改</button><div className="detail-divider" /><p className="section-label">来源引用</p>{sources.length ? sources.map((source) => <div className="source" key={source.eventId}><span>{source.eventType} · {source.sessionId} / {source.turnId}</span><p>{source.sourceExcerpt}</p></div>) : <p className="muted">暂无来源引用。</p>}<div className="detail-divider" /><p className="section-label">合并重复记录</p><div className="merge-row"><select value={mergeTarget} onChange={(e) => setMergeTarget(e.target.value)}><option value="">选择目标记录</option>{items.filter((candidate) => candidate.id !== item.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.identifier} · {candidate.title}</option>)}</select><button className="ghost" disabled={!mergeTarget} onClick={() => void onMerge(mergeTarget)}>合并</button></div><div className="detail-divider" /><div className="danger-actions"><button className="ghost" onClick={() => void onArchive()}>归档</button><button className="danger" onClick={() => void onDelete()}>删除</button></div></div>;
-}
-
-function FailureList({ failures, contextId, request, onDone }: { failures: Summary["failures"]; contextId: string; request: PanelApi; onDone: () => void }) { return <div className="failures">{failures.length ? failures.map((failure) => <div className="failure" key={failure.batch_id}><strong>{failure.batch_id}</strong><p>{failure.last_error ?? failure.status}</p><button className="ghost" onClick={async () => { await request(`/api/projects/${contextId}/retry/${failure.batch_id}`, { method: "POST" }); onDone(); }}>重试</button></div>) : <div className="blank">没有同步失败。</div>}</div>; }
-function labelStatus(status?: string): string { return ({ captured: "Captured", planned: "已规划", in_progress: "进行中", done: "已完成", dropped: "已放弃" } as Record<string, string>)[status ?? ""] ?? status ?? "未知"; }
 
 if (typeof document !== "undefined") createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);

@@ -18,7 +18,9 @@ mime: text/html;profile=mcp-app
 
 ## 已验证
 
-自动测试覆盖 MCP tools/list 的 App metadata、工具结果 metadata 与 content 隔离、缺失 bootstrap 安全行为、动态 BFF 启动/实际 URL/授权请求/重启令牌轮换、`open_project_panel → App.ontoolresult → 动态 service URL summary fetch` 完整链、Panel bootstrap 解析、统一请求头、401 清理且不重试；Service 覆盖 web-sandbox Origin、`null`/4318 开发来源、恶意 Origin 拒绝、带 token 的 summary 和精确 CORS。插件隔离冒烟覆盖显式 `PLANE_MODE=fake` 的测试入口、缺少 Plane 配置时在打开数据库前失败、PATH 无 node/pnpm/bun、MCP `initialize`/`tools/list`/`resources/read`/`open_project_panel`、带 Origin 的 summary 和五种 Hook fixture。正式 Desktop 的真实 SDK、数据库和凭据配置按 [Codex Desktop 安装与真人验收](../codex-desktop-installation.md) 记录，不把 Plane key 放入 Panel 或模型可见输出。
+自动测试覆盖 MCP tools/list 的 App metadata、工具结果 metadata 与 content 隔离、缺失 bootstrap 安全行为、动态 BFF 启动/实际 URL/授权请求/重启令牌轮换、`open_project_panel → App.ontoolresult → App.callServerTool → MCP server-tool bridge → 动态 BFF summary` 完整链、Panel bootstrap 解析、统一请求头、401 清理且不重试；Service 覆盖 web-sandbox 与 Desktop sandbox Origin、`null`/4318 开发来源、恶意 Origin 拒绝、带 token 的 summary 和精确 CORS。插件隔离冒烟覆盖显式 `PLANE_MODE=fake` 的测试入口、缺少 Plane 配置时在打开数据库前失败、PATH 无 node/pnpm/bun、MCP `initialize`/`tools/list`/`resources/read`/`open_project_panel`、Panel server-tool bridge、带 Origin 的 summary 和五种 Hook fixture。正式 Desktop 的真实 SDK、数据库和凭据配置按 [Codex Desktop 安装与真人验收](../codex-desktop-installation.md) 记录，不把 Plane key 放入 Panel 或模型可见输出。
+
+正式 Desktop 验收还必须在首次安装和每次升级后人工信任当前版本的五个 Hook，再新建 task。插件 enabled 或 MCP 可用不能替代 Hook 信任验证；若 Hook 显示 `modified`，宿主会在适配器启动前拦截执行，正式数据库不会产生该 session 的审计记录。重新信任后的当前 task 可验证 `UserPromptSubmit`，完整 `SessionStart` 链必须用新 task 验证。
 
 ## SMWC-10 / SMWC-13 根因与自动回归
 
@@ -27,7 +29,13 @@ mime: text/html;profile=mcp-app
 
 ## SMWC-14 / SMWC-15 复测基线
 
-正式插件包固定 macOS arm64 Node 22.22.1 sidecar，并使用 Node 内置 `node:sqlite`；因此宿主 Node 22/25 的 ABI 差异不再参与启动。BFF allowlist 精确包含 `https://web-sandbox.oaiusercontent.com`，保留 `X-Ambient-Session-Token`，恶意 Origin 没有 CORS 响应头。Panel 对 fetch/CORS 失败显示 localhost 服务/CORS 诊断，不提示重新绑定。
+正式插件包固定 macOS arm64 Node 22.22.1 sidecar，并使用 Node 内置 `node:sqlite`；因此宿主 Node 22/25 的 ABI 差异不再参与启动。BFF allowlist 精确包含 `https://web-sandbox.oaiusercontent.com` 以及 Codex Desktop 的 `codex-sandbox://*.web-sandbox.oaiusercontent.com`，保留 `X-Ambient-Session-Token`，恶意 Origin 没有 CORS 响应头。Panel 对 fetch/CORS 失败显示 localhost 服务/CORS 诊断，不提示重新绑定。
+
+## SMWC-25 生产 Desktop 动态 localhost 复测
+
+2026-08-13 的 Codex Desktop 151 实机复现显示：重启后的正式 sidecar 监听 `127.0.0.1:65185`，面板失败后没有到该端口的 `ESTABLISHED` 连接。只读核验 `/Applications/ChatGPT.app/Contents/Resources/app.asar` 发现生产 WebView 的 `onBeforeRequest` 仍以 `allowLocalDevelopment=false` 拦截 HTTP localhost；`_meta.ui.csp.connectDomains` 会进入宿主 CSP，但不改变该独立 URL gate。`Access-Control-Allow-Private-Network` 因请求尚未发出而无效。
+
+修复将生产面板请求改为官方 MCP Apps `App.callServerTool`，新增仅 `app` 可见的 `ambient_project_panel_request`，服务端只代理 Panel 所需的 allowlist 路径并复用动态 session token。回归覆盖真实 `AppBridge`、MCP server、动态 BFF 和 summary；全量测试为 76 tests passed，插件 isolation smoke 也覆盖该 bridge。最终完成仍以重启后的真实 Desktop 面板显示项目数据为准，不能用 curl、inject 或独立 runtime 代替。
 
 ## SMWC-4 复测
 
@@ -46,9 +54,9 @@ SMWC-4 归类为“错误测试路径/不可复现”：历史测试使用了临
 
 需要在目标 Codex Desktop 实机记录：
 
-1. 调用 `open_project_panel` 后是否在内联、画中画或全屏渲染 `ui://ambient-project/panel/v1.html`。
+1. 调用 `open_project_panel` 后是否以内联方式渲染 `ui://ambient-project/panel/v1.html`；画中画和 Fullscreen 不属于当前产品验收范围。
 2. `ui/notifications/tool-result` 是否将结果 `_meta` 传给组件，且 Panel 能带 `X-Ambient-Session-Token` 读取 localhost Service。
 3. 重开是否稳定；Service 重启后旧 Panel 是否收到 401 并要求重新初始化。
-4. 宿主是否提供目标产品所需的持久侧边栏位置。
+4. Inline 中的状态操作是否可用，且“在 Plane 中打开 ↗”是否进入正确的 Plane 页面。
 
-公开接口没有永久项目级 Codex chrome/侧边栏注册能力；因此宿主未渲染时继续使用 `pnpm dev:panel` 的 4318 页面降级，不使用 CDP 或非公开 UI 注入。
+当前产品不要求永久项目级 Codex chrome/侧边栏。宿主未渲染时继续使用 `pnpm dev:panel` 的 4318 同款页面做开发和降级；该页面不是独立完整看板，也不使用 CDP 或非公开 UI 注入。产品范围见 [Inline 项目卡片产品边界](../architecture/inline-panel-product-boundary.md)。

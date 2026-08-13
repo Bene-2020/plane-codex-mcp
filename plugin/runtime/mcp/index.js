@@ -28426,6 +28426,9 @@ function eventId(batchRowId, index) {
 function batchId(batchRowId) {
   return `batch_${batchRowId}`;
 }
+function remoteSourceId(projectContextId, sessionId, turnId, index) {
+  return [projectContextId, sessionId, turnId, String(index)].map(encodeURIComponent).join(":");
+}
 function lifecycleForEvent(event) {
   if (event.type === "completed")
     return "done";
@@ -28508,8 +28511,14 @@ var PlaneSdkAdapter = class {
   async listItems(context) {
     await this.loadStates(context);
     await this.loadTypes(context);
-    const payload = await this.client.workItems.list(context.workspaceSlug, context.planeProjectId, { limit: 100 });
-    return payload.results.map((item) => this.fromSdk(context, item));
+    const items = [];
+    let cursor;
+    do {
+      const payload = await this.client.workItems.list(context.workspaceSlug, context.planeProjectId, { per_page: 100, ...cursor ? { cursor } : {} });
+      items.push(...payload.results);
+      cursor = payload.next_page_results ? payload.next_cursor : void 0;
+    } while (cursor);
+    return items.map((item) => this.fromSdk(context, item));
   }
   async createItem(context, input) {
     const existing = await this.findItemBySourceEventId(context, input.sourceEventId);
@@ -28820,9 +28829,10 @@ var EventCoordinator = class {
     const pendingEvents = [];
     for (const [index, event] of batch.events.entries()) {
       const currentEventId = eventId(batch.rowId, index);
-      const reference = this.storage.addSourceReference({ batchId: batch.id, eventId: currentEventId, planeItemId: event.relatedItemId ?? null, sessionId: batch.sessionId, turnId: batch.turnId, eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: event.observedAt ?? (/* @__PURE__ */ new Date()).toISOString() });
+      const currentRemoteSourceId = remoteSourceId(batch.projectContextId, batch.sessionId, batch.turnId, index);
+      const reference = this.storage.addSourceReference({ batchId: batch.id, eventId: currentEventId, remoteSourceId: currentRemoteSourceId, planeItemId: event.relatedItemId ?? null, sessionId: batch.sessionId, turnId: batch.turnId, eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: event.observedAt ?? (/* @__PURE__ */ new Date()).toISOString() });
       if (reference.projectionStatus !== "completed")
-        pendingEvents.push({ event, eventId: currentEventId });
+        pendingEvents.push({ event, eventId: currentEventId, remoteSourceId: currentRemoteSourceId });
     }
     if (!pendingEvents.length) {
       assertClaim?.();
@@ -28839,11 +28849,11 @@ var EventCoordinator = class {
       return cached2 ? { ...remote, isSystemCreated: cached2.isSystemCreated } : remote;
     });
     itemList.push(...cachedItems.filter((cached2) => !remoteItems.some((remote) => remote.id === cached2.id)));
-    for (const { event, eventId: currentEventId } of pendingEvents) {
+    for (const { event, eventId: currentEventId, remoteSourceId: currentRemoteSourceId } of pendingEvents) {
       try {
         assertClaim?.();
         this.storage.markEventAttempt(currentEventId, claimToken);
-        const planeItemId = await this.projectEvent(context, batch, currentEventId, event, itemList, claimToken, assertClaim);
+        const planeItemId = await this.projectEvent(context, batch, currentEventId, currentRemoteSourceId, event, itemList, claimToken, assertClaim);
         assertClaim?.();
         this.storage.markEventCompleted(currentEventId, planeItemId, claimToken);
       } catch (error40) {
@@ -28855,13 +28865,13 @@ var EventCoordinator = class {
     if (!this.storage.areBatchEventsComplete(batch.id, batch.events.length) || !this.storage.setBatchStatus(batch.id, "synced", void 0, claimToken))
       throw new Error("Outbox batch claim lost");
   }
-  async projectEvent(context, batch, currentEventId, event, items, claimToken, assertClaim) {
+  async projectEvent(context, batch, currentEventId, currentRemoteSourceId, event, items, claimToken, assertClaim) {
     assertClaim?.();
-    const existing = this.resolveItem(currentEventId, event, items);
+    const existing = this.resolveItem(currentEventId, currentRemoteSourceId, event, items);
     if (event.type === "progress" || event.type === "decision") {
       if (existing) {
         assertClaim?.();
-        await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
+        await this.plane.addActivity(context, existing.id, event.summary, currentRemoteSourceId);
         assertClaim?.();
         if (event.type === "progress" && event.relatedItemId && existing.isSystemCreated) {
           const owned = this.storage.getFieldOwnership(existing.id, "status");
@@ -28875,7 +28885,7 @@ var EventCoordinator = class {
         this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
         return existing.id;
       } else if (event.type === "decision") {
-        const created2 = await this.create(context, batch, event, currentEventId, "decision", assertClaim);
+        const created2 = await this.create(context, batch, event, currentRemoteSourceId, "decision", assertClaim);
         this.storage.updateSourcePlaneItem(currentEventId, created2.id, claimToken);
         items.push(created2);
         return created2.id;
@@ -28898,7 +28908,7 @@ var EventCoordinator = class {
       return null;
     }
     if (event.type === "plan") {
-      return this.projectPlan(context, batch, currentEventId, event, items, existing, claimToken, assertClaim);
+      return this.projectPlan(context, batch, currentEventId, currentRemoteSourceId, event, items, existing, claimToken, assertClaim);
     }
     if (existing) {
       const update = {};
@@ -28915,7 +28925,7 @@ var EventCoordinator = class {
         }
       }
       assertClaim?.();
-      await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
+      await this.plane.addActivity(context, existing.id, event.summary, currentRemoteSourceId);
       assertClaim?.();
       this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
       return existing.id;
@@ -28923,20 +28933,20 @@ var EventCoordinator = class {
     const kind = recordKindForEvent(event);
     if (!kind)
       return null;
-    const created = await this.create(context, batch, event, currentEventId, kind, assertClaim);
+    const created = await this.create(context, batch, event, currentRemoteSourceId, kind, assertClaim);
     this.storage.updateSourcePlaneItem(currentEventId, created.id, claimToken);
     items.push(created);
     return created.id;
   }
-  async projectPlan(context, batch, currentEventId, event, items, existing, claimToken, assertClaim) {
-    const parent = existing ?? await this.create(context, batch, event, currentEventId, "task", assertClaim);
+  async projectPlan(context, batch, currentEventId, currentRemoteSourceId, event, items, existing, claimToken, assertClaim) {
+    const parent = existing ?? await this.create(context, batch, event, currentRemoteSourceId, "task", assertClaim);
     assertClaim?.();
     if (!items.some((item) => item.id === parent.id))
       items.push(parent);
     this.storage.updateSourcePlaneItem(currentEventId, parent.id, claimToken);
     for (const [index, step] of (event.steps ?? []).entries()) {
       assertClaim?.();
-      const child = await this.plane.createItem(context, { title: step.title, description: step.summary ?? "\u6267\u884C\u6B65\u9AA4", kind: "task", status: "planned", parentId: parent.id, sourceEventId: stepSourceEventId(currentEventId, index) });
+      const child = await this.plane.createItem(context, { title: step.title, description: step.summary ?? "\u6267\u884C\u6B65\u9AA4", kind: "task", status: "planned", parentId: parent.id, sourceEventId: stepSourceEventId(currentRemoteSourceId, index) });
       assertClaim?.();
       this.storage.cacheItem(context.id, child, true);
       if (!items.some((item) => item.id === child.id))
@@ -28944,9 +28954,9 @@ var EventCoordinator = class {
     }
     return parent.id;
   }
-  async create(context, batch, event, currentEventId, kind, assertClaim) {
+  async create(context, batch, event, currentRemoteSourceId, kind, assertClaim) {
     assertClaim?.();
-    const created = await this.plane.createItem(context, { title: event.title, description: `${event.summary}${sourceFooter(currentEventId, batch.sessionId, batch.turnId)}`, kind, status: lifecycleForEvent(event), dueDate: event.dueDate ?? null, sourceEventId: currentEventId });
+    const created = await this.plane.createItem(context, { title: event.title, description: `${event.summary}${sourceFooter(currentRemoteSourceId, batch.sessionId, batch.turnId)}`, kind, status: lifecycleForEvent(event), dueDate: event.dueDate ?? null, sourceEventId: currentRemoteSourceId });
     assertClaim?.();
     this.storage.cacheItem(context.id, created, true);
     for (const field of ["title", "description", "kind", "status", "dueDate"]) {
@@ -28955,14 +28965,14 @@ var EventCoordinator = class {
     }
     return created;
   }
-  resolveItem(currentEventId, event, planeItems) {
+  resolveItem(currentEventId, currentRemoteSourceId, event, planeItems) {
     const reference = this.storage.getSourceReference(currentEventId);
     if (reference?.planeItemId)
       return planeItems.find((item) => item.id === reference.planeItemId) ?? this.storage.getCachedItem(reference.planeItemId);
     if (event.relatedItemId)
       return planeItems.find((item) => item.id === event.relatedItemId || item.identifier === event.relatedItemId) ?? this.storage.getCachedItem(event.relatedItemId);
     if (event.type === "plan")
-      return planeItems.find((item) => hasSourceMarker(item.description, currentEventId)) ?? null;
+      return planeItems.find((item) => hasSourceMarker(item.description, currentRemoteSourceId)) ?? null;
     return null;
   }
   async refreshCache(context) {
@@ -29003,6 +29013,16 @@ var EventCoordinator = class {
     const updated = await this.plane.updateItem(context, itemId, editable);
     this.storage.cacheItem(context.id, updated, current.isSystemCreated);
     return updated;
+  }
+  async changeStatus(context, itemId, status) {
+    const current = this.storage.getCachedItem(itemId);
+    if (!current)
+      throw new Error("Project item not found");
+    const updated = await this.plane.updateItem(context, itemId, { status });
+    const result = { ...current, ...updated, status: updated.status ?? status, kind: updated.kind ?? current.kind, isSystemCreated: current.isSystemCreated };
+    this.storage.setFieldOwnership(itemId, "status", "user", result.status ?? status);
+    this.storage.cacheItem(context.id, result, current.isSystemCreated);
+    return result;
   }
   async archiveItem(context, itemId) {
     const current = this.storage.getCachedItem(itemId);
@@ -29160,6 +29180,7 @@ var Storage = class {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         batch_id TEXT NOT NULL,
         event_id TEXT NOT NULL UNIQUE,
+        remote_source_id TEXT NOT NULL UNIQUE,
         plane_item_id TEXT,
         session_id TEXT NOT NULL,
         turn_id TEXT NOT NULL,
@@ -29216,12 +29237,14 @@ var Storage = class {
     this.ensureColumn("source_references", "projection_attempts", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("source_references", "projection_error", "TEXT");
     this.ensureColumn("source_references", "projected_at", "TEXT");
+    this.ensureColumn("source_references", "remote_source_id", "TEXT");
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_batches(status, next_attempt_at, lease_until);
       CREATE INDEX IF NOT EXISTS idx_no_project_event_reviews_turn ON no_project_event_reviews(project_context_id, session_id, turn_id);
       CREATE INDEX IF NOT EXISTS idx_source_batch ON source_references(batch_id);
       CREATE INDEX IF NOT EXISTS idx_source_event ON source_references(event_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_source_remote ON source_references(remote_source_id);
       CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
       CREATE INDEX IF NOT EXISTS idx_cache_context ON plane_item_cache(project_context_id, archived, updated_at);
     `);
@@ -29355,11 +29378,15 @@ var Storage = class {
     return this.setBatchStatus(batchIdValue, "retrying", error40, claimToken);
   }
   addSourceReference(input) {
-    this.db.prepare(`INSERT INTO source_references (batch_id,event_id,plane_item_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at)
-      SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM source_references WHERE event_id=?)`).run(input.batchId, input.eventId, input.planeItemId, input.sessionId, input.turnId, input.eventType, input.summary, input.sourceExcerpt, input.observedAt, now(), input.eventId);
+    this.db.prepare(`INSERT INTO source_references (batch_id,event_id,remote_source_id,plane_item_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at)
+      SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM source_references WHERE event_id=?)`).run(input.batchId, input.eventId, input.remoteSourceId, input.planeItemId, input.sessionId, input.turnId, input.eventType, input.summary, input.sourceExcerpt, input.observedAt, now(), input.eventId);
     const reference = this.getSourceReference(input.eventId);
     if (!reference)
       throw new Error(`Source reference not found for ${input.eventId}`);
+    if (!reference.remoteSourceId)
+      throw new Error(`Source reference ${input.eventId} has not been migrated; run pnpm migrate:source-ids`);
+    if (reference.remoteSourceId !== input.remoteSourceId)
+      throw new Error(`Remote source identity mismatch for ${input.eventId}`);
     return reference;
   }
   getSourceReference(eventIdValue) {
@@ -29491,6 +29518,7 @@ var Storage = class {
       id: row.id,
       batchId: row.batch_id,
       eventId: row.event_id,
+      remoteSourceId: row.remote_source_id ?? "",
       planeItemId: row.plane_item_id,
       sessionId: row.session_id,
       turnId: row.turn_id,
@@ -29549,7 +29577,8 @@ function matchesSessionToken(candidate, expected) {
 }
 
 // apps/service/dist/index.js
-var DEFAULT_CORS_ORIGINS = ["https://web-sandbox.oaiusercontent.com", "http://127.0.0.1:4318", "http://localhost:4318", "null"];
+var CODEX_DESKTOP_CORS_ORIGIN = /^codex-sandbox:\/\/(?:[A-Za-z0-9-]+\.)?web-sandbox\.oaiusercontent\.com$/;
+var DEFAULT_CORS_ORIGINS = ["https://web-sandbox.oaiusercontent.com", "http://127.0.0.1:4318", "http://localhost:4318", "null", CODEX_DESKTOP_CORS_ORIGIN];
 var OutboxWorker = class {
   storage;
   coordinator;
@@ -29617,6 +29646,17 @@ var OutboxWorker = class {
 function jsonError(error40) {
   return { error: error40 instanceof Error ? error40.message : String(error40) };
 }
+var inlineStatuses = ["captured", "planned", "in_progress", "done"];
+function isInlineStatus(value) {
+  return typeof value === "string" && inlineStatuses.includes(value);
+}
+function countProjectItems(items) {
+  const byStatus = { captured: 0, planned: 0, in_progress: 0, done: 0 };
+  for (const item of items)
+    if (!item.archived && isInlineStatus(item.status))
+      byStatus[item.status] += 1;
+  return { total: Object.values(byStatus).reduce((total, count) => total + count, 0), byStatus };
+}
 function createService(args = {}) {
   const plane = args.plane ?? createPlaneAdapter();
   const storage = args.storage ?? new Storage();
@@ -29658,11 +29698,12 @@ function createService(args = {}) {
   app.get("/api/projects/:id/summary", async (request, reply) => {
     try {
       const context = getContext(request.params.id);
+      let projectCounts = null;
       try {
-        await coordinator.refreshCache(context);
+        projectCounts = countProjectItems(await coordinator.refreshCache(context));
       } catch {
       }
-      return { context, items: storage.listAllCachedItems(context.id), sources: storage.listSources(context.id).slice(0, 100), failures: storage.listFailedBatches(context.id), audits: storage.listAudits().slice(0, 50) };
+      return { context, items: storage.listAllCachedItems(context.id), projectCounts, sources: storage.listSources(context.id).slice(0, 100), failures: storage.listFailedBatches(context.id), audits: storage.listAudits().slice(0, 50) };
     } catch (error40) {
       return reply.code(404).send(jsonError(error40));
     }
@@ -29706,6 +29747,15 @@ function createService(args = {}) {
   app.patch("/api/items/:itemId", async (request, reply) => {
     try {
       return await coordinator.editItem(contextForItem(request.params.itemId), request.params.itemId, request.body);
+    } catch (error40) {
+      return reply.code(400).send(jsonError(error40));
+    }
+  });
+  app.patch("/api/items/:itemId/status", async (request, reply) => {
+    if (!isInlineStatus(request.body?.status))
+      return reply.code(400).send({ error: "Panel status must be captured, planned, in_progress, or done" });
+    try {
+      return await coordinator.changeStatus(contextForItem(request.params.itemId), request.params.itemId, request.body.status);
     } catch (error40) {
       return reply.code(400).send(jsonError(error40));
     }
@@ -29773,6 +29823,7 @@ async function startService(args = {}) {
 var text = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
 var PANEL_RESOURCE_URI = "ui://ambient-project/panel/v1.html";
 var PANEL_BOOTSTRAP_META_KEY = "ambient-project/bootstrap";
+var PANEL_PROXY_TOOL_NAME = "ambient_project_panel_request";
 function panelResourcePath() {
   return join(fileURLToPath(new URL(".", import.meta.url)), "../../panel/dist/index.html");
 }
@@ -29787,6 +29838,12 @@ function normalizeServiceBaseUrl(value) {
     throw new Error("Panel service URL must point to localhost");
   return value.replace(/\/+$/, "");
 }
+var panelProxyPathPattern = /^\/api\/(?:context(?:\?[^#]*)?|projects\/[^/?]+\/summary|items\/[^/?]+\/status)$/;
+var panelProxySchema = external_exports2.object({
+  method: external_exports2.enum(["GET", "PATCH"]),
+  path: external_exports2.string().regex(panelProxyPathPattern, "Panel API path is not allowed"),
+  body: external_exports2.record(external_exports2.unknown()).optional()
+});
 var bindingSchema = external_exports2.object({
   cwd: external_exports2.string().trim().min(1),
   planeBaseUrl: external_exports2.string().url().optional(),
@@ -29861,6 +29918,28 @@ function createMcpServer(dependencies = {}) {
       }
     };
   });
+  if (panelSession) {
+    K3(server, PANEL_PROXY_TOOL_NAME, {
+      title: "Ambient project panel request",
+      description: "Proxy one allowlisted panel API request through the MCP host without exposing the local HTTP service to the UI sandbox.",
+      inputSchema: panelProxySchema.shape,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      _meta: { ui: { visibility: ["app"] } }
+    }, async ({ method, path, body }) => {
+      const target = new URL(path, panelSession.serviceBaseUrl);
+      if (target.origin !== new URL(panelSession.serviceBaseUrl).origin || !path.startsWith("/api/"))
+        throw new Error("Panel API path is not allowed");
+      const response = await fetch(target, {
+        method,
+        headers: body === void 0 ? { "X-Ambient-Session-Token": panelSession.sessionToken } : { "Content-Type": "application/json", "X-Ambient-Session-Token": panelSession.sessionToken },
+        body: body === void 0 ? void 0 : JSON.stringify(body)
+      });
+      const responseBody = await response.text();
+      if (!response.ok)
+        return { isError: true, content: [{ type: "text", text: JSON.stringify({ status: response.status, error: responseBody }) }] };
+      return { content: [{ type: "text", text: responseBody }] };
+    });
+  }
   server.registerTool("bind_project", {
     title: "Bind project",
     description: "Bind a cwd to a Plane project after the user explicitly selected it.",
@@ -29943,12 +30022,31 @@ async function startMcpRuntime(options = {}) {
   }
 }
 
+// apps/mcp/dist/shutdown.js
+async function closeRuntimeAndExit(closeRuntime, exit, timeoutMs = 5e3) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(0), timeoutMs);
+  });
+  const result = await Promise.race([closeRuntime().then(() => 0, () => 1), timeout]);
+  if (timer)
+    clearTimeout(timer);
+  exit(result);
+}
+
 // apps/mcp/dist/main.js
 async function main() {
-  const runtime = await startMcpRuntime({ transport: new StdioServerTransport() });
+  const transport = new StdioServerTransport();
+  let runtime;
+  let shuttingDown = false;
   const shutdown = () => {
-    void runtime.close();
+    if (!runtime || shuttingDown)
+      return;
+    shuttingDown = true;
+    void closeRuntimeAndExit(() => runtime.close(), (code) => process.exit(code));
   };
+  transport.onclose = shutdown;
+  runtime = await startMcpRuntime({ transport });
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   process.stdin.once("end", shutdown);

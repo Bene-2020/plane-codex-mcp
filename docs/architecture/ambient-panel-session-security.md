@@ -2,7 +2,7 @@
 
 ## 产品边界
 
-Plane SDK/API 只提供后端项目管理能力，Plane 是用户可见项目数据的最终真相源。正式路径由 `apps/mcp` 在同一进程内启动 localhost Fastify BFF、Outbox worker 和 MCP；独立 `apps/service` 只服务开发降级。Hook 负责 Codex 集成；`apps/panel` 是自制的轻量 React Panel，目标是在 Codex MCP App 宿主中作为侧边栏/组件 UI 展示。Panel 不直接加载 Plane SDK，也不接触 Plane API Key。
+Plane 是用户可见项目数据的最终真相源和完整项目管理界面。正式路径由 `apps/mcp` 在同一进程内启动 localhost Fastify BFF、Outbox worker 和 MCP；独立 `apps/service` 只服务开发降级。Hook 负责 Codex 集成；`apps/panel` 是自制的轻量 React Inline card，只展示少量相关工作项并允许状态变更。它不提供 Ambient Fullscreen 或独立 Web 完整看板，主要 CTA 直接打开 Plane。Panel 不直接加载 Plane SDK，也不接触 Plane API Key。产品范围以 [Inline 项目卡片产品边界](inline-panel-product-boundary.md) 为准。
 
 ```text
 Codex model
@@ -29,15 +29,19 @@ MCP process: Fastify BFF + Outbox worker ◄── X-Ambient-Session-Token ─�
 
 ## CORS 与开发降级
 
-默认 CORS 精确允许 Codex MCP App 默认来源 `https://web-sandbox.oaiusercontent.com`、MCP App 的 `null` origin、`http://127.0.0.1:4318` 和 `http://localhost:4318`。其他 Origin 没有 `Access-Control-Allow-Origin`；没有 `origin:true` 或通配符。CORS 只是浏览器来源约束，不能替代令牌鉴权，summary 仍必须带 `X-Ambient-Session-Token`。
+默认 CORS 精确允许 Codex MCP App 的 HTTPS 来源 `https://web-sandbox.oaiusercontent.com` 及 Desktop 沙盒来源 `codex-sandbox://<mcp-server-subdomain>.web-sandbox.oaiusercontent.com`、MCP App 的 `null` origin、`http://127.0.0.1:4318` 和 `http://localhost:4318`。其他 Origin 没有 `Access-Control-Allow-Origin`；没有 `origin:true` 或通配符。CORS 只是浏览器来源约束，不能替代令牌鉴权，summary 仍必须带 `X-Ambient-Session-Token`。
 
-浏览器 fetch/CORS 失败时，Panel 显示“无法访问动态 localhost 面板服务”及 CORS 诊断，不显示“未绑定”或要求重新绑定；401 仍表示 MCP 进程会话已过期，只有此时提示从 Codex 重新初始化。
+生产版 Codex Desktop 还会在沙盒 WebView 的网络请求到达 BFF 之前拦截 `http://localhost` 和 `http://127.0.0.1`；实际 packaged Desktop 的 `allowLocalDevelopment` 为 false，因而 `_meta.ui.csp.connectDomains` 不能放行动态本地 HTTP。生产 Panel 不再直接 fetch localhost，而是通过组件可见的 `ambient_project_panel_request` 调用官方 `App.callServerTool`，MCP 进程再用同一 session token 请求 allowlist 内的 BFF 路径。PNA 响应头对此类“请求未发出”无效；CORS 和 CSP metadata 仍保留给 web-sandbox/独立 4318 开发路径。
+
+浏览器 fetch/CORS 失败时，Panel 显示“无法访问动态 localhost 面板服务”及 CORS 诊断，不显示“未绑定”或要求重新绑定；生产桥接收到 BFF 的 401 仍表示 MCP 进程会话已过期，只有此时提示从 Codex 重新初始化。
 
 4318 独立页面是明确隔离的开发/宿主降级：独立 Service 使用固定 `SERVICE_PORT`，开发者显式设置并手工输入当前临时令牌；Vite proxy 转发 `/api` 但不会无条件注入令牌。正式 Panel bootstrap 不从 URL、localStorage、Vite proxy、环境变量或模型上下文读取令牌。
 
 ## 宿主验收边界
 
 MCP Apps 标准规定了对话内/宿主内组件资源和 `App` bridge，但没有公开的永久项目级 Codex chrome/侧边栏注册接口。需要在目标 Codex Desktop 实机验证 `open_project_panel` 的资源渲染、`ui/notifications/tool-result` 的 `_meta` 传递和重新打开行为；未通过时使用 4318 页面，不把非公开注入或 CDP 作为替代。
+
+宿主即使支持 Fullscreen，也不把它作为产品入口或验收要求。4318 只渲染同一轻量 UI 以便开发和降级，不演进为独立管理端。
 
 参考：
 

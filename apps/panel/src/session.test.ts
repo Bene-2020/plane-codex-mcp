@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPanelApi, PANEL_BOOTSTRAP_META_KEY, parsePanelBootstrap, SessionExpiredError } from "./session";
+import { createPanelApi, createPanelToolApi, PANEL_BOOTSTRAP_META_KEY, parsePanelBootstrap, SessionExpiredError } from "./session";
 
 const sessionToken = "a".repeat(43);
 
@@ -36,5 +36,22 @@ describe("MCP App panel session", () => {
     await expect(api("/api/projects/project_1/summary")).rejects.toBeInstanceOf(SessionExpiredError);
     expect(onUnauthorized).toHaveBeenCalledOnce();
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("uses the MCP App server-tool bridge for host requests", async () => {
+    const callServerTool = vi.fn().mockResolvedValue({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
+    const api = createPanelToolApi(callServerTool, vi.fn());
+
+    await expect(api<{ ok: boolean }>("/api/projects/project_1/summary")).resolves.toEqual({ ok: true });
+    expect(callServerTool).toHaveBeenCalledWith({ name: "ambient_project_panel_request", arguments: { method: "GET", path: "/api/projects/project_1/summary" } });
+  });
+
+  it("expires the bridged session on a server-side unauthorized response", async () => {
+    const onUnauthorized = vi.fn();
+    const callServerTool = vi.fn().mockResolvedValue({ isError: true, content: [{ type: "text", text: JSON.stringify({ status: 401, error: "Unauthorized" }) }] });
+    const api = createPanelToolApi(callServerTool, onUnauthorized);
+
+    await expect(api("/api/projects/project_1/summary")).rejects.toBeInstanceOf(SessionExpiredError);
+    expect(onUnauthorized).toHaveBeenCalledOnce();
   });
 });

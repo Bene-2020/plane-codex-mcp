@@ -16,6 +16,7 @@ import type { RunningService } from "@ambient/service";
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
 export const PANEL_RESOURCE_URI = "ui://ambient-project/panel/v1.html";
 export const PANEL_BOOTSTRAP_META_KEY = "ambient-project/bootstrap";
+export const PANEL_PROXY_TOOL_NAME = "ambient_project_panel_request";
 
 export interface PanelBootstrapMetadata {
   serviceBaseUrl: string;
@@ -42,6 +43,14 @@ function normalizeServiceBaseUrl(value: string): string {
   if (!/^https?:$/.test(parsed.protocol) || !["127.0.0.1", "localhost"].includes(parsed.hostname) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("Panel service URL must point to localhost");
   return value.replace(/\/+$/, "");
 }
+
+const panelProxyPathPattern = /^\/api\/(?:context(?:\?[^#]*)?|projects\/[^/?]+\/summary|items\/[^/?]+\/status)$/;
+const panelProxySchema = z.object({
+  method: z.enum(["GET", "PATCH"]),
+  path: z.string().regex(panelProxyPathPattern, "Panel API path is not allowed"),
+  body: z.record(z.unknown()).optional(),
+});
+type PanelProxyInput = z.infer<typeof panelProxySchema>;
 
 const bindingSchema = z.object({
   cwd: z.string().trim().min(1),
@@ -120,6 +129,27 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
       },
     };
   });
+
+  if (panelSession) {
+    registerAppTool(server, PANEL_PROXY_TOOL_NAME, {
+      title: "Ambient project panel request",
+      description: "Proxy one allowlisted panel API request through the MCP host without exposing the local HTTP service to the UI sandbox.",
+      inputSchema: panelProxySchema.shape,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      _meta: { ui: { visibility: ["app"] } },
+    }, async ({ method, path, body }: PanelProxyInput) => {
+      const target = new URL(path, panelSession.serviceBaseUrl);
+      if (target.origin !== new URL(panelSession.serviceBaseUrl).origin || !path.startsWith("/api/")) throw new Error("Panel API path is not allowed");
+      const response = await fetch(target, {
+        method,
+        headers: body === undefined ? { "X-Ambient-Session-Token": panelSession.sessionToken } : { "Content-Type": "application/json", "X-Ambient-Session-Token": panelSession.sessionToken },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const responseBody = await response.text();
+      if (!response.ok) return { isError: true, content: [{ type: "text" as const, text: JSON.stringify({ status: response.status, error: responseBody }) }] };
+      return { content: [{ type: "text" as const, text: responseBody }] };
+    });
+  }
 
   server.registerTool("bind_project", {
     title: "Bind project",

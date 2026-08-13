@@ -1,6 +1,6 @@
 import {
   BatchRecord, LifecycleState, PlaneActivity, PlaneItem, PlaneProject, ProjectContext,
-  RecordKind, SourceEvent, eventId, lifecycleForEvent, recordKindForEvent, sourceFooter,
+  RecordKind, SourceEvent, eventId, lifecycleForEvent, recordKindForEvent, remoteSourceId, sourceFooter,
 } from "@ambient/core";
 import { Storage } from "@ambient/storage";
 import { PlaneClient, State as PlaneSdkState, WorkItem as PlaneSdkWorkItem, WorkItemType as PlaneSdkWorkItemType } from "@makeplane/plane-node-sdk";
@@ -74,8 +74,14 @@ export class PlaneSdkAdapter implements PlaneAdapter {
   async listItems(context: ProjectContext): Promise<PlaneItem[]> {
     await this.loadStates(context);
     await this.loadTypes(context);
-    const payload = await this.client.workItems.list(context.workspaceSlug, context.planeProjectId, { limit: 100 });
-    return payload.results.map((item) => this.fromSdk(context, item));
+    const items: PlaneSdkWorkItem[] = [];
+    let cursor: string | undefined;
+    do {
+      const payload = await this.client.workItems.list(context.workspaceSlug, context.planeProjectId, { per_page: 100, ...(cursor ? { cursor } : {}) });
+      items.push(...payload.results);
+      cursor = payload.next_page_results ? payload.next_cursor : undefined;
+    } while (cursor);
+    return items.map((item) => this.fromSdk(context, item));
   }
 
   async createItem(context: ProjectContext, input: CreateItemInput): Promise<PlaneItem> {
@@ -320,11 +326,12 @@ export class EventCoordinator {
     assertClaim?.();
     const context = this.storage.getContext(batch.projectContextId);
     if (!context) throw new Error("Project context not found for batch");
-    const pendingEvents: Array<{ event: SourceEvent; eventId: string }> = [];
+    const pendingEvents: Array<{ event: SourceEvent; eventId: string; remoteSourceId: string }> = [];
     for (const [index, event] of batch.events.entries()) {
       const currentEventId = eventId(batch.rowId, index);
-      const reference = this.storage.addSourceReference({ batchId: batch.id, eventId: currentEventId, planeItemId: event.relatedItemId ?? null, sessionId: batch.sessionId, turnId: batch.turnId, eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: event.observedAt ?? new Date().toISOString() });
-      if (reference.projectionStatus !== "completed") pendingEvents.push({ event, eventId: currentEventId });
+      const currentRemoteSourceId = remoteSourceId(batch.projectContextId, batch.sessionId, batch.turnId, index);
+      const reference = this.storage.addSourceReference({ batchId: batch.id, eventId: currentEventId, remoteSourceId: currentRemoteSourceId, planeItemId: event.relatedItemId ?? null, sessionId: batch.sessionId, turnId: batch.turnId, eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: event.observedAt ?? new Date().toISOString() });
+      if (reference.projectionStatus !== "completed") pendingEvents.push({ event, eventId: currentEventId, remoteSourceId: currentRemoteSourceId });
     }
     if (!pendingEvents.length) {
       assertClaim?.();
@@ -340,11 +347,11 @@ export class EventCoordinator {
       return cached ? { ...remote, isSystemCreated: cached.isSystemCreated } : remote;
     });
     itemList.push(...cachedItems.filter((cached) => !remoteItems.some((remote) => remote.id === cached.id)));
-    for (const { event, eventId: currentEventId } of pendingEvents) {
+    for (const { event, eventId: currentEventId, remoteSourceId: currentRemoteSourceId } of pendingEvents) {
       try {
         assertClaim?.();
         this.storage.markEventAttempt(currentEventId, claimToken);
-        const planeItemId = await this.projectEvent(context, batch, currentEventId, event, itemList, claimToken, assertClaim);
+        const planeItemId = await this.projectEvent(context, batch, currentEventId, currentRemoteSourceId, event, itemList, claimToken, assertClaim);
         assertClaim?.();
         this.storage.markEventCompleted(currentEventId, planeItemId, claimToken);
       } catch (error) {
@@ -356,13 +363,13 @@ export class EventCoordinator {
     if (!this.storage.areBatchEventsComplete(batch.id, batch.events.length) || !this.storage.setBatchStatus(batch.id, "synced", undefined, claimToken)) throw new Error("Outbox batch claim lost");
   }
 
-  private async projectEvent(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[], claimToken?: string, assertClaim?: () => void): Promise<string | null> {
+  private async projectEvent(context: ProjectContext, batch: BatchRecord, currentEventId: string, currentRemoteSourceId: string, event: SourceEvent, items: PlaneItem[], claimToken?: string, assertClaim?: () => void): Promise<string | null> {
     assertClaim?.();
-    const existing = this.resolveItem(currentEventId, event, items);
+    const existing = this.resolveItem(currentEventId, currentRemoteSourceId, event, items);
     if (event.type === "progress" || event.type === "decision") {
       if (existing) {
         assertClaim?.();
-        await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
+        await this.plane.addActivity(context, existing.id, event.summary, currentRemoteSourceId);
         assertClaim?.();
         if (event.type === "progress" && event.relatedItemId && existing.isSystemCreated) {
           const owned = this.storage.getFieldOwnership(existing.id, "status");
@@ -376,7 +383,7 @@ export class EventCoordinator {
         this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
         return existing.id;
       } else if (event.type === "decision") {
-        const created = await this.create(context, batch, event, currentEventId, "decision", assertClaim);
+        const created = await this.create(context, batch, event, currentRemoteSourceId, "decision", assertClaim);
         this.storage.updateSourcePlaneItem(currentEventId, created.id, claimToken);
         items.push(created);
         return created.id;
@@ -399,7 +406,7 @@ export class EventCoordinator {
       return null;
     }
     if (event.type === "plan") {
-      return this.projectPlan(context, batch, currentEventId, event, items, existing, claimToken, assertClaim);
+      return this.projectPlan(context, batch, currentEventId, currentRemoteSourceId, event, items, existing, claimToken, assertClaim);
     }
     if (existing) {
       const update: UpdateItemInput = {};
@@ -414,27 +421,27 @@ export class EventCoordinator {
         }
       }
       assertClaim?.();
-      await this.plane.addActivity(context, existing.id, event.summary, currentEventId);
+      await this.plane.addActivity(context, existing.id, event.summary, currentRemoteSourceId);
       assertClaim?.();
       this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
       return existing.id;
     }
     const kind = recordKindForEvent(event);
     if (!kind) return null;
-    const created = await this.create(context, batch, event, currentEventId, kind, assertClaim);
+    const created = await this.create(context, batch, event, currentRemoteSourceId, kind, assertClaim);
     this.storage.updateSourcePlaneItem(currentEventId, created.id, claimToken);
     items.push(created);
     return created.id;
   }
 
-  private async projectPlan(context: ProjectContext, batch: BatchRecord, currentEventId: string, event: SourceEvent, items: PlaneItem[], existing: PlaneItem | null, claimToken?: string, assertClaim?: () => void): Promise<string> {
-    const parent = existing ?? await this.create(context, batch, event, currentEventId, "task", assertClaim);
+  private async projectPlan(context: ProjectContext, batch: BatchRecord, currentEventId: string, currentRemoteSourceId: string, event: SourceEvent, items: PlaneItem[], existing: PlaneItem | null, claimToken?: string, assertClaim?: () => void): Promise<string> {
+    const parent = existing ?? await this.create(context, batch, event, currentRemoteSourceId, "task", assertClaim);
     assertClaim?.();
     if (!items.some((item) => item.id === parent.id)) items.push(parent);
     this.storage.updateSourcePlaneItem(currentEventId, parent.id, claimToken);
     for (const [index, step] of (event.steps ?? []).entries()) {
       assertClaim?.();
-      const child = await this.plane.createItem(context, { title: step.title, description: step.summary ?? "执行步骤", kind: "task", status: "planned", parentId: parent.id, sourceEventId: stepSourceEventId(currentEventId, index) });
+      const child = await this.plane.createItem(context, { title: step.title, description: step.summary ?? "执行步骤", kind: "task", status: "planned", parentId: parent.id, sourceEventId: stepSourceEventId(currentRemoteSourceId, index) });
       assertClaim?.();
       this.storage.cacheItem(context.id, child, true);
       if (!items.some((item) => item.id === child.id)) items.push(child);
@@ -442,9 +449,9 @@ export class EventCoordinator {
     return parent.id;
   }
 
-  private async create(context: ProjectContext, batch: BatchRecord, event: SourceEvent, currentEventId: string, kind: RecordKind, assertClaim?: () => void): Promise<PlaneItem> {
+  private async create(context: ProjectContext, batch: BatchRecord, event: SourceEvent, currentRemoteSourceId: string, kind: RecordKind, assertClaim?: () => void): Promise<PlaneItem> {
     assertClaim?.();
-    const created = await this.plane.createItem(context, { title: event.title, description: `${event.summary}${sourceFooter(currentEventId, batch.sessionId, batch.turnId)}`, kind, status: lifecycleForEvent(event), dueDate: event.dueDate ?? null, sourceEventId: currentEventId });
+    const created = await this.plane.createItem(context, { title: event.title, description: `${event.summary}${sourceFooter(currentRemoteSourceId, batch.sessionId, batch.turnId)}`, kind, status: lifecycleForEvent(event), dueDate: event.dueDate ?? null, sourceEventId: currentRemoteSourceId });
     assertClaim?.();
     this.storage.cacheItem(context.id, created, true);
     for (const field of ["title", "description", "kind", "status", "dueDate"] as const) {
@@ -454,11 +461,11 @@ export class EventCoordinator {
     return created;
   }
 
-  private resolveItem(currentEventId: string, event: SourceEvent, planeItems: PlaneItem[]): PlaneItem | null {
+  private resolveItem(currentEventId: string, currentRemoteSourceId: string, event: SourceEvent, planeItems: PlaneItem[]): PlaneItem | null {
     const reference = this.storage.getSourceReference(currentEventId);
     if (reference?.planeItemId) return planeItems.find((item) => item.id === reference.planeItemId) ?? this.storage.getCachedItem(reference.planeItemId);
     if (event.relatedItemId) return planeItems.find((item) => item.id === event.relatedItemId || item.identifier === event.relatedItemId) ?? this.storage.getCachedItem(event.relatedItemId);
-    if (event.type === "plan") return planeItems.find((item) => hasSourceMarker(item.description, currentEventId)) ?? null;
+    if (event.type === "plan") return planeItems.find((item) => hasSourceMarker(item.description, currentRemoteSourceId)) ?? null;
     return null;
   }
 
@@ -492,6 +499,16 @@ export class EventCoordinator {
     const updated = await this.plane.updateItem(context, itemId, editable);
     this.storage.cacheItem(context.id, updated, current.isSystemCreated);
     return updated;
+  }
+
+  async changeStatus(context: ProjectContext, itemId: string, status: LifecycleState): Promise<PlaneItem> {
+    const current = this.storage.getCachedItem(itemId);
+    if (!current) throw new Error("Project item not found");
+    const updated = await this.plane.updateItem(context, itemId, { status });
+    const result = { ...current, ...updated, status: updated.status ?? status, kind: updated.kind ?? current.kind, isSystemCreated: current.isSystemCreated };
+    this.storage.setFieldOwnership(itemId, "status", "user", result.status ?? status);
+    this.storage.cacheItem(context.id, result, current.isSystemCreated);
+    return result;
   }
 
   async archiveItem(context: ProjectContext, itemId: string): Promise<void> { const current = this.storage.getCachedItem(itemId); if (!current?.isSystemCreated) throw new Error("Only system-created items can be archived by the panel"); await this.plane.archiveItem(context, itemId); this.storage.markCacheArchived(itemId); }

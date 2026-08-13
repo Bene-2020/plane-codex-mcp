@@ -30,3 +30,19 @@
 - 优先测试用户可观察行为和关键数据流，不为实现细节堆积测试。
 - 每个已知关键故障保留一个直接测试即可，不做重复的防御性测试矩阵。
 - 发现真实兼容问题后再添加最小修复和对应回归测试。
+
+## 数据库选择
+
+- 涉及 SQLite、项目上下文、Hook、MCP、Outbox、Panel 或插件安装时，先阅读 `docs/database-guide.md`。
+- 仓库根目录的 `ambient-project-demo.sqlite` 是开发数据库；本机已安装插件的持久运行数据库位于 `~/.codex/plugins/data/ambient-project-layer-ambient-local/ambient.sqlite`。两者独立，不会自动同步。
+- 开发测试使用明确的临时 `AMBIENT_DB_PATH`，不要污染现有开发库或插件运行库。
+- 插件 Hook 的 `PLUGIN_DATA/ambient.sqlite` 和 MCP 的 `AMBIENT_DB_PATH` 必须指向同一文件。不要把数据库放进版本化的插件 cache 目录。
+- Plane 是用户可见项目数据的唯一真相源，但本地 Outbox、来源引用和字段所有权不能仅靠 Plane 完整重建。
+- 未经用户明确要求，不删除、覆盖、重建、迁移或手工合并任何现有数据库。只读检查不要实例化会自动迁移 schema 的 `Storage`。
+
+## Panel 产品边界
+
+- 实现、评审或调整 Panel 前，先阅读 `docs/architecture/inline-panel-product-boundary.md`；与旧规格冲突时以该文档为准。
+- Ambient 只提供 Inline card：展示约 3–5 个相关工作项，支持拖拽或状态菜单修改状态，并提供唯一主要 CTA“在 Plane 中打开 ↗”。
+- 不实现 Ambient Fullscreen、独立 Web 完整看板或完整项目管理；除 Inline 内置的“全部 + 四状态”查看切换外，高级/自定义筛选、创建、完整编辑、合并、归档、删除、分析和批量操作留在 Plane。
+- 当前三栏 Panel 是待收敛的遗留实现，不继续扩展。`localhost:4318` 仅用于开发和宿主不支持组件时的降级，不是独立产品入口。

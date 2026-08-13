@@ -24,3 +24,9 @@ Prefer `relatedItemId` from the injected active-item snapshot when a relationshi
 Progress and related decisions should attach to an existing item. A plan may include explicit executable steps. An explicit completion may update a uniquely identified item. Do not delete items, reassign people, move projects, or overwrite fields the user has edited.
 
 Automatic acceptance is silent in the normal reply. Briefly confirm only when the user explicitly asked to record, update, or complete something.
+
+## Inline project card
+
+After a work turn makes meaningful code, documentation, configuration, or project-data changes, record the project events first, then call `open_project_panel` for the bound `projectContextId` before the final response. This is a separate display action, not a second automatic-capture call.
+
+Also open the panel whenever the user explicitly asks to see it. Do not open it automatically after read-only inspection, explanation, status confirmation, or ordinary conversation that produced no change.

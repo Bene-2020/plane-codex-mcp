@@ -25,6 +25,16 @@ function assertInside(rootPath, candidate) {
 
 let isolatedPath;
 
+async function terminateChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise((resolveClosed) => child.once("close", resolveClosed));
+  child.kill("SIGTERM");
+  await Promise.race([
+    closed,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Plugin process did not exit after SIGTERM")), 6_000)),
+  ]);
+}
+
 function runPluginCommand(command, args, input, env, cwd) {
   return new Promise((resolveResult, reject) => {
     const childEnv = { ...process.env, ...env, PATH: isolatedPath };
@@ -106,7 +116,7 @@ async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot) {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
     const toolsList = await request(2, "tools/list", {});
     const toolNames = toolsList.result?.tools?.map((tool) => tool.name) ?? [];
-    const expectedTools = ["list_projects", "get_binding", "open_project_panel", "bind_project", "change_binding", "record_project_events", "acknowledge_no_project_events"];
+    const expectedTools = ["list_projects", "get_binding", "open_project_panel", "ambient_project_panel_request", "bind_project", "change_binding", "record_project_events", "acknowledge_no_project_events"];
     if (toolsList.error || JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) throw new Error(`MCP tools/list failed: ${JSON.stringify(toolsList)}`);
     const resourcesList = await request(3, "resources/list", {});
     if (resourcesList.error || !resourcesList.result?.resources?.some((resource) => resource.uri === "ui://ambient-project/panel/v1.html")) throw new Error(`MCP resources/list failed: ${JSON.stringify(resourcesList)}`);
@@ -123,6 +133,10 @@ async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot) {
     const panel = await request(8, "tools/call", { name: "open_project_panel", arguments: { projectContextId: "project_1" } });
     const bootstrap = panel.result?._meta?.["ambient-project/bootstrap"];
     if (panel.error || !bootstrap?.serviceBaseUrl || !bootstrap?.sessionToken) throw new Error(`MCP open_project_panel failed: ${JSON.stringify(panel)}`);
+    const bridgedSummaryResponse = await request(9, "tools/call", { name: "ambient_project_panel_request", arguments: { method: "GET", path: "/api/projects/project_1/summary" } });
+    const bridgedSummary = JSON.parse(bridgedSummaryResponse.result?.content?.[0]?.text ?? "null");
+    if (bridgedSummaryResponse.error || bridgedSummaryResponse.result?.isError || bridgedSummary?.context?.id !== "project_1") throw new Error(`MCP panel server-tool bridge failed: ${JSON.stringify(bridgedSummaryResponse)}`);
+    if (bridgedSummary.projectCounts?.total !== 0 || Object.values(bridgedSummary.projectCounts?.byStatus ?? {}).reduce((total, count) => total + count, 0) !== 0) throw new Error(`MCP panel summary did not expose authoritative project counts: ${JSON.stringify(bridgedSummary.projectCounts)}`);
     const summaryResponse = await fetch(`${bootstrap.serviceBaseUrl}/api/projects/project_1/summary`, { headers: { Origin: "https://web-sandbox.oaiusercontent.com", "X-Ambient-Session-Token": bootstrap.sessionToken } });
     if (summaryResponse.status !== 200 || summaryResponse.headers.get("access-control-allow-origin") !== "https://web-sandbox.oaiusercontent.com") throw new Error(`Dynamic BFF web-sandbox summary failed: ${summaryResponse.status} ${summaryResponse.headers.get("access-control-allow-origin")}`);
     const summary = await summaryResponse.json();
@@ -131,7 +145,7 @@ async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot) {
   } finally {
     closing = true;
     lines.close();
-    child.kill("SIGTERM");
+    await terminateChild(child);
   }
 }
 
@@ -217,7 +231,7 @@ try {
   }
   await assertMissingConfigurationFails(mcpEntrypoint, mcpCommand, smokeRoot);
   await smokeMcp(mcpEntrypoint, smokeRoot, isolatedPlugin);
-  console.log("Plugin isolation smoke passed: macOS arm64 sidecar, PATH without node/pnpm/bun, explicit fake MCP configuration, missing-config failure, App resources, open_project_panel web-sandbox summary, record-or-ack MCP tools, and five Hook fixtures.");
+  console.log("Plugin isolation smoke passed: macOS arm64 sidecar, PATH without node/pnpm/bun, explicit fake MCP configuration, missing-config failure, App resources, open_project_panel server-tool bridge and web-sandbox summary, record-or-ack MCP tools, and five Hook fixtures.");
 } finally {
   await rm(smokeRoot, { recursive: true, force: true });
 }

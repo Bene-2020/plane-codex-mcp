@@ -1,9 +1,19 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { startMcpRuntime } from "./index.js";
+import type { McpRuntime } from "./index.js";
+import { closeRuntimeAndExit } from "./shutdown.js";
 
 async function main(): Promise<void> {
-  const runtime = await startMcpRuntime({ transport: new StdioServerTransport() });
-  const shutdown = () => { void runtime.close(); };
+  const transport = new StdioServerTransport();
+  let runtime: McpRuntime | undefined;
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (!runtime || shuttingDown) return;
+    shuttingDown = true;
+    void closeRuntimeAndExit(() => runtime!.close(), (code) => process.exit(code));
+  };
+  transport.onclose = shutdown;
+  runtime = await startMcpRuntime({ transport });
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   process.stdin.once("end", shutdown);

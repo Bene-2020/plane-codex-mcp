@@ -4,11 +4,21 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { EventCoordinator, FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
-import { OutboxWorker, createService } from "./index.js";
+import { OutboxWorker, countProjectItems, createService } from "./index.js";
 
 const sessionHeaders = (service: ReturnType<typeof createService>) => ({ "X-Ambient-Session-Token": service.sessionToken });
 
 describe("local service and outbox worker", () => {
+  it("counts every non-archived item mapped to the four Inline states", () => {
+    expect(countProjectItems([
+      { id: "1", identifier: "1", title: "Backlog", projectId: "p", status: "captured", updatedAt: "now" },
+      { id: "2", identifier: "2", title: "Todo", projectId: "p", status: "planned", updatedAt: "now" },
+      { id: "3", identifier: "3", title: "Done", projectId: "p", status: "done", updatedAt: "now" },
+      { id: "4", identifier: "4", title: "Archived", projectId: "p", status: "done", archived: true, updatedAt: "now" },
+      { id: "5", identifier: "5", title: "Cancelled", projectId: "p", status: "dropped", updatedAt: "now" },
+    ])).toEqual({ total: 3, byStatus: { captured: 1, planned: 1, in_progress: 0, done: 1 } });
+  });
+
   it("keeps health anonymous and minimal", async () => {
     const service = createService({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter() });
     const response = await service.app.inject({ method: "GET", url: "/health" });
@@ -38,24 +48,31 @@ describe("local service and outbox worker", () => {
     await service.app.close();
   });
 
-  it("allows the Codex web-sandbox and development origins, but rejects an unlisted origin", async () => {
+  it("allows the Codex App and development origins, but rejects an unlisted origin", async () => {
     const storage = new Storage(":memory:");
     const service = createService({ storage, plane: new FakePlaneAdapter(), sessionToken: "a".repeat(43) });
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const codexDesktopOrigin = "codex-sandbox://mcp-server-ambient-project-abc123.web-sandbox.oaiusercontent.com";
     const webSandboxSummary = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/summary`, headers: { origin: "https://web-sandbox.oaiusercontent.com", "X-Ambient-Session-Token": service.sessionToken } });
+    const codexDesktopSummary = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/summary`, headers: { origin: codexDesktopOrigin, "X-Ambient-Session-Token": service.sessionToken } });
     const nullOrigin = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "null" } });
     const loopback = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "http://127.0.0.1:4318" } });
     const rejected = await service.app.inject({ method: "GET", url: "/health", headers: { origin: "https://not-the-panel.example" } });
     const preflight = await service.app.inject({ method: "OPTIONS", url: `/api/projects/${context.id}/summary`, headers: { origin: "https://web-sandbox.oaiusercontent.com", "access-control-request-method": "GET", "access-control-request-headers": "content-type,x-ambient-session-token" } });
+    const codexDesktopPreflight = await service.app.inject({ method: "OPTIONS", url: `/api/projects/${context.id}/summary`, headers: { origin: codexDesktopOrigin, "access-control-request-method": "GET", "access-control-request-headers": "content-type,x-ambient-session-token" } });
     expect(webSandboxSummary.statusCode).toBe(200);
     expect(webSandboxSummary.headers["access-control-allow-origin"]).toBe("https://web-sandbox.oaiusercontent.com");
     expect(webSandboxSummary.json().context.id).toBe(context.id);
+    expect(codexDesktopSummary.statusCode).toBe(200);
+    expect(codexDesktopSummary.headers["access-control-allow-origin"]).toBe(codexDesktopOrigin);
     expect(nullOrigin.headers["access-control-allow-origin"]).toBe("null");
     expect(loopback.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:4318");
     expect(rejected.headers["access-control-allow-origin"]).toBeUndefined();
     expect(preflight.statusCode).toBe(204);
     expect(preflight.headers["access-control-allow-origin"]).toBe("https://web-sandbox.oaiusercontent.com");
     expect(preflight.headers["access-control-allow-headers"]).toBe("Content-Type, X-Ambient-Session-Token");
+    expect(codexDesktopPreflight.statusCode).toBe(204);
+    expect(codexDesktopPreflight.headers["access-control-allow-origin"]).toBe(codexDesktopOrigin);
     await service.app.close();
   });
 
@@ -100,6 +117,43 @@ describe("local service and outbox worker", () => {
     const response = await service.app.inject({ method: "GET", url: `/api/projects/${context.id}/summary`, headers: sessionHeaders(service) });
     expect(response.statusCode).toBe(200);
     expect(response.json().items[0].title).toBe("完成浏览器测试");
+    expect(response.json().projectCounts).toEqual({ total: 1, byStatus: { captured: 1, planned: 0, in_progress: 0, done: 0 } });
+    await service.app.close();
+  });
+
+  it("persists an Inline status change through the narrow Service and Plane path", async () => {
+    const storage = new Storage(":memory:");
+    const plane = new FakePlaneAdapter();
+    const service = createService({ storage, plane });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const item = await plane.createItem(context, { title: "状态操作", description: "状态操作", kind: "task", status: "captured", sourceEventId: "status-source" });
+    storage.cacheItem(context.id, item, true);
+
+    const response = await service.app.inject({ method: "PATCH", url: `/api/items/${item.id}/status`, headers: sessionHeaders(service), payload: { status: "in_progress" } });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ id: item.id, status: "in_progress" });
+    expect(storage.getCachedItem(item.id)?.status).toBe("in_progress");
+    expect(storage.getFieldOwnership(item.id, "status")?.owner).toBe("user");
+    expect(plane.calls).toContain(`update:${item.id}`);
+    await service.app.close();
+  });
+
+  it("returns the Plane error and leaves the cached status unchanged when a status write fails", async () => {
+    const storage = new Storage(":memory:");
+    const plane = new FakePlaneAdapter();
+    const service = createService({ storage, plane });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const item = await plane.createItem(context, { title: "失败状态操作", description: "失败状态操作", kind: "task", status: "captured", sourceEventId: "status-failure-source" });
+    storage.cacheItem(context.id, item, true);
+    plane.injectFailure({ operation: "updateItem", call: 1 });
+
+    const response = await service.app.inject({ method: "PATCH", url: `/api/items/${item.id}/status`, headers: sessionHeaders(service), payload: { status: "done" } });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toContain("Fake Plane injected updateItem failure");
+    expect(storage.getCachedItem(item.id)?.status).toBe("captured");
+    expect(storage.getFieldOwnership(item.id, "status")?.owner).toBeUndefined();
     await service.app.close();
   });
 

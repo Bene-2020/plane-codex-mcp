@@ -5,7 +5,7 @@ import { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { describe, expect, it } from "vitest";
 import { FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
-import { createMcpServer, PANEL_BOOTSTRAP_META_KEY, PANEL_RESOURCE_URI, startMcpRuntime } from "./index.js";
+import { createMcpServer, PANEL_BOOTSTRAP_META_KEY, PANEL_PROXY_TOOL_NAME, PANEL_RESOURCE_URI, startMcpRuntime } from "./index.js";
 
 describe("ambient MCP tools and App bootstrap", () => {
   it("advertises the project tools and App bootstrap with current behavior annotations", async () => {
@@ -105,6 +105,32 @@ describe("ambient MCP tools and App bootstrap", () => {
       await client.close();
       await server.close();
       storage.close();
+    }
+  });
+
+  it("keeps panel API requests on the MCP host bridge instead of the sandbox network", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const runtime = await startMcpRuntime({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter(), transport: serverTransport });
+    const context = runtime.service.storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const client = new Client({ name: "ambient-panel-proxy-test", version: "0.1.0" });
+    await client.connect(clientTransport);
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.find((tool) => tool.name === PANEL_PROXY_TOOL_NAME)?._meta).toEqual({ ui: { visibility: ["app"] } });
+      const result = await client.callTool({ name: PANEL_PROXY_TOOL_NAME, arguments: { method: "GET", path: `/api/projects/${context.id}/summary` } });
+      expect(result.isError).not.toBe(true);
+      const responseText = (result.content as unknown as Array<{ text: string }>)[0]?.text;
+      expect(responseText).toBeDefined();
+      expect(JSON.parse(responseText as string).context.id).toBe(context.id);
+
+      const item = await (runtime.service.plane as FakePlaneAdapter).createItem(context, { title: "Bridge status", description: "Bridge status", kind: "task", status: "captured", sourceEventId: "bridge-status-source" });
+      runtime.service.storage.cacheItem(context.id, item, true);
+      const statusResult = await client.callTool({ name: PANEL_PROXY_TOOL_NAME, arguments: { method: "PATCH", path: `/api/items/${item.id}/status`, body: { status: "done" } } });
+      expect(statusResult.isError).not.toBe(true);
+      expect(JSON.parse((statusResult.content as unknown as Array<{ text: string }>)[0]?.text ?? "{}").status).toBe("done");
+    } finally {
+      await client.close();
+      await runtime.close();
     }
   });
 

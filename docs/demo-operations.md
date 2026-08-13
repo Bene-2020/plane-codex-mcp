@@ -8,6 +8,7 @@
 4. 正式环境通过 MCP `list_projects` 查看真实项目；用户明确选择后调用 `bind_project`。没有绑定时不猜测目标项目，也不写入 Plane。
 5. 在同一 cwd 的工作回合中，由当前 Codex 判断是否产生事件：有事件时至多调用一次 `record_project_events`，无事件时调用一次 `acknowledge_no_project_events`；两者都不调用时 Stop 保留漏记兜底。
 6. Codex 需要展示面板时调用 `open_project_panel`，它通过官方 MCP Apps `_meta.ui.resourceUri` 加载 `ui://ambient-project/panel/v1.html`；结果 `_meta["ambient-project/bootstrap"]` 只给组件 `serviceBaseUrl`、临时令牌和 `projectContextId`。模型可见 content 不包含令牌。
+   UI 产品边界：组件以内联卡片展示约 3–5 个相关工作项并允许状态变更；底部 CTA 打开 Plane。不得将它扩展为 Ambient Fullscreen 或独立 Web 完整看板，详见 [Inline 项目卡片产品边界](architecture/inline-panel-product-boundary.md)。
 7. service worker 每 5 秒原子 claim 一个 pending/retrying/failed 批次，并在 Plane 同步期间用 claim token heartbeat 续租；`POST /api/worker/run` 可手动触发一次，processed 返回本次 claim/尝试的批次数（不代表成功同步数）。该 POST 也需要会话头。
 8. Codex App 宿主不支持组件渲染时，才运行独立开发降级：先显式设置 `AMBIENT_SESSION_TOKEN`，再运行 `pnpm dev:service` 和 `pnpm dev:panel`，打开 `http://127.0.0.1:4318` 手工输入 cwd/令牌。Vite proxy 不会注入有效令牌。
 
@@ -20,11 +21,11 @@
 - Hook 输入坏 JSON 或 SQLite 出错：Hook 返回空/最小 `additionalContext`，不返回 `statusMessage`、`systemMessage`，不阻塞主任务。
 - 自动捕获关闭：MCP `record_project_events` 拒绝新批次；Codex 主任务不受影响。
 - 无事件确认：MCP `acknowledge_no_project_events` 只写入当前 `project_context_id + session_id + turn_id` 的幂等审查标记，不创建 Plane 项目或 Outbox 批次；后续同回合成功记录事件会清除该标记。
-- 用户修改字段：面板编辑将字段标记为 `user`；自动协调器只追加活动或更新仍由系统拥有的字段。
-- 面板删除/归档/合并：仅用户主动点击可触发，服务端限制自动生成项；自动 MCP 没有这些高风险能力。
+- 用户修改状态：只由 Inline 拖拽或状态菜单触发；失败时回滚并明确提示。自动协调器只追加活动或更新仍由系统拥有的字段。
+- 完整编辑、删除、归档和合并不进入 Inline；用户在 Plane 中完成这些操作。自动 MCP 没有这些高风险能力。
 - 手动 retry 仅接受 URL 项目上下文所属且尚未 `synced` 的批次。
 - 缺少或错误的 `X-Ambient-Session-Token` 统一返回 401，且写请求在 Fastify `onRequest` 鉴权前不会触及存储；401 后 Panel 清除内存会话，不会无限重试。
-- 允许的 CORS 来源只有 Codex MCP App 的 `https://web-sandbox.oaiusercontent.com`、MCP App 沙盒的 `null`、`http://127.0.0.1:4318` 和 `http://localhost:4318`；其他 Origin 被拒绝，CORS 不是认证替代，summary 仍必须带 session token。
+- 允许的 CORS 来源包括 Codex MCP App 的 `https://web-sandbox.oaiusercontent.com`、Desktop 沙盒的 `codex-sandbox://<mcp-server-subdomain>.web-sandbox.oaiusercontent.com`、MCP App 沙盒的 `null`、`http://127.0.0.1:4318` 和 `http://localhost:4318`；其他 Origin 被拒绝，CORS 不是认证替代，summary 仍必须带 session token。
 - 正式插件由 macOS arm64 Node 22.22.1 sidecar 启动，SQLite 使用 `node:sqlite`，不携带 `better-sqlite3.node`；Panel 的 fetch/CORS 错误显示服务访问诊断，不误导为需要重新绑定。
 
 ## 真实会话评估

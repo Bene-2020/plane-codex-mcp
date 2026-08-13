@@ -14,6 +14,7 @@
     "dev:mcp": "pnpm --filter @ambient/mcp dev",
     "package:plugin": "node scripts/package-plugin.mjs",
     "smoke:plugin": "node scripts/smoke-plugin.mjs",
+    "migrate:source-ids": "node scripts/migrate-source-ids.mjs",
     "validate:plugin": "python3 /Users/bene/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugin && node scripts/validate-plugin-runtime.mjs plugin",
     "fetch:node-sidecar": "node scripts/fetch-node-sidecar.mjs",
     "eval": "tsx evals/evaluate.ts"

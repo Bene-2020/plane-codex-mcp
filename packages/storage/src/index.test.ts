@@ -58,7 +58,7 @@ describe("SQLite storage", () => {
     const first = new Storage(filename, { leaseMs: 5 });
     const context = first.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     first.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t", events: [event] });
-    first.addSourceReference({ batchId: "batch_1", eventId: "event_1_0", planeItemId: null, sessionId: "s", turnId: "t", eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: "now" });
+    first.addSourceReference({ batchId: "batch_1", eventId: "event_1_0", remoteSourceId: "project_1:s:t:0", planeItemId: null, sessionId: "s", turnId: "t", eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: "now" });
     const second = new Storage(filename, { leaseMs: 5 });
     const firstClaim = first.claimPendingBatches()[0]!;
     expect(second.claimPendingBatches()).toHaveLength(0);
@@ -95,7 +95,7 @@ describe("SQLite storage", () => {
     expect(storage.listPendingBatches()[0]?.id).toBe("batch_1");
     expect(storage.listSources("project_1")[0]?.summary).toBe("旧摘要");
     expect((storage.db.prepare("PRAGMA table_info(outbox_batches)").all() as Array<{ name: string }>).map((row) => row.name)).toEqual(expect.arrayContaining(["claim_token", "lease_until", "claim_version"]));
-    expect((storage.db.prepare("PRAGMA table_info(source_references)").all() as Array<{ name: string }>).map((row) => row.name)).toEqual(expect.arrayContaining(["projection_status", "projection_attempts", "projection_error", "projected_at"]));
+    expect((storage.db.prepare("PRAGMA table_info(source_references)").all() as Array<{ name: string }>).map((row) => row.name)).toEqual(expect.arrayContaining(["projection_status", "projection_attempts", "projection_error", "projected_at", "remote_source_id"]));
     storage.close(); rmSync(directory, { recursive: true, force: true });
   });
 });

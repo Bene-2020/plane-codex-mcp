@@ -21,6 +21,8 @@ codex plugin add ambient-project-layer@ambient-local
 codex mcp get ambient-project
 ```
 
+安装命令成功只表示插件已启用。随后必须打开 Codex 的 Hook 管理界面，人工复核并信任 `SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop` 和 `SessionEnd`，再新建 task。不要把 `enabled` 当成已信任；未信任或被判定为 `modified` 的 Hook 会在进程启动前被宿主拦截。
+
 用户级 MCP 配置必须指向 marketplace 中不带版本号的稳定 runtime 路径，不要指向 `~/.codex/plugins/cache/.../<version>/`。插件升级会替换版本缓存，稳定 marketplace 路径不会失效。
 
 ## Codex Desktop 持久配置
@@ -45,9 +47,13 @@ Hook 不继承 `[mcp_servers.ambient-project.env]`，而是直接使用 Codex �
 
 首次安装时，先启动一次新 task，让 Hook 创建稳定的 `PLUGIN_DATA/ambient.sqlite`，再把 MCP 的 `AMBIENT_DB_PATH` 配成上面的同一文件并绑定项目。不要把数据库放在版本化的插件 cache 目录中。
 
-每次升级按固定顺序执行：构建和验证；刷新 cachebuster；同步 `plugin/` 到 marketplace；运行 `codex plugin add ambient-project-layer@ambient-local`；确认 MCP 仍使用 marketplace 的稳定 runtime 路径且数据库仍是稳定的插件数据文件；打开 Codex 的 Hook 管理界面复核并信任新的 Hook 定义；完全退出并重启 Desktop；最后用新 task 做下述验收。升级不得新建或切换数据库，已有绑定会保留。Hook 信任按定义哈希保存，因此 `hooks.json` 变化后旧信任不会自动沿用。
+每次升级按固定顺序执行：构建和验证；刷新 cachebuster；同步 `plugin/` 到 marketplace；运行 `codex plugin add ambient-project-layer@ambient-local`；确认 MCP 仍使用 marketplace 的稳定 runtime 路径且数据库仍是稳定的插件数据文件；打开 Codex 的 Hook 管理界面复核并信任当前版本的五个 Hook；完全退出并重启 Desktop；最后用新 task 做下述验收。升级不得新建或切换数据库，已有绑定会保留。
 
-重启后新建 task，验收必须同时满足：Hook 注入 `project_1` 而不是“未绑定”；`get_binding` 返回同一 `project_1`；`open_project_panel` 能加载 summary；有事件时调用 `record_project_events` 后 `PostToolUse` 审计的 `record_tool_called=1`，无事件时调用 `acknowledge_no_project_events` 后 Stop 返回空结果且数据库没有新增 Outbox 批次。任一失败都不能判定升级成功。
+Hook 信任按解析后的定义哈希保存。除 `hooks.json` 内容外，版本化缓存路径和最终命令也会参与当前定义；因此即使 Hook 文本看起来没有变化，插件升级后仍可能显示 `modified`。把“重新信任当前版本”视为每次安装或升级的必做步骤，不要只在编辑 `hooks.json` 后执行。
+
+重启后新建 task，验收必须同时满足：Hook 注入 `project_1` 而不是“未绑定”；`get_binding` 返回同一 `project_1`；`open_project_panel` 的真实面板通过 MCP Apps server-tool bridge 加载 summary 并显示项目数据（不是只看工具调用成功）；有事件时调用 `record_project_events` 后 `PostToolUse` 审计的 `record_tool_called=1`，无事件时调用 `acknowledge_no_project_events` 后 Stop 返回空结果且数据库没有新增 Outbox 批次。任一失败都不能判定升级成功。
+
+生产 Desktop 面板不应再依赖 WebView 直接连接动态 `localhost`；若诊断时看到 sidecar 监听但面板失败后没有到该端口的连接，这是宿主本地 HTTP gate 的证据，不是 BFF CORS 响应头缺失。Panel 的 `ambient_project_panel_request` 只对组件可见，MCP 进程负责向同一动态 BFF 带 token 请求；4318 独立页面仍使用浏览器 fetch 作为开发路径。
 
 配置完成后用 `codex mcp get ambient-project` 检查命令、数据库路径和非敏感变量；不要打印或复制 API key。完全退出并重新启动 Codex Desktop，然后新建一个 task。已有 MCP 子进程不会自动读取修改后的配置。
 
@@ -56,6 +62,16 @@ Hook 不继承 `[mcp_servers.ambient-project.env]`，而是直接使用 Codex �
 如果 Codex Desktop 宿主环境带有 `https_proxy=http://...`，运行时会把配置中 Plane URL 的 HTTPS host 仅加入当前 MCP 进程的 `no_proxy`。这是针对 Plane SDK Axios 明文代理请求的传输修复，不会把代理配置、凭据或 session token 写入 Panel、SQLite、日志或模型 content；也不会改用 fake。直连 Plane 失败时会保留明确错误。
 
 插件安装/升级检查：`plugin/runtime/runtime.json` 声明 `darwin/arm64` 与 Node 22.22.1；`pnpm validate:plugin` 会拒绝缺少 sidecar、错误版本、原生 `.node` 或宿主 `node` 命令。运行时 wrapper 还会在安装包被放到其他 OS/arch 时直接报错，而不是静默回退到系统 Node。
+
+## Hook 信任排障
+
+如果插件和 MCP 都显示 enabled，但新 task 没有注入项目上下文，先检查 Hook 管理界面，不要先迁移或重建数据库。以下组合通常表示信任尚未完成，而不是 Hook 代码或数据库损坏：
+
+- 五个 Hook 已配置为 enabled，但当前版本显示未信任或 `modified`；
+- `get_binding` 能读到项目，而正式插件数据库的 `turn_audits` 没有当前 session；
+- 重启 Desktop 后仍没有 `SessionStart` 或 `UserPromptSubmit` 记录。
+
+处理方式是人工信任当前版本的五个 Hook。不要手工复制哈希到 `config.toml`，也不要使用 `--dangerously-bypass-hook-trust` 作为日常安装步骤。重新信任后，当前 task 的下一条用户消息应产生 `UserPromptSubmit` 审计并注入项目上下文；已经错过的 `SessionStart` 不会追补，需要再新建 task 验证。只有信任完成后仍无审计记录，才继续检查 Hook 命令、`PLUGIN_DATA` 和数据库路径。
 
 ## 真人只读验收
 

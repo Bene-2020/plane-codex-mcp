@@ -1,11 +1,12 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import { ProjectContext, RecordKind, LifecycleState } from "@ambient/core";
+import { ProjectContext, RecordKind, LifecycleState, PlaneItem } from "@ambient/core";
 import { createPlaneAdapter, EventCoordinator, PlaneAdapter, UpdateItemInput } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { createSessionToken, matchesSessionToken, SESSION_TOKEN_HEADER } from "./session.js";
 
-export const DEFAULT_CORS_ORIGINS = ["https://web-sandbox.oaiusercontent.com", "http://127.0.0.1:4318", "http://localhost:4318", "null"] as const;
+export const CODEX_DESKTOP_CORS_ORIGIN = /^codex-sandbox:\/\/(?:[A-Za-z0-9-]+\.)?web-sandbox\.oaiusercontent\.com$/;
+export const DEFAULT_CORS_ORIGINS = ["https://web-sandbox.oaiusercontent.com", "http://127.0.0.1:4318", "http://localhost:4318", "null", CODEX_DESKTOP_CORS_ORIGIN] as const;
 
 export class OutboxWorker {
   private timer: NodeJS.Timeout | undefined;
@@ -56,12 +57,20 @@ export class OutboxWorker {
 }
 
 function jsonError(error: unknown): { error: string } { return { error: error instanceof Error ? error.message : String(error) }; }
+const inlineStatuses = ["captured", "planned", "in_progress", "done"] as const;
+type InlineStatus = (typeof inlineStatuses)[number];
+function isInlineStatus(value: unknown): value is InlineStatus { return typeof value === "string" && inlineStatuses.includes(value as InlineStatus); }
+export function countProjectItems(items: PlaneItem[]) {
+  const byStatus = { captured: 0, planned: 0, in_progress: 0, done: 0 };
+  for (const item of items) if (!item.archived && isInlineStatus(item.status)) byStatus[item.status] += 1;
+  return { total: Object.values(byStatus).reduce((total, count) => total + count, 0), byStatus };
+}
 
 export interface ServiceOptions {
   storage?: Storage;
   plane?: PlaneAdapter;
   sessionToken?: string;
-  corsOrigins?: readonly string[];
+  corsOrigins?: readonly (string | RegExp)[];
 }
 
 export interface ServiceStartOptions extends ServiceOptions {
@@ -101,8 +110,9 @@ export function createService(args: ServiceOptions = {}) {
   app.get<{ Params: { id: string } }>("/api/projects/:id/summary", async (request, reply) => {
     try {
       const context = getContext(request.params.id);
-      try { await coordinator.refreshCache(context); } catch { /* Plane is optional on the read path; cached state remains inspectable. */ }
-      return { context, items: storage.listAllCachedItems(context.id), sources: storage.listSources(context.id).slice(0, 100), failures: storage.listFailedBatches(context.id), audits: storage.listAudits().slice(0, 50) };
+      let projectCounts: ReturnType<typeof countProjectItems> | null = null;
+      try { projectCounts = countProjectItems(await coordinator.refreshCache(context)); } catch { /* Cached items remain inspectable, but are not presented as authoritative project totals. */ }
+      return { context, items: storage.listAllCachedItems(context.id), projectCounts, sources: storage.listSources(context.id).slice(0, 100), failures: storage.listFailedBatches(context.id), audits: storage.listAudits().slice(0, 50) };
     } catch (error) { return reply.code(404).send(jsonError(error)); }
   });
   app.get<{ Params: { id: string }; Querystring: { kind?: RecordKind; status?: LifecycleState } }>("/api/projects/:id/items", async (request, reply) => {
@@ -112,6 +122,10 @@ export function createService(args: ServiceOptions = {}) {
   app.post<{ Params: { id: string; batchId: string } }>("/api/projects/:id/retry/:batchId", async (request, reply) => { try { getContext(request.params.id); storage.retryBatch(request.params.batchId, request.params.id); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.patch<{ Params: { id: string }; Body: { enabled: boolean } }>("/api/projects/:id/auto-capture", async (request, reply) => { try { return storage.setAutoCapture(request.params.id, request.body.enabled); } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.patch<{ Params: { itemId: string }; Body: UpdateItemInput }>("/api/items/:itemId", async (request, reply) => { try { return await coordinator.editItem(contextForItem(request.params.itemId), request.params.itemId, request.body); } catch (error) { return reply.code(400).send(jsonError(error)); } });
+  app.patch<{ Params: { itemId: string }; Body: { status?: unknown } }>("/api/items/:itemId/status", async (request, reply) => {
+    if (!isInlineStatus(request.body?.status)) return reply.code(400).send({ error: "Panel status must be captured, planned, in_progress, or done" });
+    try { return await coordinator.changeStatus(contextForItem(request.params.itemId), request.params.itemId, request.body.status); } catch (error) { return reply.code(400).send(jsonError(error)); }
+  });
   app.post<{ Params: { itemId: string; targetId: string } }>("/api/items/:itemId/merge/:targetId", async (request, reply) => { try { await coordinator.mergeItems(contextForItem(request.params.itemId), request.params.itemId, request.params.targetId); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.post<{ Params: { itemId: string } }>("/api/items/:itemId/archive", async (request, reply) => { try { await coordinator.archiveItem(contextForItem(request.params.itemId), request.params.itemId); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.delete<{ Params: { itemId: string } }>("/api/items/:itemId", async (request, reply) => { try { await coordinator.deleteItem(contextForItem(request.params.itemId), request.params.itemId); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
