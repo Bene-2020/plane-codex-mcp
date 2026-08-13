@@ -41,10 +41,14 @@ async function extractArchive(archivePath, extractedRoot, target) {
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
-      archivePath,
-      extractedRoot,
-    ]);
+      "$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath $env:AMBIENT_NODE_ARCHIVE_PATH -DestinationPath $env:AMBIENT_NODE_EXTRACT_ROOT -Force",
+    ], {
+      env: {
+        ...process.env,
+        AMBIENT_NODE_ARCHIVE_PATH: archivePath,
+        AMBIENT_NODE_EXTRACT_ROOT: extractedRoot,
+      },
+    });
     return;
   }
 
