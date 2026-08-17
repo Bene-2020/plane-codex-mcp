@@ -1,2 +1,0 @@
-{"sessionId":"session_demo_1","turnId":"turn_1","shouldCapture":true,"expectedTypes":["plan"],"actualBatchId":null,"falseRecord":false,"notes":"填写真实会话后运行 eval"}
-{"sessionId":"session_demo_1","turnId":"turn_2","shouldCapture":false,"expectedTypes":[],"actualBatchId":null,"falseRecord":false,"notes":"填写真实会话后运行 eval"}

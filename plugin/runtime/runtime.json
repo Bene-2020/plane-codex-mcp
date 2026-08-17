@@ -1,6 +1,0 @@
-{
-  "platform": "darwin",
-  "arch": "arm64",
-  "nodeVersion": "22.22.1",
-  "sqlite": "node:sqlite"
-}

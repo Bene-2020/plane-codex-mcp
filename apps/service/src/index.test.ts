@@ -28,6 +28,14 @@ describe("local service and outbox worker", () => {
     await service.app.close();
   });
 
+  it("requires an explicit cwd for context lookup instead of using the service process cwd", async () => {
+    const service = createService({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter() });
+    const response = await service.app.inject({ method: "GET", url: "/api/context", headers: sessionHeaders(service) });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toContain("cwd is required");
+    await service.app.close();
+  });
+
   it("protects every API route with the temporary session token", async () => {
     const storage = new Storage(":memory:");
     const service = createService({ storage, plane: new FakePlaneAdapter(), sessionToken: "a".repeat(43) });

@@ -1,6 +1,18 @@
 {
-  "name": "ambient-project-layer-demo",
+  "name": "ambient-project-layer",
+  "version": "0.1.0",
+  "description": "Capture meaningful Codex work and synchronize it with Plane.",
   "private": true,
+  "license": "MIT",
+  "author": "Wenyan Wei",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bene-2020/plane-codex-mcp.git"
+  },
+  "homepage": "https://github.com/Bene-2020/plane-codex-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Bene-2020/plane-codex-mcp/issues"
+  },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
     "build": "pnpm run build:packages && pnpm run build:apps && pnpm run package:plugin",
@@ -13,11 +25,12 @@
     "dev:panel": "pnpm --filter @ambient/panel dev",
     "dev:mcp": "pnpm --filter @ambient/mcp dev",
     "package:plugin": "node scripts/package-plugin.mjs",
+    "package:release-asset": "node scripts/package-release-asset.mjs",
     "smoke:plugin": "node scripts/smoke-plugin.mjs",
-    "migrate:source-ids": "node scripts/migrate-source-ids.mjs",
-    "validate:plugin": "python3 /Users/bene/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugin && node scripts/validate-plugin-runtime.mjs plugin",
-    "fetch:node-sidecar": "node scripts/fetch-node-sidecar.mjs",
-    "eval": "tsx evals/evaluate.ts"
+    "migrate:source-ids": "node --env-file-if-exists=.env scripts/migrate-source-ids.mjs",
+    "validate:plugin": "node scripts/validate-plugin-runtime.mjs plugin",
+    "verify:release-tag": "node scripts/verify-release-tag.mjs",
+    "fetch:node-sidecar": "node scripts/fetch-node-sidecar.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",

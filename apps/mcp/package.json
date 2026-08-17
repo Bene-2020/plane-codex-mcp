@@ -1,12 +1,17 @@
 {
   "name": "@ambient/mcp",
   "version": "0.1.0",
+  "description": "MCP server and inline app bridge for Ambient Project Layer.",
+  "private": true,
+  "license": "MIT",
+  "author": "Wenyan Wei",
+  "repository": { "type": "git", "url": "git+https://github.com/Bene-2020/plane-codex-mcp.git", "directory": "apps/mcp" },
   "type": "module",
   "main": "dist/main.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/main.ts"
+    "dev": "tsx --env-file-if-exists=../../.env src/main.ts"
   },
   "dependencies": {
     "@ambient/core": "workspace:*",

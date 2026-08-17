@@ -20,6 +20,12 @@ export const sourceEventSchema = z.object({
   observedAt: z.string().datetime().optional(),
   dueDate: z.string().date().nullable().optional(),
   steps: z.array(z.object({ title: z.string().trim().min(1).max(240), summary: z.string().trim().max(2000).optional() })).max(20).optional(),
+  archiveAfterCompletion: z.boolean().optional(),
+}).superRefine((event, context) => {
+  if (!event.archiveAfterCompletion) return;
+  if (event.type !== "completed" || !event.relatedItemId || !event.userDirected) {
+    context.addIssue({ code: "custom", message: "archiveAfterCompletion requires a user-directed completed event with relatedItemId" });
+  }
 });
 export type SourceEvent = z.infer<typeof sourceEventSchema>;
 
@@ -51,6 +57,7 @@ export type ProjectContextInput = z.infer<typeof projectContextInputSchema>;
 export interface ProjectContext extends ProjectContextInput {
   id: string;
   canonicalCwd: string;
+  workspaceIdentity?: string;
   autoCaptureEnabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -99,7 +106,31 @@ export type FieldName = "title" | "description" | "kind" | "status" | "dueDate" 
 export type FieldOwner = "system" | "user";
 export interface FieldOwnership { planeItemId: string; field: FieldName; owner: FieldOwner; systemValue: string | null; updatedAt: string; }
 
-export interface ActiveItemSnapshot { id: string; identifier: string; title: string; status: string; kind?: string; updatedAt?: string; }
+export interface ActiveItemSnapshot { id: string; identifier: string; title: string; status: string; parentId?: string; kind?: string; updatedAt?: string; }
+
+export type BindingOnboardingPhase = "session_start" | "first_user_prompt" | "continuing_session" | "permanently_declined";
+
+export const projectBindingPromptHeader = "项目绑定（待确认）";
+export const projectBindingPromptInstruction = "请选择一个项目，或回复‘稍后再说’。";
+export const supersededPlanRule = "When the user explicitly overturns, abandons, or replaces a plan, include archiveAfterCompletion=true on a user-directed completed event for every affected plan item and generated step item. This completes each item before archiving it. Never delete the items.";
+export const parentChildClosureRule = "Before completing, superseding, or archiving a parent item, inspect every known child item and resolve each child explicitly. Never leave planned or in-progress children behind only because their parent changed.";
+export const projectBindingFinalDeliveryRule = [
+  "After calling list_projects, its tool output, commentary, and thought are internal context, not user delivery.",
+  "Before the final reply, last_assistant_message must contain this fixed block with the real returned Plane projects:",
+  `### ${projectBindingPromptHeader}`,
+  "- <真实返回的 Plane 项目>",
+  projectBindingPromptInstruction,
+  "Continue the user's main task normally.",
+].join("\n");
+
+export function hasCompleteProjectBindingPrompt(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const headerIndex = message.indexOf(projectBindingPromptHeader);
+  if (headerIndex < 0) return false;
+  const instructionIndex = message.indexOf(projectBindingPromptInstruction, headerIndex);
+  if (instructionIndex < 0) return false;
+  return /^\s*[-*+]\s+\S+/m.test(message.slice(headerIndex, instructionIndex));
+}
 
 export function canonicalizeCwd(cwd: string): string {
   const trimmed = cwd.trim();
@@ -140,23 +171,57 @@ export function buildAdditionalContext(args: {
   sessionId?: string;
   turnId?: string;
   context?: ProjectContext | null;
+  currentCwd?: string;
   activeItems?: ActiveItemSnapshot[];
+  onboardingPhase?: BindingOnboardingPhase;
   error?: string;
 }): string {
   const lines = ["Ambient project layer: keep the user's main task uninterrupted."];
   if (args.error) return `${lines[0]} Project context is temporarily unavailable; continue normally.`;
   if (args.context) {
     lines.push(`Project context: ${args.context.id} (${args.context.planeProjectName ?? args.context.planeProjectId})`);
-    lines.push(`cwd: ${args.context.canonicalCwd}; session: ${args.sessionId ?? "unknown"}; turn: ${args.turnId ?? "session"}`);
+    lines.push(`Current cwd: ${args.currentCwd ?? "unknown"}; binding root: ${args.context.canonicalCwd}; session: ${args.sessionId ?? "unknown"}; turn: ${args.turnId ?? "session"}`);
     lines.push(`Automatic capture: ${args.context.autoCaptureEnabled ? "enabled" : "disabled"}.`);
     lines.push("Before the final reply, if automatic capture is enabled, decide from this turn's request, plan, tool results, and conclusion whether meaningful project events occurred. If so, call record_project_events once with all events; otherwise call acknowledge_no_project_events once. Never send an empty batch.");
-    const items = (args.activeItems ?? []).slice(0, 30);
+    lines.push(supersededPlanRule);
+    lines.push(parentChildClosureRule);
+    lines.push("The Stop Hook only audits this turn and always allows it to end; it never blocks, injects a follow-up prompt, or asks for a second reply.");
+    const allItems = args.activeItems ?? [];
+    const items = allItems.slice(0, 30);
     if (items.length) {
-      lines.push("Active Plane items (identifier | title | status):");
-      for (const item of items) lines.push(`- ${item.identifier} | ${item.title} | ${item.status}`);
+      const identifiers = new Map(allItems.map((item) => [item.id, item.identifier]));
+      const parentIds = new Set(allItems.flatMap((item) => item.parentId ? [item.parentId] : []));
+      lines.push("Active Plane items (identifier | title | status | relationship):");
+      for (const item of items) {
+        const relationship = item.parentId ? `child of #${identifiers.get(item.parentId) ?? item.parentId}` : parentIds.has(item.id) ? "parent" : "standalone";
+        lines.push(`- ${item.identifier} | ${item.title} | ${item.status} | ${relationship}`);
+      }
     }
   } else {
-    lines.push("No project context is bound for this cwd. If the user wants project capture, list available projects and ask them to choose; do not guess.");
+    lines.push(`Current cwd: ${args.currentCwd ?? "unknown"}; no Plane project is bound.`);
+    lines.push("When get_binding returns null for this cwd, do not call open_project_panel; continue the binding flow and open the panel only after a real project context is returned.");
+    lines.push("While this cwd is unbound, do not call record_project_events or acknowledge_no_project_events. The Stop Hook only audits this turn and always allows it to end; it never blocks on capture or binding delivery, injects a follow-up prompt, or asks for a second reply.");
+    lines.push(projectBindingFinalDeliveryRule);
+    switch (args.onboardingPhase) {
+      case "session_start":
+        lines.push("This is SessionStart; it cannot interact with the user. On the next UserPromptSubmit, use the visible conversation and the current user message to choose one onboarding branch: if no actual onboarding question has been asked yet, the first user-visible reply must immediately call list_projects, show the real returned Plane projects, and ask the user to choose one; an explicit long-term refusal calls decline_project_binding without list_projects; an ambiguous later/skip/continue is a current-session deferral with no preference and no repeated question; an explicit request to restore or bind calls restore_project_binding if needed, then list_projects.");
+        lines.push("Do not guess from a Codex Project name, directory name, Git remote, or conversation, and do not call bind_project before the user explicitly chooses a returned project.");
+        break;
+      case "first_user_prompt":
+        lines.push("This is the first user prompt of this session. Prioritize the current user message: an explicit long-term do-not-bind/do-not-ask-again instruction calls decline_project_binding and does not call list_projects; an ambiguous later/skip/continue is a current-session deferral with no preference and no repeated question; an explicit request to restore or bind calls restore_project_binding if needed, then list_projects; otherwise, in this first user-visible reply, immediately call list_projects, show the real returned Plane projects, and ask the user to choose one.");
+        lines.push("Do not guess from a Codex Project name, directory name, Git remote, or conversation, and do not call bind_project before the user explicitly chooses a returned project.");
+        lines.push("Only an explicit project choice authorizes bind_project. A vague answer, ignoring the question, or continuing another task is not a project choice.");
+        break;
+      case "continuing_session":
+        lines.push("This is a later UserPromptSubmit, but this lifecycle hint does not prove that onboarding was actually asked. Use the visible conversation and current user message: an explicit long-term do-not-bind/do-not-ask-again instruction calls decline_project_binding without list_projects; an explicit request to restore or bind calls restore_project_binding if needed, then list_projects and asks for a choice; if no actual onboarding question has appeared yet, now call list_projects, show the real returned Plane projects, and ask the user to choose one; if onboarding was asked and the user only deferred, skipped, ignored it, or continued another task, do not repeat the question in this session. Do not bind before an explicit choice.");
+        break;
+      case "permanently_declined":
+        lines.push("This cwd is unbound and has an explicit permanent do-not-ask-again preference. Do not proactively call list_projects or ask about binding; continue the user's task. If the current user message explicitly asks to bind or resume project selection, call restore_project_binding if needed, then list_projects, and call bind_project only after an explicit project choice.");
+        break;
+      default:
+        lines.push("This cwd is unbound. Inspect the visible conversation: if onboarding has not actually been asked, call list_projects, show the real returned Plane projects, and ask the user to choose one; explicit long-term refusal calls decline_project_binding without listing; explicit restore/bind calls restore_project_binding if needed, then list_projects; ambiguous later/skip/continue defers only this session. Do not guess or call bind_project before an explicit choice.");
+        break;
+    }
   }
   return lines.join("\n").slice(0, 6000);
 }

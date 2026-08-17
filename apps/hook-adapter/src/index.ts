@@ -1,4 +1,4 @@
-import { buildAdditionalContext, canonicalizeCwd } from "@ambient/core";
+import { buildAdditionalContext, hasCompleteProjectBindingPrompt, type BindingOnboardingPhase } from "@ambient/core";
 import { Storage } from "@ambient/storage";
 import { mkdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -26,6 +26,7 @@ interface HookInput {
 function output(value: Record<string, unknown>): void { process.stdout.write(`${JSON.stringify(value)}\n`); }
 
 const recordProjectEventsToolName = "mcp__ambient_project__record_project_events";
+const listProjectsToolName = "mcp__ambient_project__list_projects";
 
 function createHookStorage(): Storage {
   const pluginData = process.env.PLUGIN_DATA ?? process.env.CLAUDE_PLUGIN_DATA;
@@ -44,23 +45,21 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
   let storage: Storage | undefined = providedStorage;
   try {
     storage ??= createHookStorage();
-    const cwd = input.cwd ? canonicalizeCwd(input.cwd) : undefined;
-    const context = cwd ? storage.getContextByCwd(cwd) : null;
     if (eventName === "PostToolUse") {
       const toolName = input.tool_name ?? "";
-      storage.auditHook({ eventName, sessionId, turnId: input.turn_id, toolCalled: toolName === recordProjectEventsToolName });
+      storage.auditHook({ eventName, sessionId, turnId: input.turn_id, toolCalled: toolName === recordProjectEventsToolName, bindingListToolCalled: toolName === listProjectsToolName });
       return {};
     }
     if (eventName === "Stop") {
-      storage.auditHook({ eventName, sessionId, turnId: input.turn_id, ended: true });
-      const didRecordProjectEvents = Boolean(context?.id && input.turn_id && storage.didRecordProjectEvents(context.id, sessionId, input.turn_id));
-      const didAcknowledgeNoProjectEvents = Boolean(context?.id && input.turn_id && storage.didAcknowledgeNoProjectEvents(context.id, sessionId, input.turn_id));
-      if (context?.autoCaptureEnabled && input.turn_id && !input.stop_hook_active && !didRecordProjectEvents && !didAcknowledgeNoProjectEvents) {
-        return {
-          decision: "block",
-          reason: "Before ending this turn, decide whether the user's request, your work, tool results, or conclusion created a meaningful project event. If yes, call mcp__ambient_project__record_project_events exactly once with all events for project context " + context.id + ". If no meaningful event occurred, call mcp__ambient_project__acknowledge_no_project_events exactly once for this project context, session, and turn. Do not record ordinary conversation.",
-        };
-      }
+      const context = input.cwd ? storage.getContextByCwd(input.cwd) : null;
+      const captureDecisionRecorded = context?.autoCaptureEnabled && input.turn_id
+        ? storage.didRecordProjectEvents(context.id, sessionId, input.turn_id) || storage.didAcknowledgeNoProjectEvents(context.id, sessionId, input.turn_id)
+        : null;
+      const didCallListProjects = Boolean(input.turn_id && storage.didCallListProjects(sessionId, input.turn_id));
+      const bindingPromptDelivered = !context && input.turn_id && didCallListProjects
+        ? hasCompleteProjectBindingPrompt(input.last_assistant_message)
+        : null;
+      storage.auditHook({ eventName, sessionId, turnId: input.turn_id, ended: true, captureDecisionRecorded, bindingPromptDelivered });
       return {};
     }
     if (eventName === "SessionEnd") {
@@ -68,18 +67,34 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
       return {};
     }
     if (eventName === "SessionStart" || eventName === "UserPromptSubmit") {
-      const activeItems = context ? storage.listCachedItems(context.id).slice(0, 30).map((item) => ({ id: item.id, identifier: item.identifier, title: item.title, status: item.status ?? "captured", kind: item.kind, updatedAt: item.updatedAt })) : [];
+      const context = input.cwd ? storage.getContextByCwd(input.cwd) : null;
+      const activeItems = context ? storage.listCachedItems(context.id).map((item) => ({ id: item.id, identifier: item.identifier, title: item.title, status: item.status ?? "captured", parentId: item.parentId, kind: item.kind, updatedAt: item.updatedAt })) : [];
+      const bindingPreference = !context && input.cwd ? storage.getBindingPreference(input.cwd) : null;
+      // This is only a lifecycle hint for choosing the SessionStart/first/later template;
+      // the injected later-session branch must inspect visible dialogue rather than infer that onboarding happened.
+      const sessionHasUserPrompt = storage.hasHookAudit(sessionId, "UserPromptSubmit");
+      const firstUserPrompt = eventName === "UserPromptSubmit" && !sessionHasUserPrompt;
+      const onboardingPhase: BindingOnboardingPhase | undefined = context
+        ? undefined
+        : bindingPreference
+          ? "permanently_declined"
+          : eventName === "SessionStart" && !sessionHasUserPrompt
+            ? "session_start"
+            : firstUserPrompt
+              ? "first_user_prompt"
+              : "continuing_session";
       storage.auditHook({ eventName, sessionId, turnId: input.turn_id });
       return {
         hookSpecificOutput: {
           hookEventName: eventName,
-          additionalContext: buildAdditionalContext({ eventName, sessionId, turnId: input.turn_id, context, activeItems }),
+          additionalContext: buildAdditionalContext({ eventName, sessionId, turnId: input.turn_id, context, currentCwd: input.cwd, onboardingPhase, activeItems }),
         },
       };
     }
     return {};
   } catch (error) {
-    try { storage?.auditHook({ eventName, sessionId, turnId: input.turn_id, error: error instanceof Error ? error.message : String(error) }); } catch { /* Hook failure must not block Codex. */ }
+    try { storage?.auditHook({ eventName, sessionId, turnId: input.turn_id, error: error instanceof Error ? error.message : String(error), ended: eventName === "Stop" }); } catch { /* Hook failure must not block Codex. */ }
+    if (eventName === "Stop") return {};
     return {
       hookSpecificOutput: {
         hookEventName: eventName,

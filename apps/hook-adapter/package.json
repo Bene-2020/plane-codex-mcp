@@ -1,9 +1,14 @@
 {
   "name": "@ambient/hook-adapter",
   "version": "0.1.0",
+  "description": "Codex hook adapter for Ambient Project Layer.",
+  "private": true,
+  "license": "MIT",
+  "author": "Wenyan Wei",
+  "repository": { "type": "git", "url": "git+https://github.com/Bene-2020/plane-codex-mcp.git", "directory": "apps/hook-adapter" },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx src/index.ts" },
+  "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx --env-file-if-exists=../../.env src/index.ts" },
   "dependencies": { "@ambient/core": "workspace:*", "@ambient/storage": "workspace:*" }
 }

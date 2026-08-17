@@ -3,9 +3,10 @@ import {
   NoProjectEventsReview, ProjectContextInput, ProjectionStatus, SourceEvent, SourceReference, SyncStatus, batchId, canonicalizeCwd, eventId,
 } from "@ambient/core";
 import { SqliteDatabase } from "./database.js";
+import { isWorkspacePathAncestor, pathFromWorkspaceIdentity, resolveWorkspaceIdentity, type WorkspaceIdentity } from "./workspace-identity.js";
 
 interface ContextRow {
-  id: number; canonical_cwd: string; plane_base_url: string; workspace_slug: string; plane_project_id: string;
+  id: number; canonical_cwd: string; workspace_identity: string | null; plane_base_url: string; workspace_slug: string; plane_project_id: string;
   plane_project_name: string | null; auto_capture_enabled: number; created_at: string; updated_at: string;
 }
 interface BatchRow {
@@ -23,7 +24,7 @@ interface BatchRow {
   claim_token: string | null;
   lease_until: string | null;
 }
-interface CacheRow { plane_item_id: string; identifier: string; title: string; description: string | null; kind: string | null; status: string | null; due_date: string | null; project_context_id: string; url: string | null; is_system_created: number; updated_at: string; archived: number; }
+interface CacheRow { plane_item_id: string; identifier: string; title: string; description: string | null; parent_item_id: string | null; kind: string | null; status: string | null; due_date: string | null; project_context_id: string; url: string | null; is_system_created: number; updated_at: string; archived: number; }
 interface SourceRow {
   id: number;
   batch_id: string;
@@ -42,16 +43,39 @@ interface SourceRow {
   projection_error: string | null;
   projected_at: string | null;
 }
+interface BindingPreferenceRow {
+  id: number;
+  workspace_identity: string;
+  preference: "declined" | "restored";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BindingPreference {
+  id: number;
+  workspaceIdentity: string;
+  preference: "declined" | "restored";
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface StorageOptions { leaseMs?: number; }
 
 function now(): string { return new Date().toISOString(); }
 
+export class ProjectBindingConflictError extends Error {
+  constructor(identity: string, contexts: ContextRow[]) {
+    const targets = contexts.map((context) => `${context.plane_base_url.replace(/\/+$/, "")}/${context.workspace_slug}/${context.plane_project_id}`).join(", ");
+    super(`Conflicting Plane project bindings for workspace identity ${identity}: ${targets}. Explicitly choose a binding before continuing.`);
+    this.name = "ProjectBindingConflictError";
+  }
+}
+
 export class Storage {
   readonly db: SqliteDatabase;
   private readonly leaseMs: number;
 
-  constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project-demo.sqlite", options: StorageOptions = {}) {
+  constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project.sqlite", options: StorageOptions = {}) {
     this.leaseMs = options.leaseMs ?? 30_000;
     this.db = new SqliteDatabase(filename);
     this.db.pragma("journal_mode = WAL");
@@ -66,6 +90,7 @@ export class Storage {
       CREATE TABLE IF NOT EXISTS project_contexts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         canonical_cwd TEXT NOT NULL UNIQUE,
+        workspace_identity TEXT,
         plane_base_url TEXT NOT NULL,
         workspace_slug TEXT NOT NULL,
         plane_project_id TEXT NOT NULL,
@@ -99,6 +124,13 @@ export class Storage {
         acknowledged_at TEXT NOT NULL,
         UNIQUE(project_context_id, session_id, turn_id)
       );
+      CREATE TABLE IF NOT EXISTS workspace_binding_preferences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_identity TEXT NOT NULL UNIQUE,
+        preference TEXT NOT NULL CHECK (preference IN ('declined', 'restored')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS source_references (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         batch_id TEXT NOT NULL,
@@ -123,6 +155,7 @@ export class Storage {
         identifier TEXT NOT NULL,
         title TEXT NOT NULL,
         description TEXT,
+        parent_item_id TEXT,
         kind TEXT,
         status TEXT,
         due_date TEXT,
@@ -145,6 +178,9 @@ export class Storage {
         turn_id TEXT,
         hook_event_name TEXT NOT NULL,
         record_tool_called INTEGER NOT NULL DEFAULT 0,
+        binding_list_tool_called INTEGER NOT NULL DEFAULT 0,
+        capture_decision_recorded INTEGER,
+        binding_prompt_delivered INTEGER,
         hook_error TEXT,
         started_at TEXT NOT NULL,
         ended_at TEXT,
@@ -152,6 +188,7 @@ export class Storage {
       );
     `);
 
+    this.ensureColumn("project_contexts", "workspace_identity", "TEXT");
     this.ensureColumn("outbox_batches", "next_attempt_at", "TEXT");
     this.ensureColumn("outbox_batches", "synced_at", "TEXT");
     this.ensureColumn("outbox_batches", "claim_version", "INTEGER NOT NULL DEFAULT 0");
@@ -162,28 +199,149 @@ export class Storage {
     this.ensureColumn("source_references", "projection_error", "TEXT");
     this.ensureColumn("source_references", "projected_at", "TEXT");
     this.ensureColumn("source_references", "remote_source_id", "TEXT");
+    this.ensureColumn("plane_item_cache", "parent_item_id", "TEXT");
+    this.ensureColumn("turn_audits", "binding_list_tool_called", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("turn_audits", "capture_decision_recorded", "INTEGER");
+    this.ensureColumn("turn_audits", "binding_prompt_delivered", "INTEGER");
     this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_context_workspace_identity ON project_contexts(workspace_identity);
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_batches(status, next_attempt_at, lease_until);
       CREATE INDEX IF NOT EXISTS idx_no_project_event_reviews_turn ON no_project_event_reviews(project_context_id, session_id, turn_id);
+      CREATE INDEX IF NOT EXISTS idx_binding_preferences_identity ON workspace_binding_preferences(workspace_identity);
       CREATE INDEX IF NOT EXISTS idx_source_batch ON source_references(batch_id);
       CREATE INDEX IF NOT EXISTS idx_source_event ON source_references(event_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_source_remote ON source_references(remote_source_id);
       CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
       CREATE INDEX IF NOT EXISTS idx_cache_context ON plane_item_cache(project_context_id, archived, updated_at);
     `);
+    this.migrateWorkspaceIdentities();
   }
 
-  private ensureColumn(table: "outbox_batches" | "source_references", column: string, definition: string): void {
+  private ensureColumn(table: "project_contexts" | "outbox_batches" | "source_references" | "plane_item_cache" | "turn_audits", column: string, definition: string): void {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
+  private migrateWorkspaceIdentities(): void {
+    const rows = this.db.prepare("SELECT id, canonical_cwd FROM project_contexts WHERE workspace_identity IS NULL OR workspace_identity='' ORDER BY id").all() as Array<{ id: number; canonical_cwd: string }>;
+    const identities = rows.map((row) => {
+      try { return { id: row.id, identity: resolveWorkspaceIdentity(row.canonical_cwd).value }; }
+      catch (error) {
+        if (error instanceof Error && error.message.startsWith("cwd must be an absolute path")) return { id: row.id, identity: `legacy:${canonicalizeCwd(row.canonical_cwd)}` };
+        throw error;
+      }
+    });
+    const update = this.db.prepare("UPDATE project_contexts SET workspace_identity=? WHERE id=? AND (workspace_identity IS NULL OR workspace_identity='')");
+    for (const row of identities) update.run(row.identity, row.id);
+  }
+
   close(): void { this.db.close(); }
 
+  private contextRowsForIdentity(identity: string): ContextRow[] {
+    return this.db.prepare("SELECT * FROM project_contexts WHERE workspace_identity=? ORDER BY id").all(identity) as ContextRow[];
+  }
+
+  private planeTarget(row: Pick<ContextRow, "plane_base_url" | "workspace_slug" | "plane_project_id">): string {
+    return `${row.plane_base_url.replace(/\/+$/, "")}/${row.workspace_slug}/${row.plane_project_id}`;
+  }
+
+  private contextForRows(identity: string, rows: ContextRow[]): ContextRow | null {
+    if (!rows.length) return null;
+    const first = rows[0]!;
+    const hasConflict = rows.some((row) => this.planeTarget(row) !== this.planeTarget(first));
+    if (hasConflict) throw new ProjectBindingConflictError(identity, rows);
+    return first;
+  }
+
+  private contextForIdentity(identity: string): ContextRow | null {
+    return this.contextForRows(identity, this.contextRowsForIdentity(identity));
+  }
+
+  private pathIdentityCandidates(candidatePath: string): string[] {
+    const rows = this.db.prepare("SELECT DISTINCT workspace_identity FROM project_contexts WHERE workspace_identity LIKE 'path:%'").all() as Array<{ workspace_identity: string | null }>;
+    return rows
+      .map((row) => row.workspace_identity ?? "")
+      .filter((identity) => {
+        const path = pathFromWorkspaceIdentity(identity);
+        return path ? isWorkspacePathAncestor(path, candidatePath) : false;
+      })
+      .sort((left, right) => (pathFromWorkspaceIdentity(right)?.length ?? 0) - (pathFromWorkspaceIdentity(left)?.length ?? 0));
+  }
+
+  private inheritedPathContextRows(candidatePath: string): ContextRow[] {
+    for (const identity of this.pathIdentityCandidates(candidatePath)) {
+      const rows = this.contextRowsForIdentity(identity);
+      if (rows.length) return rows;
+    }
+    return [];
+  }
+
+  private bindingPreferenceRowForIdentity(identity: WorkspaceIdentity): BindingPreferenceRow | null {
+    const exact = this.db.prepare("SELECT * FROM workspace_binding_preferences WHERE workspace_identity=?").get(identity.value) as BindingPreferenceRow | undefined;
+    if (exact) return exact;
+    if (identity.kind !== "path") return null;
+    const rows = this.db.prepare("SELECT * FROM workspace_binding_preferences WHERE workspace_identity LIKE 'path:%'").all() as BindingPreferenceRow[];
+    return rows
+      .filter((row) => {
+        const path = pathFromWorkspaceIdentity(row.workspace_identity);
+        return path ? isWorkspacePathAncestor(path, identity.canonicalPath) : false;
+      })
+      .sort((left, right) => (pathFromWorkspaceIdentity(right.workspace_identity)?.length ?? 0) - (pathFromWorkspaceIdentity(left.workspace_identity)?.length ?? 0))[0] ?? null;
+  }
+
+  private bindingPreferenceFromRow(row: BindingPreferenceRow): BindingPreference {
+    return { id: row.id, workspaceIdentity: row.workspace_identity, preference: row.preference, createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+
+  private writeBindingPreference(identity: string, preference: BindingPreferenceRow["preference"]): BindingPreferenceRow {
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO workspace_binding_preferences (workspace_identity, preference, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(workspace_identity) DO UPDATE SET preference=excluded.preference, updated_at=excluded.updated_at`).run(identity, preference, timestamp, timestamp);
+    const row = this.db.prepare("SELECT * FROM workspace_binding_preferences WHERE workspace_identity=?").get(identity) as BindingPreferenceRow | undefined;
+    if (!row) throw new Error("Binding preference was not persisted");
+    return row;
+  }
+
+  private clearBindingPreference(identity: WorkspaceIdentity): void {
+    const preference = this.bindingPreferenceRowForIdentity(identity);
+    if (preference?.preference === "declined") this.writeBindingPreference(identity.value, "restored");
+  }
+
+  getBindingPreference(cwd: string): BindingPreference | null {
+    const preference = this.bindingPreferenceRowForIdentity(resolveWorkspaceIdentity(cwd));
+    return preference?.preference === "declined" ? this.bindingPreferenceFromRow(preference) : null;
+  }
+
+  declineBinding(cwd: string): BindingPreference {
+    const identity = resolveWorkspaceIdentity(cwd);
+    const inherited = this.bindingPreferenceRowForIdentity(identity);
+    if (inherited?.preference === "declined" && inherited.workspace_identity !== identity.value) return this.bindingPreferenceFromRow(inherited);
+    const row = this.writeBindingPreference(identity.value, "declined");
+    return this.bindingPreferenceFromRow(row);
+  }
+
+  restoreBinding(cwd: string): { restored: boolean; workspaceIdentity: string } {
+    const identity = resolveWorkspaceIdentity(cwd);
+    const preference = this.bindingPreferenceRowForIdentity(identity);
+    if (preference?.preference !== "declined") return { restored: false, workspaceIdentity: identity.value };
+    this.writeBindingPreference(identity.value, "restored");
+    return { restored: true, workspaceIdentity: identity.value };
+  }
+
   getContextByCwd(cwd: string): ProjectContext | null {
-    const row = this.db.prepare("SELECT * FROM project_contexts WHERE canonical_cwd = ?").get(canonicalizeCwd(cwd)) as ContextRow | undefined;
-    return row ? this.contextFromRow(row) : null;
+    const legacy = this.db.prepare("SELECT * FROM project_contexts WHERE canonical_cwd=? AND (workspace_identity IS NULL OR workspace_identity LIKE 'legacy:%')").get(canonicalizeCwd(cwd)) as ContextRow | undefined;
+    if (legacy) return this.contextFromRow(legacy);
+    const identity = resolveWorkspaceIdentity(cwd);
+    const exact = this.contextForIdentity(identity.value);
+    if (exact) return this.contextFromRow(exact);
+    if (identity.kind !== "path") return null;
+    for (const candidateIdentity of this.pathIdentityCandidates(identity.canonicalPath)) {
+      const candidate = this.contextForIdentity(candidateIdentity);
+      if (candidate) return this.contextFromRow(candidate);
+    }
+    return null;
   }
 
   getContext(id: string): ProjectContext | null {
@@ -192,18 +350,36 @@ export class Storage {
   }
 
   bindContext(input: ProjectContextInput, replace = false): ProjectContext {
-    const canonicalCwd = canonicalizeCwd(input.cwd);
-    const existing = this.getContextByCwd(canonicalCwd);
-    if (existing && !replace) throw new Error(`A project context already exists for ${canonicalCwd}`);
-    const timestamp = now();
-    if (existing) {
-      this.db.prepare(`UPDATE project_contexts SET plane_base_url=?, workspace_slug=?, plane_project_id=?, plane_project_name=?, auto_capture_enabled=?, updated_at=? WHERE id=?`)
-        .run(input.planeBaseUrl, input.workspaceSlug, input.planeProjectId, input.planeProjectName ?? null, input.autoCaptureEnabled === false ? 0 : 1, timestamp, Number(existing.id.replace("project_", "")));
-      return this.getContextByCwd(canonicalCwd)!;
+    const identity = resolveWorkspaceIdentity(input.cwd);
+    const canonicalCwd = identity.canonicalPath;
+    let rows = this.contextRowsForIdentity(identity.value);
+    if (rows.length && !replace) {
+      const existing = this.contextForRows(identity.value, rows)!;
+      const requested = `${input.planeBaseUrl.replace(/\/+$/, "")}/${input.workspaceSlug}/${input.planeProjectId}`;
+      const bound = this.planeTarget(existing);
+      if (requested !== bound) throw new Error(`Conflicting Plane project binding for workspace identity ${identity.value}: already bound to ${bound}, requested ${requested}. Use change_binding only after the user explicitly chooses the new project.`);
+      this.clearBindingPreference(identity);
+      return this.contextFromRow(existing);
     }
-    const result = this.db.prepare(`INSERT INTO project_contexts (canonical_cwd, plane_base_url, workspace_slug, plane_project_id, plane_project_name, auto_capture_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(canonicalCwd, input.planeBaseUrl, input.workspaceSlug, input.planeProjectId, input.planeProjectName ?? null, input.autoCaptureEnabled === false ? 0 : 1, timestamp, timestamp);
-    return this.getContextByCwd(canonicalCwd)!;
+    if (replace && !rows.length && identity.kind === "path") {
+      rows = this.inheritedPathContextRows(canonicalCwd);
+      if (!rows.length) throw new Error(`No project binding exists for ${canonicalCwd}`);
+    }
+    if (replace && !rows.length && identity.kind === "git") throw new Error(`No project binding exists for ${canonicalCwd}`);
+    const timestamp = now();
+    if (rows.length) {
+      const update = this.db.prepare(`UPDATE project_contexts SET plane_base_url=?, workspace_slug=?, plane_project_id=?, plane_project_name=?, auto_capture_enabled=?, updated_at=? WHERE id=?`);
+      const transaction = this.db.transaction(() => {
+        for (const row of rows) update.run(input.planeBaseUrl, input.workspaceSlug, input.planeProjectId, input.planeProjectName ?? null, input.autoCaptureEnabled === false ? 0 : 1, timestamp, row.id);
+      });
+      transaction.immediate();
+      this.clearBindingPreference(identity);
+      return this.getContext(`project_${rows[0]!.id}`)!;
+    }
+    const result = this.db.prepare(`INSERT INTO project_contexts (canonical_cwd, workspace_identity, plane_base_url, workspace_slug, plane_project_id, plane_project_name, auto_capture_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(canonicalCwd, identity.value, input.planeBaseUrl, input.workspaceSlug, input.planeProjectId, input.planeProjectName ?? null, input.autoCaptureEnabled === false ? 0 : 1, timestamp, timestamp);
+    this.clearBindingPreference(identity);
+    return this.getContext(`project_${Number(result.lastInsertRowid)}`)!;
   }
 
   setAutoCapture(contextId: string, enabled: boolean): ProjectContext {
@@ -359,24 +535,24 @@ export class Storage {
 
   cacheItem(contextId: string, item: PlaneItem, isSystemCreated = item.isSystemCreated ?? false): void {
     const current = this.getCachedItem(item.id);
-    this.db.prepare(`INSERT INTO plane_item_cache (plane_item_id, project_context_id, identifier, title, description, kind, status, due_date, url, is_system_created, updated_at, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(plane_item_id) DO UPDATE SET identifier=excluded.identifier,title=excluded.title,description=excluded.description,kind=excluded.kind,status=excluded.status,due_date=excluded.due_date,url=excluded.url,updated_at=excluded.updated_at,archived=excluded.archived`)
-      .run(item.id, contextId, item.identifier, item.title, item.description ?? null, item.kind ?? null, item.status ?? item.stateName ?? null, item.dueDate ?? null, item.url ?? null, current?.isSystemCreated ?? isSystemCreated ? 1 : 0, item.updatedAt ?? now(), item.archived ? 1 : 0);
+    this.db.prepare(`INSERT INTO plane_item_cache (plane_item_id, project_context_id, identifier, title, description, parent_item_id, kind, status, due_date, url, is_system_created, updated_at, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(plane_item_id) DO UPDATE SET identifier=excluded.identifier,title=excluded.title,description=excluded.description,parent_item_id=excluded.parent_item_id,kind=excluded.kind,status=excluded.status,due_date=excluded.due_date,url=excluded.url,updated_at=excluded.updated_at,archived=excluded.archived`)
+      .run(item.id, contextId, item.identifier, item.title, item.description ?? null, item.parentId ?? null, item.kind ?? null, item.status ?? item.stateName ?? null, item.dueDate ?? null, item.url ?? null, current?.isSystemCreated ?? isSystemCreated ? 1 : 0, item.updatedAt ?? now(), item.archived ? 1 : 0);
   }
 
   getCachedItem(planeItemId: string): (PlaneItem & { isSystemCreated: boolean; contextId: string }) | null {
     const row = this.db.prepare("SELECT * FROM plane_item_cache WHERE plane_item_id=?").get(planeItemId) as CacheRow | undefined;
     if (!row) return null;
-    return { id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? undefined, kind: (row.kind as PlaneItem["kind"]) ?? undefined, status: (row.status as PlaneItem["status"]) ?? undefined, dueDate: row.due_date, url: row.url ?? undefined, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at, contextId: row.project_context_id };
+    return { id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? undefined, parentId: row.parent_item_id ?? undefined, kind: (row.kind as PlaneItem["kind"]) ?? undefined, status: (row.status as PlaneItem["status"]) ?? undefined, dueDate: row.due_date, url: row.url ?? undefined, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at, contextId: row.project_context_id };
   }
 
   listCachedItems(contextId: string): Array<PlaneItem & { isSystemCreated: boolean }> {
     const rows = this.db.prepare("SELECT * FROM plane_item_cache WHERE project_context_id=? AND archived=0 ORDER BY updated_at DESC").all(contextId) as CacheRow[];
-    return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? undefined, kind: (row.kind as PlaneItem["kind"]) ?? undefined, status: (row.status as PlaneItem["status"]) ?? undefined, dueDate: row.due_date, url: row.url ?? undefined, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at }));
+    return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? undefined, parentId: row.parent_item_id ?? undefined, kind: (row.kind as PlaneItem["kind"]) ?? undefined, status: (row.status as PlaneItem["status"]) ?? undefined, dueDate: row.due_date, url: row.url ?? undefined, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at }));
   }
 
   listAllCachedItems(contextId: string): Array<PlaneItem & { isSystemCreated: boolean }> {
     const rows = this.db.prepare("SELECT * FROM plane_item_cache WHERE project_context_id=? ORDER BY archived, updated_at DESC").all(contextId) as CacheRow[];
-    return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? undefined, kind: (row.kind as PlaneItem["kind"]) ?? undefined, status: (row.status as PlaneItem["status"]) ?? undefined, dueDate: row.due_date, url: row.url ?? undefined, isSystemCreated: Boolean(row.is_system_created), updatedAt: row.updated_at, archived: Boolean(row.archived) }));
+    return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? undefined, parentId: row.parent_item_id ?? undefined, kind: (row.kind as PlaneItem["kind"]) ?? undefined, status: (row.status as PlaneItem["status"]) ?? undefined, dueDate: row.due_date, url: row.url ?? undefined, isSystemCreated: Boolean(row.is_system_created), updatedAt: row.updated_at, archived: Boolean(row.archived) }));
   }
 
   markCacheArchived(itemId: string, archived = true): void { this.db.prepare("UPDATE plane_item_cache SET archived=?, updated_at=? WHERE plane_item_id=?").run(archived ? 1 : 0, now(), itemId); }
@@ -392,12 +568,30 @@ export class Storage {
 
   setUserFields(planeItemId: string, fields: Partial<Record<FieldName, string | null>>): void { for (const [field, value] of Object.entries(fields)) this.setFieldOwnership(planeItemId, field as FieldName, "user", value ?? null); }
 
-  auditHook(input: { eventName: string; sessionId: string; turnId?: string; toolCalled?: boolean; error?: string; ended?: boolean }): void {
+  auditHook(input: { eventName: string; sessionId: string; turnId?: string; toolCalled?: boolean; bindingListToolCalled?: boolean; captureDecisionRecorded?: boolean | null; bindingPromptDelivered?: boolean | null; error?: string; ended?: boolean }): void {
     const turnId = input.turnId ?? null;
-    this.db.prepare(`INSERT INTO turn_audits (session_id,turn_id,hook_event_name,record_tool_called,hook_error,started_at,ended_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(session_id,turn_id,hook_event_name) DO UPDATE SET record_tool_called=MAX(record_tool_called,excluded.record_tool_called),hook_error=COALESCE(excluded.hook_error,hook_error),ended_at=COALESCE(excluded.ended_at,ended_at)`).run(input.sessionId, turnId, input.eventName, input.toolCalled ? 1 : 0, input.error ?? null, now(), input.ended ? now() : null);
+    const captureDecisionRecorded = input.captureDecisionRecorded === undefined || input.captureDecisionRecorded === null ? null : input.captureDecisionRecorded ? 1 : 0;
+    const bindingPromptDelivered = input.bindingPromptDelivered === undefined || input.bindingPromptDelivered === null ? null : input.bindingPromptDelivered ? 1 : 0;
+    this.db.prepare(`INSERT INTO turn_audits (session_id,turn_id,hook_event_name,record_tool_called,binding_list_tool_called,capture_decision_recorded,binding_prompt_delivered,hook_error,started_at,ended_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(session_id,turn_id,hook_event_name) DO UPDATE SET
+        record_tool_called=MAX(record_tool_called,excluded.record_tool_called),
+        binding_list_tool_called=MAX(binding_list_tool_called,excluded.binding_list_tool_called),
+        capture_decision_recorded=COALESCE(excluded.capture_decision_recorded,capture_decision_recorded),
+        binding_prompt_delivered=COALESCE(excluded.binding_prompt_delivered,binding_prompt_delivered),
+        hook_error=COALESCE(excluded.hook_error,hook_error),
+        ended_at=COALESCE(excluded.ended_at,ended_at)`).run(input.sessionId, turnId, input.eventName, input.toolCalled ? 1 : 0, input.eventName === "PostToolUse" && input.bindingListToolCalled ? 1 : 0, captureDecisionRecorded, bindingPromptDelivered, input.error ?? null, now(), input.ended ? now() : null);
   }
 
   listAudits(sessionId?: string): unknown[] { return (sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all()) as unknown[]; }
+
+  hasHookAudit(sessionId: string, eventName: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND hook_event_name=? LIMIT 1").get(sessionId, eventName));
+  }
+
+  didCallListProjects(sessionId: string, turnId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND binding_list_tool_called=1 LIMIT 1").get(sessionId, turnId));
+  }
 
   didRecordProjectEvents(projectContextId: string, sessionId: string, turnId: string): boolean {
     const batch = this.db.prepare("SELECT 1 FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(projectContextId, sessionId, turnId);
@@ -494,6 +688,6 @@ export class Storage {
   }
 
   private contextFromRow(row: ContextRow): ProjectContext {
-    return { id: `project_${row.id}`, canonicalCwd: row.canonical_cwd, cwd: row.canonical_cwd, planeBaseUrl: row.plane_base_url, workspaceSlug: row.workspace_slug, planeProjectId: row.plane_project_id, planeProjectName: row.plane_project_name ?? undefined, autoCaptureEnabled: Boolean(row.auto_capture_enabled), createdAt: row.created_at, updatedAt: row.updated_at };
+    return { id: `project_${row.id}`, canonicalCwd: row.canonical_cwd, cwd: row.canonical_cwd, workspaceIdentity: row.workspace_identity ?? undefined, planeBaseUrl: row.plane_base_url, workspaceSlug: row.workspace_slug, planeProjectId: row.plane_project_id, planeProjectName: row.plane_project_name ?? undefined, autoCaptureEnabled: Boolean(row.auto_capture_enabled), createdAt: row.created_at, updatedAt: row.updated_at };
   }
 }

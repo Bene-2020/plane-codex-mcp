@@ -1,4 +1,27 @@
 {
-  "compilerOptions": { "target": "ES2022", "useDefineForClassFields": true, "lib": ["ES2022", "DOM", "DOM.Iterable"], "allowJs": false, "skipLibCheck": true, "esModuleInterop": true, "allowSyntheticDefaultImports": true, "strict": true, "module": "ESNext", "moduleResolution": "Bundler", "resolveJsonModule": true, "isolatedModules": true, "noEmit": true, "jsx": "react-jsx" },
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@ambient/core": ["../../packages/core/src/index.ts"],
+      "@ambient/storage": ["../../packages/storage/src/index.ts"],
+      "@ambient/plane": ["../../packages/plane/src/index.ts"],
+      "@ambient/service": ["../service/src/index.ts"],
+      "@ambient/mcp/dist/index.js": ["../mcp/src/index.ts"]
+    }
+  },
   "include": ["src"]
 }

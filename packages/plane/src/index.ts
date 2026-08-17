@@ -399,6 +399,14 @@ export class EventCoordinator {
           assertClaim?.();
           this.storage.cacheItem(context.id, updated, existing.isSystemCreated);
         }
+        if (event.archiveAfterCompletion) {
+          if (!existing.isSystemCreated) throw new Error("Only system-created items can be archived after completion");
+          assertClaim?.();
+          await this.plane.archiveItem(context, existing.id);
+          assertClaim?.();
+          this.storage.markCacheArchived(existing.id);
+          existing.archived = true;
+        }
         assertClaim?.();
         this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
         return existing.id;
