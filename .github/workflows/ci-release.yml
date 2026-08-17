@@ -176,6 +176,7 @@ jobs:
 
       - name: Create or update GitHub Release
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
