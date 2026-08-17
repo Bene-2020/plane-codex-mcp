@@ -272,7 +272,7 @@ describe("SQLite storage", () => {
     expect(second.getSourceReference("event_1_0")?.projectionStatus).toBe("pending");
     expect(second.setBatchStatus(secondClaim.id, "synced", undefined, firstClaim.claimToken)).toBe(false);
     expect(second.setBatchStatus(secondClaim.id, "failed", "stale", firstClaim.claimToken)).toBe(false);
-    expect(second.renewBatchLease(secondClaim.id, secondClaim.claimToken!)).toBe(true);
+    expect(second.renewBatchLease(secondClaim.id, secondClaim.claimToken!, 1_000)).toBe(true);
     second.markEventCompleted("event_1_0", "new-item", secondClaim.claimToken);
     expect(second.setBatchStatus(secondClaim.id, "synced", undefined, secondClaim.claimToken)).toBe(true);
     expect(second.listPendingBatches()).toHaveLength(0);
