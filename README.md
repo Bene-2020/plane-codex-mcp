@@ -13,7 +13,7 @@ Ambient Project Layer 是一个 Codex 插件。它从当前工作回合中捕获
 
 ## 产品界面
 
-![Ambient Project Layer Panel](docs/assets/ambient-project-panel.png)
+![在 Codex 对话中打开 Ambient Project Panel 并拖动工作项](docs/assets/ambient-project-panel.gif)
 
 Panel 默认展示最多 5 个相关工作项，支持按 Backlog、Todo、In Progress 和 Done 筛选，并可通过状态菜单或拖拽更新状态。完整创建、编辑、归档和项目管理仍在 Plane 中完成。
 
