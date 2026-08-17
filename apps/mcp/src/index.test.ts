@@ -90,8 +90,8 @@ describe("ambient MCP tools and App bootstrap", () => {
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
-      const binding = await client.callTool({ name: "get_binding", arguments: { cwd: "/Users/bene/Agent/test-project" } });
-      const result = await client.callTool({ name: "open_project_panel", arguments: { cwd: "/Users/bene/Agent/test-project" } });
+      const binding = await client.callTool({ name: "get_binding", arguments: { cwd: "/work/test-project" } });
+      const result = await client.callTool({ name: "open_project_panel", arguments: { cwd: "/work/test-project" } });
       const { tools } = await client.listTools();
       expect(JSON.parse((binding.content as Array<{ text: string }>)[0]!.text)).toBeNull();
       expect(tools.find((tool) => tool.name === "open_project_panel")?._meta).toEqual({ ui: { resourceUri: PANEL_RESOURCE_URI, visibility: ["model"] }, "ui/resourceUri": PANEL_RESOURCE_URI });

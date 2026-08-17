@@ -2,7 +2,7 @@
 
 ## 产品边界
 
-Plane 是用户可见项目数据的最终真相源和完整项目管理界面。正式路径由 `apps/mcp` 在同一进程内启动 localhost Fastify BFF、Outbox worker 和 MCP；独立 `apps/service` 只服务开发降级。Hook 负责 Codex 集成；`apps/panel` 是自制的轻量 React Inline card，只展示少量相关工作项并允许状态变更。它不提供 Ambient Fullscreen 或独立 Web 完整看板，主要 CTA 直接打开 Plane。Panel 不直接加载 Plane SDK，也不接触 Plane API Key。产品范围以 [Inline 项目卡片产品边界](inline-panel-product-boundary.md) 为准。
+Plane 是用户可见项目数据的最终真相源和完整项目管理界面。正式路径由 `apps/mcp` 在同一进程内启动 localhost Fastify BFF、Outbox worker 和 MCP；独立 `apps/service` 只服务开发降级。Hook 负责 Codex 集成；`apps/panel` 是自制的轻量 React Inline card，只展示少量相关工作项并允许状态变更。它不提供 Ambient Fullscreen 或独立 Web 完整看板，主要 CTA 直接打开 Plane。Panel 不直接加载 Plane SDK，也不接触 Plane API Key。
 
 ```text
 Codex model

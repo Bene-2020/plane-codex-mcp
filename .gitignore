@@ -27,3 +27,15 @@ plugin/.mcp.json
 plugin/panel/
 plugin/runtime/
 vendor/node/
+
+# Local research and development records
+.superdesign/
+docs/architecture/inline-panel-product-boundary.md
+docs/codex-desktop-installation.md
+docs/database-guide.md
+docs/demo-operations.md
+docs/evaluations/
+docs/plans/
+docs/research/
+docs/specs/
+evals/
