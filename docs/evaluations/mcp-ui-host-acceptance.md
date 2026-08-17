@@ -18,18 +18,20 @@ mime: text/html;profile=mcp-app
 
 ## 已验证
 
-自动测试覆盖 MCP tools/list 的 App metadata、工具结果 metadata 与 content 隔离、缺失 bootstrap 安全行为、动态 BFF 启动/实际 URL/授权请求/重启令牌轮换、`open_project_panel → App.ontoolresult → App.callServerTool → MCP server-tool bridge → 动态 BFF summary` 完整链、Panel bootstrap 解析、统一请求头、401 清理且不重试；Service 覆盖 web-sandbox 与 Desktop sandbox Origin、`null`/4318 开发来源、恶意 Origin 拒绝、带 token 的 summary 和精确 CORS。插件隔离冒烟覆盖显式 `PLANE_MODE=fake` 的测试入口、缺少 Plane 配置时在打开数据库前失败、PATH 无 node/pnpm/bun、MCP `initialize`/`tools/list`/`resources/read`/`open_project_panel`、Panel server-tool bridge、带 Origin 的 summary 和五种 Hook fixture。正式 Desktop 的真实 SDK、数据库和凭据配置按 [Codex Desktop 安装与真人验收](../codex-desktop-installation.md) 记录，不把 Plane key 放入 Panel 或模型可见输出。
+自动测试覆盖 MCP tools/list 的 App metadata、工具结果 metadata 与 content 隔离、未绑定 `get_binding → open_project_panel` 错误仍保留资源关联且不返回 bootstrap、非法 bootstrap 安全行为、动态 BFF 启动/实际 URL/授权请求/重启令牌轮换、`open_project_panel → App.ontoolresult → App.callServerTool → MCP server-tool bridge → 动态 BFF summary` 完整链、Panel bootstrap 解析、统一请求头、401 清理且不重试；Panel 的工具错误、无/非法 bootstrap、宿主连接、bridge/HTTP/网络和会话失效均统一渲染 Plane 风格 720px 异常卡片，固定文案为“项目面板暂时不可用”“暂时无法加载项目面板，请稍后再试。”，不显示原因或重试动作；Service 覆盖 web-sandbox 与 Desktop sandbox Origin、`null`/4318 开发来源、恶意 Origin 拒绝、带 token 的 summary 和精确 CORS。插件隔离冒烟覆盖显式 `PLANE_MODE=fake` 的测试入口、缺少 Plane 配置时在打开数据库前失败、PATH 无 node/pnpm/bun、MCP `initialize`/`tools/list`/`resources/read`/`open_project_panel`、Panel server-tool bridge、带 Origin 的 summary 和五种 Hook fixture。正式 Desktop 的真实 SDK、数据库和凭据配置按 [Codex Desktop 安装与真人验收](../codex-desktop-installation.md) 记录，不把 Plane key 放入 Panel 或模型可见输出。
 
 正式 Desktop 验收还必须在首次安装和每次升级后人工信任当前版本的五个 Hook，再新建 task。插件 enabled 或 MCP 可用不能替代 Hook 信任验证；若 Hook 显示 `modified`，宿主会在适配器启动前拦截执行，正式数据库不会产生该 session 的审计记录。重新信任后的当前 task 可验证 `UserPromptSubmit`，完整 `SessionStart` 链必须用新 task 验证。
 
 ## SMWC-10 / SMWC-13 根因与自动回归
 
-- SMWC-10：独立页面的 `/api/context` 在 cwd 未绑定时返回 `null`；旧 Panel 直接清空 summary 并返回，所以 `Load project` 没有用户可见结果。现在该路径抛出并显示 `No project is bound to <cwd>`。Codex host 路径始终按 bootstrap `projectContextId` 读取，不执行 cwd lookup。
+- SMWC-10：独立页面的 `/api/context` 在 cwd 未绑定时返回 `null`；Codex host 对工具错误、无 bootstrap 和摘要加载失败统一显示一张 Plane 风格 720px 异常卡片，不把未绑定、bootstrap、会话或网络原因透传给用户。Codex host 路径始终按 bootstrap `projectContextId` 读取，不执行 cwd lookup。
 - SMWC-13：MCP result 和标准 host bridge 都没有丢失 `_meta`。实际断点是 `setApiClient(createPanelApi(...))`：React 把返回的 callable client 当成 state updater 执行。现在使用 `setApiClient(() => createPanelApi(...))`；协议链测试证明 result `_meta` 经真实 `AppBridge` 到 `App.ontoolresult`。
 
 ## SMWC-14 / SMWC-15 复测基线
 
-正式插件包固定 macOS arm64 Node 22.22.1 sidecar，并使用 Node 内置 `node:sqlite`；因此宿主 Node 22/25 的 ABI 差异不再参与启动。BFF allowlist 精确包含 `https://web-sandbox.oaiusercontent.com` 以及 Codex Desktop 的 `codex-sandbox://*.web-sandbox.oaiusercontent.com`，保留 `X-Ambient-Session-Token`，恶意 Origin 没有 CORS 响应头。Panel 对 fetch/CORS 失败显示 localhost 服务/CORS 诊断，不提示重新绑定。
+正式插件按宿主安装平台专属 Node 22.22.1 sidecar，支持 macOS arm64、macOS x64、Linux x64、Linux arm64 和 Windows x64；Unix 使用 `runtime/bin/ambient-node`，Windows 使用 `runtime/bin/ambient-node.cmd` 与 `node.exe`，均使用 Node 内置 `node:sqlite`。因此宿主 Node 22/25 的 ABI 差异不再参与启动。BFF allowlist 精确包含 `https://web-sandbox.oaiusercontent.com` 以及 Codex Desktop 的 `codex-sandbox://*.web-sandbox.oaiusercontent.com`，保留 `X-Ambient-Session-Token`，恶意 Origin 没有 CORS 响应头。Panel 对所有初始化和首次摘要请求失败显示同一张通用异常卡片，不显示 localhost、CORS、HTTP 或会话诊断。
+
+平台包结构验收由 `node scripts/validate-plugin-runtime.mjs dist/plugins/ambient-project-layer --all` 负责：当前原生 macOS arm64 执行 sidecar `--version`，其他四个目标静态核对 `runtime.json`、Node 官方归档对应的 sidecar 文件名、`LICENSE.nodejs`、MCP 命令和五个 Hook 命令；`pnpm smoke:plugin` 还核对五目标 launcher 选择，并在原生包真实运行 MCP 与五个 Hook。当前开发机无法真实执行 macOS x64、Linux x64、Linux arm64 或 Windows x64 二进制，需在对应真实机完成 MCP STDIO、五 Hook 和 Windows `.cmd` 含空格路径验收。
 
 ## SMWC-25 生产 Desktop 动态 localhost 复测
 

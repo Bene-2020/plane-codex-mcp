@@ -12,7 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import { FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { startMcpRuntime } from "@ambient/mcp/dist/index.js";
-import { attachPanelSession, filterVisibleItems, getStatusCounts, handlePanelToolResult, listSummary, LoadingShell, loadPanelSummary, moveProjectCount, panelRequestError, projectPlaneUrl, selectRelevantItems, STATUS_OPTIONS, updateItemStatus, type PanelApi } from "./main";
+import { attachPanelSession, filterVisibleItems, getStatusCounts, handlePanelToolResult, listSummary, LoadingShell, loadPanelSummary, moveProjectCount, panelRequestError, PanelErrorShell, PANEL_ERROR_MESSAGE, PANEL_ERROR_TITLE, projectPlaneUrl, selectRelevantItems, STATUS_OPTIONS, updateItemStatus, type PanelApi } from "./main";
 import { createPanelApi, createPanelToolApi, PANEL_BOOTSTRAP_META_KEY, parsePanelBootstrap } from "./session";
 
 const sessionToken = "a".repeat(43);
@@ -20,19 +20,45 @@ const sessionToken = "a".repeat(43);
 describe("panel session attachment", () => {
   it("routes App.ontoolresult bootstrap metadata into the dynamic service session", () => {
     let attached: string | null = null;
-    let error = "";
+    let unavailable = false;
     let loading = true;
-    handlePanelToolResult({ _meta: { [PANEL_BOOTSTRAP_META_KEY]: { serviceBaseUrl: "http://127.0.0.1:4317", sessionToken, projectContextId: "project_1" } } }, (next) => { attached = next.projectContextId; }, (message) => { error = message; }, (value) => { loading = value; });
+    handlePanelToolResult({ _meta: { [PANEL_BOOTSTRAP_META_KEY]: { serviceBaseUrl: "http://127.0.0.1:4317", sessionToken, projectContextId: "project_1" } } }, (next) => { attached = next.projectContextId; }, (value) => { unavailable = value; }, (value) => { loading = value; });
     expect(attached).toBe("project_1");
-    expect(error).toBe("");
+    expect(unavailable).toBe(false);
     expect(loading).toBe(true);
   });
 
-  it("identifies a browser fetch/CORS failure without suggesting a rebind", () => {
-    const message = panelRequestError(new TypeError("Failed to fetch"));
-    expect(message).toContain("CORS");
-    expect(message).toContain("不是项目未绑定");
-    expect(message).not.toContain("重新绑定");
+  it("maps tool, bootstrap, bridge, HTTP, and network failures to one generic error card", () => {
+    expect(panelRequestError(new TypeError("Failed to fetch"))).toBe(PANEL_ERROR_MESSAGE);
+    expect(panelRequestError(new Error("HTTP 500"))).toBe(PANEL_ERROR_MESSAGE);
+    expect(panelRequestError(new Error("Project context not found"))).toBe(PANEL_ERROR_MESSAGE);
+    const markup = renderToStaticMarkup(PanelErrorShell());
+    expect(markup).toContain('<header class="card-header panel-error-header">');
+    expect(markup).toContain('class="panel-error-heading">项目面板</div>');
+    expect(markup).toContain('class="panel-error-icon" aria-hidden="true" focusable="false"');
+    expect(markup).toContain(PANEL_ERROR_TITLE);
+    expect(markup).toContain(PANEL_ERROR_MESSAGE);
+    expect(markup).toContain('aria-labelledby="panel-error-title" aria-describedby="panel-error-message"');
+    expect(markup).not.toContain("Waiting for Codex");
+    expect(markup).not.toContain("Project panel unavailable");
+    expect(markup).not.toContain("Retry");
+    expect(markup).not.toContain("重试");
+    expect(markup).not.toContain("在 Plane 中打开");
+  });
+
+  it("fails safe when the App tool returns an error or invalid bootstrap", () => {
+    for (const result of [
+      { isError: true, content: [{ type: "text", text: "Project context not found" }] },
+      { _meta: { [PANEL_BOOTSTRAP_META_KEY]: { serviceBaseUrl: "not-local", sessionToken, projectContextId: "project_1" } } },
+    ]) {
+      let unavailable = false;
+      let loading = true;
+      const attach = vi.fn();
+      handlePanelToolResult(result, attach, (value) => { unavailable = value; }, (value) => { loading = value; });
+      expect(attach).not.toHaveBeenCalled();
+      expect(unavailable).toBe(true);
+      expect(loading).toBe(false);
+    }
   });
 
   it("stores the bootstrapped client as state and loads the project through the Service API", async () => {
@@ -107,7 +133,7 @@ describe("panel session attachment", () => {
     try {
       const toolResult = await client.callTool({ name: "open_project_panel", arguments: { projectContextId: context.id } });
       let bootstrap: { serviceBaseUrl: string; sessionToken: string; projectContextId: string } | null = null;
-      handlePanelToolResult(toolResult, (next) => { bootstrap = next; }, () => { throw new Error("Panel bootstrap was rejected"); }, () => undefined);
+      handlePanelToolResult(toolResult, (next) => { bootstrap = next; }, () => undefined, () => undefined);
       expect(bootstrap).not.toBeNull();
       const activeBootstrap = bootstrap!;
       expect(activeBootstrap.serviceBaseUrl).toBe(runtime.service.baseUrl);
@@ -138,7 +164,7 @@ describe("panel session attachment", () => {
     try {
       const toolResult = await client.callTool({ name: "open_project_panel", arguments: { projectContextId: context.id } });
       let bootstrap: { serviceBaseUrl: string; sessionToken: string; projectContextId: string } | null = null;
-      handlePanelToolResult(toolResult, (next) => { bootstrap = next; }, () => { throw new Error("Panel bootstrap was rejected"); }, () => undefined);
+      handlePanelToolResult(toolResult, (next) => { bootstrap = next; }, () => undefined, () => undefined);
       const activeBootstrap = bootstrap!;
       const api = createPanelToolApi((params) => app.callServerTool(params), () => undefined);
       const summary = await loadPanelSummary(api, activeBootstrap, "host", "", null);
@@ -168,8 +194,8 @@ describe("inline project card behavior", () => {
   it("limits the Inline payload and keeps status counts stable while filtering", () => {
     const relevant = selectRelevantItems(items);
     expect(relevant).toHaveLength(5);
-    expect(filterVisibleItems(relevant, "done")).toHaveLength(2);
-    expect(getStatusCounts(relevant)).toEqual({ captured: 1, planned: 1, in_progress: 1, done: 2 });
+    expect(filterVisibleItems(relevant, "done")).toHaveLength(1);
+    expect(getStatusCounts(relevant)).toEqual({ captured: 2, planned: 1, in_progress: 1, done: 1 });
     expect(STATUS_OPTIONS.map((option) => option.label)).toEqual(["Backlog", "Todo", "In Progress", "Done"]);
   });
 
@@ -180,18 +206,45 @@ describe("inline project card behavior", () => {
     expect(moveProjectCount(counts, "planned", "in_progress")).toEqual({ total: 42, byStatus: { captured: 6, planned: 7, in_progress: 11, done: 18 } });
   });
 
-  it("orders recent items by the latest Plane update or completed Ambient projection", () => {
+  it("prioritizes unfinished states, uses effective recency, and keeps the latest Done result", () => {
     const datedItems = items.map((item, index) => ({ ...item, updatedAt: `2026-08-13T0${index}:00:00.000Z` }));
     const sources = [{ eventId: "event_1_0", eventType: "decision", summary: "New decision", sourceExcerpt: "Decision", sessionId: "session_1", turnId: "turn_1", planeItemId: "1", createdAt: "2026-08-13T10:00:00.000Z", projectedAt: "2026-08-13T10:01:00.000Z" }];
 
-    expect(selectRelevantItems(datedItems, sources).map((item) => item.id)).toEqual(["1", "6", "5", "4", "3"]);
+    expect(selectRelevantItems(datedItems, sources).map((item) => item.id)).toEqual(["3", "2", "1", "6", "5"]);
+  });
+
+  it("keeps one item from every non-empty unfinished state before priority fill", () => {
+    const competingItems = [
+      { id: "ip-1", identifier: "DEMO-IP-1", title: "Newest in progress", status: "in_progress", updatedAt: "2026-08-13T10:00:00.000Z" },
+      { id: "ip-2", identifier: "DEMO-IP-2", title: "Second in progress", status: "in_progress", updatedAt: "2026-08-13T09:00:00.000Z" },
+      { id: "ip-3", identifier: "DEMO-IP-3", title: "Third in progress", status: "in_progress", updatedAt: "2026-08-13T08:00:00.000Z" },
+      { id: "ip-4", identifier: "DEMO-IP-4", title: "Fourth in progress", status: "in_progress", updatedAt: "2026-08-13T07:00:00.000Z" },
+      { id: "todo-1", identifier: "DEMO-TODO-1", title: "Todo item", status: "planned", updatedAt: "2026-08-13T06:00:00.000Z" },
+      { id: "backlog-1", identifier: "DEMO-BACKLOG-1", title: "Backlog item", status: "captured", updatedAt: "2026-08-13T05:00:00.000Z" },
+      { id: "done-1", identifier: "DEMO-DONE-1", title: "Done item", status: "done", updatedAt: "2026-08-13T11:00:00.000Z" },
+    ];
+
+    expect(selectRelevantItems(competingItems).map((item) => item.id)).toEqual(["ip-1", "todo-1", "backlog-1", "ip-2", "done-1"]);
+  });
+
+  it("selects a single status from its complete active collection", () => {
+    const backlogItems = [
+      ...items,
+      { id: "8", identifier: "DEMO-8", title: "Recent backlog item", status: "captured", updatedAt: "2026-08-13T08:00:00.000Z" },
+      { id: "9", identifier: "DEMO-9", title: "Another backlog item", status: "captured", updatedAt: "2026-08-13T07:00:00.000Z" },
+      { id: "10", identifier: "DEMO-10", title: "Third backlog item", status: "captured", updatedAt: "2026-08-13T06:00:00.000Z" },
+      { id: "11", identifier: "DEMO-11", title: "Fourth backlog item", status: "captured", updatedAt: "2026-08-13T05:00:00.000Z" },
+      { id: "12", identifier: "DEMO-12", title: "Fifth backlog item", status: "captured", updatedAt: "2026-08-13T04:00:00.000Z" },
+    ];
+
+    expect(selectRelevantItems(backlogItems, [], "captured").map((item) => item.id)).toEqual(["8", "9", "10", "11", "12"]);
   });
 
   it("models optimistic status movement and complete rollback data", () => {
     const relevant = selectRelevantItems(items);
     const moved = updateItemStatus(relevant, "1", "done");
     expect(moved.find((item) => item.id === "1")?.status).toBe("done");
-    expect(getStatusCounts(moved)).toEqual({ captured: 0, planned: 1, in_progress: 1, done: 3 });
+    expect(getStatusCounts(moved)).toEqual({ captured: 1, planned: 1, in_progress: 1, done: 2 });
     const rolledBack = updateItemStatus(moved, "1", "captured");
     expect(rolledBack.find((item) => item.id === "1")?.status).toBe("captured");
   });
@@ -220,6 +273,8 @@ describe("inline project card behavior", () => {
     const source = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
 
     expect(source).toContain('if (loading && !summary) return <LoadingShell />;');
+    expect(source).not.toContain("Waiting for Codex");
+    expect(source).not.toContain("Project panel unavailable");
     expect(markup).toContain('class="inline-card loading-card"');
     expect(markup).toContain('aria-busy="true"');
     expect(markup).toContain("正在读取相关工作项");

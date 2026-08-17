@@ -179,6 +179,21 @@ describe("Plane projection", () => {
     storage.close();
   });
 
+  it("completes then archives an explicitly superseded system plan item", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "plan", events: [{ type: "plan", title: "Old plan", summary: "Old plan", userDirected: true, sourceExcerpt: "make a plan" }] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+    const item = (await plane.listItems(context))[0]!;
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "replace", events: [{ type: "completed", title: "Retire old plan", summary: "The plan was replaced", relatedItemId: item.id, userDirected: true, sourceExcerpt: "replace it", archiveAfterCompletion: true }] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+    expect(storage.getCachedItem(item.id)).toMatchObject({ status: "done", archived: true });
+    expect(await plane.listItems(context)).toHaveLength(0);
+    storage.close();
+  });
+
   it.each([
     ["captured", "state-backlog"],
     ["planned", "state-todo"],

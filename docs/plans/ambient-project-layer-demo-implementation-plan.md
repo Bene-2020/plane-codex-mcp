@@ -138,7 +138,7 @@ see-my-work/
 | `source_references` | Plane 对象与 `session_id`、`turn_id`、最小来源摘要的关系 |
 | `plane_item_cache` | Hook 注入和面板只读所需的精简 Plane 快照 |
 | `field_ownership` | 每个 Plane 字段的 `system`/`user` 所有权和最后系统值摘要 |
-| `turn_audits` | 本回合是否调用记录工具、Hook 是否异常、结束时间 |
+| `turn_audits` | 本回合是否调用记录工具、Hook 是否异常、结束时间，以及 Stop 的捕获决定/绑定交付可读结果 |
 | `no_project_event_reviews` | 本回合已完成无事件审查的幂等确认，不进入 Plane 或 Outbox |
 
 项目事件批次直接使用可读的组合唯一键：
@@ -158,7 +158,7 @@ projectContextId + sessionId + turnId
 | `SessionStart` | 规范化 `cwd`，读取绑定和缓存，注入固定规则与项目快照 |
 | `UserPromptSubmit` | 注入 `session_id`、`turn_id`、当前绑定和活跃工作项快照 |
 | `PostToolUse` | 只观察项目 MCP 调用结果，更新本地审计与同步提示 |
-| `Stop` | 结束回合审计；record 或无事件审查确认后放行，两者都缺失时保留一次漏记兜底，不启动第二个模型 |
+| `Stop` | 读取当前回合状态写入可空的 `capture_decision_recorded`/`binding_prompt_delivered`，始终放行；不返回 block、不保存最终消息、不启动第二个模型 |
 | `SessionEnd` | 结束会话审计并唤醒 worker；不等待 Plane 网络 |
 
 Hook 请求路径禁止访问 Plane 网络。注入内容按“编号、标题、状态”排序，最多 30 个活跃项，并设置约 1,500 token 上限；超限时优先保留最近更新和显式关联项。

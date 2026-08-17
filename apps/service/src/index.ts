@@ -106,7 +106,12 @@ export function createService(args: ServiceOptions = {}) {
   const contextForItem = (itemId: string): ProjectContext => { const cached = storage.getCachedItem(itemId); if (!cached) throw new Error("Project item not found"); return getContext(cached.contextId); };
 
   app.get("/health", async () => ({ ok: true }));
-  app.get<{ Querystring: { cwd?: string } }>("/api/context", async (request, reply) => { try { return storage.getContextByCwd(request.query.cwd ?? process.cwd()); } catch (error) { return reply.code(400).send(jsonError(error)); } });
+  app.get<{ Querystring: { cwd?: string } }>("/api/context", async (request, reply) => {
+    try {
+      if (!request.query.cwd?.trim()) throw new Error("cwd is required; identity resolution never uses the service process cwd");
+      return storage.getContextByCwd(request.query.cwd);
+    } catch (error) { return reply.code(400).send(jsonError(error)); }
+  });
   app.get<{ Params: { id: string } }>("/api/projects/:id/summary", async (request, reply) => {
     try {
       const context = getContext(request.params.id);

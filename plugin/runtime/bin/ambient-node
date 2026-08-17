@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$(/usr/bin/uname -s)" != "Darwin" ] || [ "$(/usr/bin/uname -m)" != "arm64" ]; then
-  echo "Ambient Project Layer plugin supports macOS arm64 only; this installation cannot run on $(/usr/bin/uname -s)/$(/usr/bin/uname -m)." >&2
+  echo "Ambient Project Layer plugin package darwin-arm64 requires macOS arm64; this installation cannot run on $(/usr/bin/uname -s)/$(/usr/bin/uname -m)." >&2
   exit 78
 fi
 

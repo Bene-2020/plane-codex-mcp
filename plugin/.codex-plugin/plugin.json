@@ -1,7 +1,7 @@
 {
   "name": "ambient-project-layer",
-  "version": "0.1.0+codex.20260812221925",
-  "description": "Quietly captures meaningful project events from Codex work and syncs them to Plane; macOS arm64 runtime.",
+  "version": "0.1.0+codex.20260817043452",
+  "description": "Quietly captures meaningful project events from Codex work and syncs them to Plane; distributed as platform-specific Node 22.22.1 packages.",
   "author": {
     "name": "Ambient Project Demo"
   },
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Ambient Project Layer",
     "shortDescription": "Quiet project capture and Plane synchronization",
-    "longDescription": "Capture meaningful Codex work in a local project view and synchronize it to Plane. The formal plugin package currently supports macOS arm64 only and reports a direct compatibility error on other OS/architectures.",
+    "longDescription": "Capture meaningful Codex work in a local project view and synchronize it to Plane. The formal plugin is distributed as platform-specific packages for macOS arm64, macOS x64, Linux x64, Linux arm64, and Windows x64; each package carries Node 22.22.1 and reports a direct compatibility error when installed on another OS or architecture.",
     "developerName": "Ambient Project Demo",
     "category": "Productivity",
     "capabilities": [

@@ -7,6 +7,8 @@ import { createPanelApi, createPanelToolApi, PANEL_BOOTSTRAP_META_KEY, parsePane
 export type InlineStatus = "captured" | "planned" | "in_progress" | "done";
 export type InlineFilter = "all" | InlineStatus;
 export const INLINE_ITEM_LIMIT = 5;
+export const PANEL_ERROR_TITLE = "项目面板暂时不可用";
+export const PANEL_ERROR_MESSAGE = "暂时无法加载项目面板，请稍后再试。";
 
 export const STATUS_OPTIONS = [
   { value: "captured", label: "Backlog", cardLabel: "Captured", tone: "captured" },
@@ -33,7 +35,7 @@ export function isInlineStatus(value: string | undefined): value is InlineStatus
   return STATUS_OPTIONS.some((option) => option.value === value);
 }
 
-export function selectRelevantItems(items: Item[], sources: Source[] = []): Item[] {
+export function selectRelevantItems(items: Item[], sources: Source[] = [], filter: InlineFilter = "all"): Item[] {
   const latestProjectionByItem = new Map<string, number>();
   for (const source of sources) {
     if (!source.planeItemId || !source.projectedAt) continue;
@@ -41,7 +43,20 @@ export function selectRelevantItems(items: Item[], sources: Source[] = []): Item
     latestProjectionByItem.set(source.planeItemId, Math.max(latestProjectionByItem.get(source.planeItemId) ?? 0, projectedAt));
   }
   const lastModifiedAt = (item: Item) => Math.max(Date.parse(item.updatedAt ?? "") || 0, latestProjectionByItem.get(item.id) ?? 0);
-  return items.filter((item) => !item.archived && isInlineStatus(item.status)).sort((left, right) => lastModifiedAt(right) - lastModifiedAt(left)).slice(0, INLINE_ITEM_LIMIT);
+  const byRecent = (left: Item, right: Item) => lastModifiedAt(right) - lastModifiedAt(left);
+  const eligibleItems = items.filter((item) => !item.archived && isInlineStatus(item.status));
+
+  if (filter !== "all") return eligibleItems.filter((item) => item.status === filter).sort(byRecent).slice(0, INLINE_ITEM_LIMIT);
+
+  const unfinishedGroups = (["in_progress", "planned", "captured"] as const).map((status) => eligibleItems.filter((item) => item.status === status).sort(byRecent));
+  const unfinishedCount = unfinishedGroups.reduce((count, group) => count + group.length, 0);
+  const done = eligibleItems.filter((item) => item.status === "done").sort(byRecent);
+  const unfinishedLimit = unfinishedCount < 4 ? unfinishedCount : done.length ? 4 : INLINE_ITEM_LIMIT;
+  const firstFromEachState = unfinishedGroups.flatMap((group) => group.slice(0, 1));
+  const remainingUnfinished = unfinishedGroups.flatMap((group) => group.slice(1));
+  const selectedUnfinished = [...firstFromEachState, ...remainingUnfinished.slice(0, unfinishedLimit - firstFromEachState.length)];
+  const selectedDone = unfinishedCount >= 4 ? done.slice(0, 1) : done;
+  return [...selectedUnfinished, ...selectedDone].slice(0, INLINE_ITEM_LIMIT);
 }
 
 export function filterVisibleItems(items: Item[], filter: InlineFilter): Item[] {
@@ -95,24 +110,23 @@ export function attachPanelSession(next: PanelBootstrap, expireSession: () => vo
   setters.setLoading(true);
 }
 
-export function handlePanelToolResult(result: { _meta?: unknown }, attachSession: (next: PanelBootstrap) => void, setSessionError: (message: string) => void, setLoading: (value: boolean) => void): void {
-  const next = parsePanelBootstrap(result._meta);
+export function handlePanelToolResult(result: { isError?: boolean; _meta?: unknown }, attachSession: (next: PanelBootstrap) => void, setPanelUnavailable: (value: boolean) => void, setLoading: (value: boolean) => void): void {
+  const next = result.isError ? null : parsePanelBootstrap(result._meta);
   if (!next) {
-    setSessionError("没有收到安全的 MCP App 会话，请从 Codex 重新打开项目面板。");
+    setPanelUnavailable(true);
     setLoading(false);
     return;
   }
+  setPanelUnavailable(false);
   attachSession(next);
 }
 
-export function panelRequestError(error: unknown): string {
-  if (error instanceof TypeError) return `无法访问动态 localhost 面板服务（${error.message}）。浏览器可能拒绝了当前 Origin 的 CORS 请求；这不是项目未绑定。请重试或从 Codex 重新打开面板。`;
-  return error instanceof Error ? error.message : String(error);
-}
+export function panelRequestError(_error: unknown): string { return PANEL_ERROR_MESSAGE; }
 
 export async function loadPanelSummary(apiClient: PanelApi, session: PanelBootstrap, sessionMode: "host" | "standalone", cwd: string, storedCwd: string | null): Promise<Summary> {
   if (sessionMode === "host") return await apiClient<Summary>(`/api/projects/${session.projectContextId}/summary`);
-  const requestedCwd = cwd || storedCwd || ".";
+  const requestedCwd = cwd || storedCwd;
+  if (!requestedCwd) throw new Error("Working directory is required; enter an explicit absolute path");
   const context = await apiClient<Context | null>(`/api/context?cwd=${encodeURIComponent(requestedCwd)}`);
   if (!context) throw new Error(`No project is bound to ${requestedCwd}`);
   return await apiClient<Summary>(`/api/projects/${context.id}/summary`);
@@ -127,7 +141,7 @@ function App() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [filter, setFilter] = useState<InlineFilter>("all");
   const [message, setMessage] = useState("");
-  const [loadError, setLoadError] = useState("");
+  const [panelUnavailable, setPanelUnavailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<InlineStatus | null>(null);
@@ -139,10 +153,11 @@ function App() {
     setApiClient(null);
     setSummary(null);
     setLoading(false);
-    setLoadError("");
-    setSessionError("本地服务已重启，请从 Codex 重新初始化面板。");
+    setPanelUnavailable(true);
+    setSessionError("");
   };
   const attachSession = (next: PanelBootstrap) => {
+    setPanelUnavailable(false);
     attachPanelSession(next, expireSession, { setSession, setApiClient, setSessionError, setMessage, setLoading });
   };
 
@@ -157,11 +172,14 @@ function App() {
     let active = true;
     host.ontoolresult = (result) => {
       if (!active) return;
-      handlePanelToolResult(result, (next) => attachPanelSession(next, expireSession, { setSession, setApiClient, setSessionError, setMessage, setLoading }, hostApiFactory), setSessionError, setLoading);
+      handlePanelToolResult(result, (next) => {
+        setPanelUnavailable(false);
+        attachPanelSession(next, expireSession, { setSession, setApiClient, setSessionError, setMessage, setLoading }, hostApiFactory);
+      }, setPanelUnavailable, setLoading);
     };
     void host.connect().catch(() => {
       if (!active) return;
-      setSessionError("无法连接 Codex 的 MCP App 宿主。");
+      setPanelUnavailable(true);
       setLoading(false);
     });
     return () => {
@@ -184,12 +202,13 @@ function App() {
   const request = <T,>(path: string, init?: RequestInit): Promise<T> => apiClient ? apiClient<T>(path, init) : Promise.reject(new Error("Panel session is not initialized"));
   const load = async () => {
     if (!apiClient || !session) {
-      setMessage("Panel session is not initialized. Reopen the panel from Codex.");
+      setPanelUnavailable(true);
+      setLoading(false);
       return;
     }
     setLoading(true);
     setMessage("");
-    setLoadError("");
+    setPanelUnavailable(false);
     try {
       const next = await loadPanelSummary(apiClient, session, sessionMode, cwd, window.localStorage.getItem("ambient.cwd"));
       setSummary(next);
@@ -197,16 +216,14 @@ function App() {
       window.localStorage.setItem("ambient.cwd", next.context.canonicalCwd);
     } catch (error) {
       if (!(error instanceof SessionExpiredError)) {
-        const detail = panelRequestError(error);
-        setMessage(detail);
-        if (!summary) setLoadError(detail);
+        setMessage(panelRequestError(error));
+        setPanelUnavailable(true);
       }
     } finally { setLoading(false); }
   };
   useEffect(() => { if (apiClient) void load(); }, [apiClient, session, sessionMode]);
 
-  const relevantItems = useMemo(() => selectRelevantItems(summary?.items ?? [], summary?.sources ?? []), [summary]);
-  const visibleItems = useMemo(() => filterVisibleItems(relevantItems, filter), [relevantItems, filter]);
+  const visibleItems = useMemo(() => selectRelevantItems(summary?.items ?? [], summary?.sources ?? [], filter), [summary, filter]);
   const projectCounts = summary?.projectCounts ?? null;
   const listSummaryContent = listSummary(filter, visibleItems.length, projectCounts);
   const finishDragging = () => { setDraggedItemId(null); setDropTarget(null); };
@@ -238,12 +255,14 @@ function App() {
     }
   };
 
+  if (panelUnavailable) return <PanelErrorShell />;
   if (!session) {
     if (sessionMode === "standalone") return <StandaloneConnect cwd={cwd} tokenError={sessionError} onCwdChange={setCwd} onConnect={(token) => { const next = parsePanelBootstrap({ [PANEL_BOOTSTRAP_META_KEY]: { serviceBaseUrl: window.location.origin, sessionToken: token, projectContextId: "project_0" } }); if (!next) { setSessionError("请输入 43 位 base64url 临时会话令牌。"); return; } attachSession(next); }} />;
-    return <StateShell title="Waiting for Codex" message={sessionError || "从 Codex 初始化项目面板后，这里会建立一次性的本地会话。"} />;
+    if (loading) return <LoadingShell />;
+    return <PanelErrorShell />;
   }
   if (loading && !summary) return <LoadingShell />;
-  if (!summary) return <StateShell title="Project panel unavailable" message={loadError || "项目摘要暂时不可用，请从 Codex 重新打开面板。"} error onRetry={() => void load()} />;
+  if (!summary) return <PanelErrorShell />;
 
   const projectName = summary.context.planeProjectName ?? summary.context.planeProjectId;
   const planeUrl = projectPlaneUrl(summary.context);
@@ -337,8 +356,22 @@ function App() {
   </main>;
 }
 
-function StateShell({ title, message, error = false, onRetry }: { title: string; message: string; error?: boolean; onRetry?: () => void }) {
-  return <main className="shell state-shell"><section className="state-card"><span className="eyebrow">AMBIENT PROJECT LAYER</span><h1>{title}</h1><p className={error ? "error" : undefined}>{message}</p>{onRetry && <button type="button" className="secondary-button" onClick={onRetry}>重试</button>}</section></main>;
+export function PanelErrorShell() {
+  return <main className="shell error-shell">
+    <section className="inline-card panel-error-card" role="alert" aria-labelledby="panel-error-title" aria-describedby="panel-error-message">
+      <header className="card-header panel-error-header">
+        <div className="panel-error-heading">项目面板</div>
+      </header>
+      <div className="panel-error-content">
+        <svg className="panel-error-icon" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.5" />
+          <path d="M12 8.25v4.5M12 15.75h.01" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+        <h1 id="panel-error-title">{PANEL_ERROR_TITLE}</h1>
+        <p id="panel-error-message">{PANEL_ERROR_MESSAGE}</p>
+      </div>
+    </section>
+  </main>;
 }
 
 export function LoadingShell() {

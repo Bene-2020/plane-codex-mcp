@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import { eventBatchSchema, isSessionToken, noProjectEventsReviewSchema } from "@ambient/core";
+import { eventBatchSchema, isSessionToken, noProjectEventsReviewSchema, parentChildClosureRule, projectBindingFinalDeliveryRule, supersededPlanRule } from "@ambient/core";
 import { createPlaneAdapter } from "@ambient/plane";
 import type { PlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
@@ -60,6 +60,7 @@ const bindingSchema = z.object({
   planeProjectName: z.string().trim().min(1).max(240).optional(),
   autoCaptureEnabled: z.boolean().optional(),
 });
+const cwdSchema = z.object({ cwd: z.string().trim().min(1) });
 const bindInput = (input: z.infer<typeof bindingSchema>) => ({ ...input, planeBaseUrl: input.planeBaseUrl ?? process.env.PLANE_BASE_URL ?? "https://api.plane.so" });
 
 export interface McpServerDependencies { storage?: Storage; plane?: PlaneAdapter; panelSession?: PanelSession; }
@@ -76,7 +77,7 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
     name: "ambient-project",
     version: "0.1.0",
   }, {
-    instructions: "Maintain project context quietly. Use list_projects only to help a user choose a project, bind only after explicit choice, and before the final reply either record meaningful events in one non-empty batch or acknowledge that this turn has no project events. Do not expose Plane CRUD, delete items, reassign people, or use a second semantic model.",
+    instructions: `Maintain project context quietly. For an unbound cwd, follow the onboarding phase injected by SessionStart/UserPromptSubmit and the visible conversation: if no actual onboarding question has appeared yet, immediately call list_projects, show the real returned Plane projects, and ask the user to choose; if the current user message explicitly says do not bind or do not ask again, call decline_project_binding without list_projects; if it only says later, skip, or continues another task, defer for this session without a preference or repeated question; if it explicitly asks to restore or bind, call restore_project_binding if needed, then list projects. When get_binding returns null for the cwd, do not call open_project_panel; call it only after get_binding, bind_project, or change_binding returns a real project context. Do not guess from a Codex Project name, directory name, Git remote, or conversation, and call bind_project only after an explicit choice. If list_projects is called, ${projectBindingFinalDeliveryRule} Before the final reply for a bound, auto-capture-enabled turn, decide whether the user's request, plan, tool results, or conclusion created a meaningful project event; if yes, record it in one non-empty batch, otherwise acknowledge that the turn has no project events. ${supersededPlanRule} ${parentChildClosureRule} The Stop Hook only audits the turn and always allows it to end; it never blocks, injects a follow-up prompt, or asks for a second reply. Do not expose Plane CRUD, delete items, reassign people, save user wording, or use a second semantic model.`,
   });
   const panelConnectDomains = panelSession ? [new URL(panelSession.serviceBaseUrl).origin] : [];
 
@@ -103,14 +104,14 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
 
   server.registerTool("get_binding", {
     title: "Get project binding",
-    description: "Get the project context bound to a normalized cwd.",
+    description: "Get the project context bound to an explicit cwd using the shared workspace identity resolver.",
     inputSchema: z.object({ cwd: z.string().min(1) }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async ({ cwd }) => text(storage.getContextByCwd(cwd)));
 
   registerAppTool(server, "open_project_panel", {
     title: "Open project panel",
-    description: "Open the Ambient project panel for an explicitly identified project context.",
+    description: "Open the Ambient project panel only for a project context returned by get_binding, bind_project, or change_binding; after get_binding returns null, do not call this tool.",
     inputSchema: {
       projectContextId: z.string().regex(/^project_[0-9]+$/).optional(),
       cwd: z.string().trim().min(1).optional(),
@@ -167,6 +168,20 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
     inputSchema: bindingSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async (input) => text(storage.bindContext(bindInput(input), true)));
+
+  server.registerTool("decline_project_binding", {
+    title: "Decline project binding",
+    description: "Persist or reuse a do-not-ask-again preference for the effective stable workspace identity only after the user explicitly gives a long-term refusal.",
+    inputSchema: cwdSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async ({ cwd }) => text(storage.declineBinding(cwd)));
+
+  server.registerTool("restore_project_binding", {
+    title: "Restore project binding onboarding",
+    description: "Restore the current stable workspace identity's project-selection flow only after the user explicitly asks to resume; inherited path refusals use an exact local override.",
+    inputSchema: cwdSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, async ({ cwd }) => text(storage.restoreBinding(cwd)));
 
   server.registerTool("record_project_events", {
     title: "Record project events",

@@ -87,16 +87,23 @@ Demo 不会：
 
 项目上下文包含：
 
-- 规范化的 Codex 工作目录 `cwd`
+- 用于展示和兼容历史绑定的规范化 Codex 工作目录 `cwd`
+- 可读、稳定的工作区身份 `workspace_identity`
 - Plane 基础 URL
 - Plane 工作区标识
 - Plane 项目标识
 - 自动捕获的启用状态
 - 同步配置
 
-Codex Hook 不提供可直接使用的项目标识，只提供 `cwd`、`session_id` 和回合范围内的 `turn_id`。因此项目上下文由用户首次选择后建立，并以规范化 `cwd` 解析。`session_id` 和 `turn_id` 仅用于来源追踪，不能被当作 Plane 项目标识。
+Codex Hook 不提供可直接使用的项目标识，只提供显式 `cwd`、`session_id` 和回合范围内的 `turn_id`。工作区身份先解析软链接取得真实路径；Git 工作区使用真实 `git common dir`，因此仓库根目录、子目录和 linked worktree 共享绑定，独立 clone 保持不同身份；非 Git 目录使用真实绑定根路径，并按路径段做最长祖先匹配。解析不依赖当前进程 `cwd`，也不按 Codex Project、目录名或 Plane 项目名猜测。
 
-首次进入未绑定目录时，Skill 允许 Codex 调用 `list_projects`，自然询问用户要关联的 Plane 项目，并在用户选择后调用 `bind_project`。同一目录中的后续工作会话自动复用绑定。绑定不存在或解析失败时不得猜测目标项目，也不得写入 Plane。
+旧数据库保留 `project_contexts` 自增 ID、`canonical_cwd`、Outbox、来源引用和历史绑定；打开时只为缺少身份的旧行补写可读身份，迁移可重复执行，不合并项目上下文。
+
+首次进入未绑定目录时，`SessionStart` 只注入 onboarding 规则，不能交互；`UserPromptSubmit` 必须优先观察当前用户消息和可见对话：如果尚未实际询问，首个用户可见回复立即调用 `list_projects`，展示真实返回的 Plane 项目并询问选择；当前消息若是明确长期拒绝则调用 `decline_project_binding` 且不列项目；若只是“之后再想想/跳过/继续任务”则仅本 session 暂缓、不写数据库；若明确要求恢复/绑定则先按需 `restore_project_binding` 再列项目。后续 `UserPromptSubmit` 不能仅因已出现过 Hook 审计就假设询问完成：对话中仍未实际询问时要补问，已经询问且用户仅暂缓/忽略/继续时本 session 不重复。选择前不得调用 `bind_project`。不得根据 Codex Project 名、目录名、Git remote 或对话猜测目标项目；新 session 对同一未绑定 identity 再主动询问一次。
+
+调用 `list_projects` 后，工具输出、commentary 和思考过程不算用户交付。最终 `last_assistant_message` 必须包含固定的“项目绑定（待确认）”区块、至少一个真实返回项目的 Markdown 列表项和精确操作句“请选择一个项目，或回复‘稍后再说’。”；同一回合继续完成用户主任务。该交付规则由 Skill、SessionStart/UserPromptSubmit 和 MCP instructions 在最终答复前提供；`Stop` 只在内存中检查最终消息并写入 `binding_prompt_delivered=0/1`，不阻断、不补问、不注入二次提示，始终静默允许结束。最终消息不写入数据库、日志或网络。
+
+只有明确的“这个目录不要绑定/以后不要再问”等长期指令才调用 `decline_project_binding`。它在本地插件 SQLite 的独立 `workspace_binding_preferences` 表中按稳定 `workspace_identity` 保存可读的 `declined` 状态，不保存用户原话，不创建伪 `project_contexts`；Git root/subdir/linked worktree 共享，独立 clone 不共享，非 Git 路径采用与绑定相同的最长祖先语义。非 Git root 的拒绝由 child 和 sibling 继承；对已继承拒绝再次 decline 直接复用 root 记录，不创建 child 行。对 child 明确 restore 或 bind 时只写 child 精确 `restored` override，child 的拒绝恢复后 sibling 仍保持 root 拒绝；明确恢复或绑定 root 才影响 root 下没有更具体 override 的路径。永久拒绝时五个 Hook 仍运行：SessionStart/UserPromptSubmit 注入“未绑定但保持安静、用户主动要求可恢复”的精简上下文，PostToolUse/SessionEnd 继续审计，Stop 不要求 record/ack。用户后来明确要求恢复时调用 `restore_project_binding`，成功 `bind_project` 清理或覆盖当前 identity 的拒绝状态。
 
 ### 6.2 来源事件
 
@@ -111,6 +118,10 @@ Codex Hook 不提供可直接使用的项目标识，只提供 `cwd`、`session_
 - `progress`：进度
 - `completed`：明确完成
 - `plan`：包含一个或多个可执行步骤的计划
+
+用户明确推翻、放弃或替换计划时，Codex 对受影响的计划父项和其生成步骤分别提交用户指示的 `completed` 事件，并设置 `archiveAfterCompletion: true`。投射端必须先将每项更新为 Done，再调用 Plane 归档；只允许归档系统创建项，不授予或调用删除权限。
+
+父子工作项必须作为同一闭环处理。注入上下文明确标记每个活动工作项是父项、子项或独立项；完成、推翻或归档父项前，Codex 必须检查全部已知子项并逐项处理，不能只更新主项而把 Todo / In Progress 子项遗留在项目中。
 
 每个来源事件包含：
 
@@ -186,9 +197,12 @@ pending（待同步） -> synced（已同步） -> corrected（已修正）
 注入内容仅包括：
 
 - 当前项目绑定
+- 本次 Hook 提供的真实 current cwd；已绑定时同时区分 binding root
 - `session_id` 与当前 `turn_id`
 - 自动记录的简短规则
 - 活跃 Plane 工作项的编号、标题和状态
+
+未绑定时，`SessionStart` 与首次 `UserPromptSubmit` 使用不同 onboarding 模板；后续同 session 的 `UserPromptSubmit` 只说明已询问过，不重复询问。持久拒绝时模板只说明保持安静以及用户主动恢复路径。
 
 MCP `instructions` 和 Skill 只保存固定工作流规则。动态快照不包含完整工作项描述、评论、源码、终端原始输出、密钥或附件。
 
@@ -262,6 +276,7 @@ Demo 使用 Plane 作为持久项目后端。
 | 决策 | 优先作为关联工作项的活动；无关联且值得独立追踪时创建 `Decision` Work Item Type 的工作项 |
 | 计划 | 一个父工作项，明确的执行步骤作为子工作项 |
 | 明确完成 | 更新关联工作项的状态 |
+| 被明确推翻的计划与步骤 | 先更新为 Done，再归档；不删除 |
 | 来源引用 | 自动创建对象中的结构化尾注或元数据 |
 
 所有自动生成的可执行工作都进入专用的 `Captured` 工作流状态，或等价的 Plane Intake 状态。该状态用于说明记录来源并支持用户日后整理，而不要求创建前审批。
@@ -382,17 +397,17 @@ Plane 适配器 -> Plane API（完整浏览与管理）
 
 | Hook | Codex 提供的来源标识 | Demo 职责 |
 |---|---|---|
-| `SessionStart` | `session_id`，无 `turn_id` | 解析项目绑定，注入精简项目快照和固定规则 |
-| `UserPromptSubmit` | `session_id`、`turn_id` | 注入当前回合来源标识、绑定和必要的缓存更新 |
-| `PostToolUse` | `session_id`、`turn_id`、`tool_use_id` | 记录 `record_project_events` 与无事件审查工具的结果，用于审计与同步状态 |
-| `Stop` | `session_id`、`turn_id` | record 或无事件审查确认后放行；两者都缺失时返回一次漏记兜底提示，不启动第二个模型 |
-| `SessionEnd` | `session_id`，无 `turn_id` | 通知后台调度仍在队列中的任务并结束会话审计；不等待网络 |
+| `SessionStart` | `session_id`，无 `turn_id` | 解析项目绑定；未绑定时只注入首次 onboarding 规则，不直接交互；绑定时注入 current cwd 与 binding root |
+| `UserPromptSubmit` | `session_id`、`turn_id` | 未绑定时按当前消息和可见对话分支：尚未实际询问则主动 `list_projects`，明确拒绝则 decline，明确恢复则 restore/list，模糊暂缓只在本 session 不重复；绑定时注入当前回合来源标识与缓存 |
+| `PostToolUse` | `session_id`、`turn_id`、`tool_use_id` | 审计 `list_projects`、record/ack 和两个绑定偏好工具结果；`turn_audits.record_tool_called=1` 只表示精确调用过 `record_project_events`，`binding_list_tool_called=1` 只表示同回合精确调用过 `list_projects`，其余调用保持为 0 |
+| `Stop` | `session_id`、`turn_id`、`last_assistant_message` | 读取当前 context、同回合 list/record/ack 审计与内存中的最终消息，写入可空的 `capture_decision_recorded`/`binding_prompt_delivered` 结果；始终放行，不返回用户可见反馈或二次提示，不保存最终消息，不启动第二个模型 |
+| `SessionEnd` | `session_id`，无 `turn_id` | 通知后台调度仍在队列中的任务并结束会话审计；未绑定也继续审计，不等待网络 |
 
 Codex 直接提供 `session_id` 和回合范围内的 `turn_id`。服务端按数据库行号和事件序号分配 `event_id`，并使用 `project_context_id`、`session_id`、`turn_id` 的组合唯一约束防止重复。`SessionStart` 与 `SessionEnd` 没有 `turn_id`，因为它们属于整个工作会话。
 
 ### 11.3 原型存储
 
-Demo 可以使用名称明确的临时 SQLite 数据库，例如 `ambient-project-demo.sqlite`。它只保存项目绑定、Outbox 事件、无事件审查确认、来源引用、工作回合组合唯一约束、字段所有权和 Plane 同步元数据。
+Demo 可以使用名称明确的临时 SQLite 数据库，例如 `ambient-project-demo.sqlite`。它只保存项目绑定、未绑定偏好、Outbox 事件、无事件审查确认、来源引用、工作回合组合唯一约束、字段所有权和 Plane 同步元数据。
 
 该数据库不保存第二套用户可见项目记录，也不保存完整对话。它仅用于可靠交付和溯源，不代表正式产品的存储决策。
 
@@ -413,10 +428,12 @@ Skill 的隐式触发不是唯一可靠入口。`SessionStart` 与 `UserPromptSu
 | `get_binding` | 查询当前 `cwd` 的项目上下文 | 只读，可自动调用 |
 | `bind_project` | 保存首次项目选择 | 仅在用户明确选择后调用 |
 | `change_binding` | 切换当前目录关联的项目 | 仅在用户明确要求后调用 |
+| `decline_project_binding` | 保存明确的长期“不绑定/不要再问”偏好 | 仅在用户明确长期拒绝后调用 |
+| `restore_project_binding` | 清理长期拒绝，恢复项目选择流程 | 仅在用户明确要求恢复绑定后调用 |
 | `record_project_events` | 批量提交本轮项目事件 | 绑定并启用自动记录后可自动调用 |
 | `acknowledge_no_project_events` | 确认本轮已审查且没有项目事件；不创建 Plane 项目或 Outbox 批次 | 绑定并启用自动记录后，无事件时自动调用 |
 
-Demo 不向自动化暴露删除工作项、移动项目、改变负责人等高风险 MCP 工具。首次安装和每次插件升级都必须遵循 Codex 的 Hook 信任流程，人工信任当前版本的五个 Hook；`enabled` 不等于已信任，解析后的命令或版本化缓存路径变化也可能使已有信任变为 `modified`。完成当前版本的信任和项目绑定后，`record_project_events` 与 `acknowledge_no_project_events` 不应逐次要求确认。
+Demo 不向自动化暴露删除工作项、移动项目、改变负责人等高风险 MCP 工具。首次安装和每次插件升级都必须遵循 Codex 的 Hook 信任流程，人工信任当前版本的五个 Hook；`enabled` 不等于已信任，解析后的命令或版本化缓存路径变化也可能使已有信任变为 `modified`。完成当前版本的信任和项目绑定后，`record_project_events` 与 `acknowledge_no_project_events` 不应逐次要求确认；两个绑定偏好工具只在用户明确给出对应指令时调用。
 
 ### 12.2 `record_project_events` 契约
 
@@ -458,7 +475,7 @@ Demo 不向自动化暴露删除工作项、移动项目、改变负责人等高
 
 - 上下文注入失败：继续 Codex 主任务，本轮不自动写入，面板显示异常。
 - Plane 不可用：Outbox 保留事件并后台重试，不阻塞 Codex。
-- Codex 未调用任一 record-or-ack 工具：`Stop` 返回一次 block 兜底提示；完成事件记录或无事件审查确认后，Stop 返回空结果，不再生成新的 hook prompt。
+- Codex 未调用任一 record-or-ack 工具：`Stop` 仍返回空结果，并在绑定且自动捕获开启时写入 `capture_decision_recorded=0`；记录事件或无事件审查后写入 1。未绑定 cwd（包括永久拒绝）同样直接放行；同回合调用过 `list_projects` 时，`binding_prompt_delivered` 按最终消息固定区块写入 0/1，消息缺失或未列项目时不强制返工，交付责任留在 Skill、SessionStart/UserPromptSubmit 和 MCP instructions。两个字段只保存布尔结果，异常时仍 fail-open 且不保存最终消息。
 - Demo 不以第二个模型补偿漏记；漏记率是验证当前方案是否成立的核心指标。
 
 ## 13. Demo 场景
@@ -489,11 +506,12 @@ Demo 在满足以下条件时视为成功：
 6. 同一工作不产生明显重复的 Plane 工作项。
 7. 不覆盖用户手动修改或接管的字段。
 8. 除首次项目绑定或无法唯一解析用户明确指令外，不主动要求用户确认。
-9. Hook、MCP 或 Plane 失败不阻塞 Codex 的主任务。
-10. 健康网络下，MCP 接受的事件在 30 秒内出现在 Plane 和项目面板中。
-11. 每条自动记录都能显示最小来源引用；本地不保存完整对话副本。
-12. Demo 不调用额外的 OpenAI 或 OpenAI-Compatible 语义模型。
-13. 关闭捕获后停止提交新项目事件，Codex 的普通行为保持不变。
+9. 未绑定 cwd 的新 session 首次用户回复主动列出真实 Plane 项目并询问选择；模糊暂缓只在当前 session 生效；明确长期拒绝跨 session 保持安静且可显式恢复。
+10. Hook、MCP 或 Plane 失败不阻塞 Codex 的主任务。
+11. 健康网络下，MCP 接受的事件在 30 秒内出现在 Plane 和项目面板中。
+12. 每条自动记录都能显示最小来源引用；本地不保存完整对话副本。
+13. Demo 不调用额外的 OpenAI 或 OpenAI-Compatible 语义模型。
+14. 关闭捕获后停止提交新项目事件，Codex 的普通行为保持不变。
 
 ## 15. 交付计划
 

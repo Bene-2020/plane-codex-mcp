@@ -25,7 +25,7 @@ MCP process: Fastify BFF + Outbox worker ◄── X-Ambient-Session-Token ─�
 - 正式令牌只保存在 MCP/Service 进程内存。它不经过环境注入、文件、SQLite、Plane、Hook 输出、MCP 全局 instructions、`additionalContext`、普通工具 `content`、HTTP 日志或响应错误文本。
 - `/health` 匿名可用且只返回 `{ "ok": true }`。所有 `/api/*` 统一经过 Fastify `onRequest` hook，读取固定 `X-Ambient-Session-Token`，先做长度检查，再用 `timingSafeEqual` 比较；缺失、长度错误和错误值都返回同一个 401。
 - 每个正式 MCP 进程拥有自己的动态 BFF 端口和新令牌。旧令牌不能访问重启后的新 BFF；Service 不提供匿名 token 揭示端点。
-- Panel 只在内存保存会话。401 时清除 bootstrap、API client 和项目摘要，提示从 Codex 重新初始化，不自动重试。
+- Panel 只在内存保存会话。401 时清除 bootstrap、API client 和项目摘要，并进入统一通用异常卡片，不自动重试或透传会话原因。
 
 ## CORS 与开发降级
 
@@ -33,7 +33,7 @@ MCP process: Fastify BFF + Outbox worker ◄── X-Ambient-Session-Token ─�
 
 生产版 Codex Desktop 还会在沙盒 WebView 的网络请求到达 BFF 之前拦截 `http://localhost` 和 `http://127.0.0.1`；实际 packaged Desktop 的 `allowLocalDevelopment` 为 false，因而 `_meta.ui.csp.connectDomains` 不能放行动态本地 HTTP。生产 Panel 不再直接 fetch localhost，而是通过组件可见的 `ambient_project_panel_request` 调用官方 `App.callServerTool`，MCP 进程再用同一 session token 请求 allowlist 内的 BFF 路径。PNA 响应头对此类“请求未发出”无效；CORS 和 CSP metadata 仍保留给 web-sandbox/独立 4318 开发路径。
 
-浏览器 fetch/CORS 失败时，Panel 显示“无法访问动态 localhost 面板服务”及 CORS 诊断，不显示“未绑定”或要求重新绑定；生产桥接收到 BFF 的 401 仍表示 MCP 进程会话已过期，只有此时提示从 Codex 重新初始化。
+浏览器 fetch/CORS 失败、生产桥接收到 BFF 的 401 或其他首次加载失败时，Panel 统一显示 Plane 风格 720px 异常卡片“项目面板暂时不可用 / 暂时无法加载项目面板，请稍后再试。”，不向用户透传 localhost、CORS、未绑定或会话原因；401 仍由内存会话清理处理。
 
 4318 独立页面是明确隔离的开发/宿主降级：独立 Service 使用固定 `SERVICE_PORT`，开发者显式设置并手工输入当前临时令牌；Vite proxy 转发 `/api` 但不会无条件注入令牌。正式 Panel bootstrap 不从 URL、localStorage、Vite proxy、环境变量或模型上下文读取令牌。
 

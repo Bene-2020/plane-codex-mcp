@@ -28391,7 +28391,14 @@ var sourceEventSchema = external_exports2.object({
   sourceExcerpt: external_exports2.string().trim().min(1).max(1e3),
   observedAt: external_exports2.string().datetime().optional(),
   dueDate: external_exports2.string().date().nullable().optional(),
-  steps: external_exports2.array(external_exports2.object({ title: external_exports2.string().trim().min(1).max(240), summary: external_exports2.string().trim().max(2e3).optional() })).max(20).optional()
+  steps: external_exports2.array(external_exports2.object({ title: external_exports2.string().trim().min(1).max(240), summary: external_exports2.string().trim().max(2e3).optional() })).max(20).optional(),
+  archiveAfterCompletion: external_exports2.boolean().optional()
+}).superRefine((event, context) => {
+  if (!event.archiveAfterCompletion)
+    return;
+  if (event.type !== "completed" || !event.relatedItemId || !event.userDirected) {
+    context.addIssue({ code: "custom", message: "archiveAfterCompletion requires a user-directed completed event with relatedItemId" });
+  }
 });
 var eventBatchSchema = external_exports2.object({
   projectContextId: external_exports2.string().regex(/^project_[0-9]+$/),
@@ -28412,6 +28419,18 @@ var projectContextInputSchema = external_exports2.object({
   planeProjectName: external_exports2.string().trim().min(1).max(240).optional(),
   autoCaptureEnabled: external_exports2.boolean().optional()
 });
+var projectBindingPromptHeader = "\u9879\u76EE\u7ED1\u5B9A\uFF08\u5F85\u786E\u8BA4\uFF09";
+var projectBindingPromptInstruction = "\u8BF7\u9009\u62E9\u4E00\u4E2A\u9879\u76EE\uFF0C\u6216\u56DE\u590D\u2018\u7A0D\u540E\u518D\u8BF4\u2019\u3002";
+var supersededPlanRule = "When the user explicitly overturns, abandons, or replaces a plan, include archiveAfterCompletion=true on a user-directed completed event for every affected plan item and generated step item. This completes each item before archiving it. Never delete the items.";
+var parentChildClosureRule = "Before completing, superseding, or archiving a parent item, inspect every known child item and resolve each child explicitly. Never leave planned or in-progress children behind only because their parent changed.";
+var projectBindingFinalDeliveryRule = [
+  "After calling list_projects, its tool output, commentary, and thought are internal context, not user delivery.",
+  "Before the final reply, last_assistant_message must contain this fixed block with the real returned Plane projects:",
+  `### ${projectBindingPromptHeader}`,
+  "- <\u771F\u5B9E\u8FD4\u56DE\u7684 Plane \u9879\u76EE>",
+  projectBindingPromptInstruction,
+  "Continue the user's main task normally."
+].join("\n");
 function canonicalizeCwd(cwd) {
   const trimmed = cwd.trim();
   if (!trimmed)
@@ -28901,6 +28920,15 @@ var EventCoordinator = class {
           assertClaim?.();
           this.storage.cacheItem(context.id, updated, existing.isSystemCreated);
         }
+        if (event.archiveAfterCompletion) {
+          if (!existing.isSystemCreated)
+            throw new Error("Only system-created items can be archived after completion");
+          assertClaim?.();
+          await this.plane.archiveItem(context, existing.id);
+          assertClaim?.();
+          this.storage.markCacheArchived(existing.id);
+          existing.archived = true;
+        }
         assertClaim?.();
         this.storage.updateSourcePlaneItem(currentEventId, existing.id, claimToken);
         return existing.id;
@@ -29122,10 +29150,122 @@ var SqliteDatabase = class {
   }
 };
 
+// packages/storage/dist/workspace-identity.js
+import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { posix, win32 } from "node:path";
+function pathFlavor(value) {
+  if (process.platform === "win32") {
+    if (win32.isAbsolute(value))
+      return "windows";
+    if (posix.isAbsolute(value))
+      return "posix";
+  } else {
+    if (posix.isAbsolute(value))
+      return "posix";
+    if (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\"))
+      return "windows";
+  }
+  return null;
+}
+function pathApi(flavor) {
+  return flavor === "windows" ? win32 : posix;
+}
+function normalizePath(value, flavor) {
+  const api = pathApi(flavor);
+  const normalized = flavor === "windows" ? win32.normalize(value).replace(/\\/g, "/") : posix.normalize(value);
+  const root = api.parse(normalized).root.replace(/\\/g, "/");
+  if (normalized === root || normalized === `${root}/`)
+    return root;
+  return normalized.replace(/\/+$/, "");
+}
+function normalizeIdentityPath(value, flavor) {
+  const normalized = normalizePath(value, flavor);
+  return flavor === "windows" ? normalized.toLowerCase() : normalized;
+}
+function absolutePath(value, flavor) {
+  if (flavor === "windows")
+    return win32.resolve(value).replace(/\\/g, "/");
+  return posix.resolve(value);
+}
+function realPathOrNormalized(input, flavor) {
+  try {
+    return normalizePath(realpathSync.native(input), flavor);
+  } catch (error40) {
+    if (error40.code !== "ENOENT" && error40.code !== "ENOTDIR")
+      throw error40;
+    return normalizePath(absolutePath(input, flavor), flavor);
+  }
+}
+function gitFailureMeansNotRepository(error40) {
+  if (typeof error40 === "object" && error40 !== null && "code" in error40 && error40.code === "ENOENT")
+    return true;
+  if (typeof error40 !== "object" || error40 === null)
+    return false;
+  const stderr = "stderr" in error40 ? String(error40.stderr ?? "") : "";
+  return /not a git repository|outside a repository|cannot change to/i.test(stderr);
+}
+function gitCommonDirectory(cwd, flavor) {
+  let output;
+  try {
+    output = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    }).trim();
+  } catch (error40) {
+    if (gitFailureMeansNotRepository(error40))
+      return null;
+    throw error40;
+  }
+  if (!output)
+    return null;
+  const api = pathApi(flavor);
+  const outputIsAbsolute = flavor === "windows" ? win32.isAbsolute(output) : posix.isAbsolute(output);
+  const commonPath = outputIsAbsolute ? output : api.resolve(cwd, output);
+  return normalizeIdentityPath(realpathSync.native(commonPath), flavor);
+}
+function isWorkspacePathAncestor(ancestor, candidate) {
+  const ancestorFlavor = pathFlavor(ancestor);
+  const candidateFlavor = pathFlavor(candidate);
+  if (!ancestorFlavor || ancestorFlavor !== candidateFlavor)
+    return false;
+  const normalizedAncestor = normalizeIdentityPath(ancestor, ancestorFlavor);
+  const normalizedCandidate = normalizeIdentityPath(candidate, candidateFlavor);
+  if (normalizedCandidate === normalizedAncestor)
+    return true;
+  if (normalizedAncestor === "/" || normalizedAncestor.endsWith("/"))
+    return normalizedCandidate.startsWith(normalizedAncestor);
+  return normalizedCandidate.startsWith(`${normalizedAncestor}/`);
+}
+function pathFromWorkspaceIdentity(identity) {
+  return identity.startsWith("path:") ? identity.slice("path:".length) : null;
+}
+function resolveWorkspaceIdentity(cwd) {
+  const trimmed = cwd.trim();
+  if (!trimmed)
+    throw new Error("cwd must not be empty");
+  const flavor = pathFlavor(trimmed);
+  if (!flavor)
+    throw new Error("cwd must be an absolute path; identity resolution never uses the process cwd");
+  const canonicalPath = realPathOrNormalized(trimmed, flavor);
+  const commonDir = gitCommonDirectory(canonicalPath, flavor);
+  if (commonDir)
+    return { kind: "git", value: `git:${commonDir}`, canonicalPath };
+  return { kind: "path", value: `path:${normalizeIdentityPath(canonicalPath, flavor)}`, canonicalPath };
+}
+
 // packages/storage/dist/index.js
 function now() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
+var ProjectBindingConflictError = class extends Error {
+  constructor(identity, contexts) {
+    const targets = contexts.map((context) => `${context.plane_base_url.replace(/\/+$/, "")}/${context.workspace_slug}/${context.plane_project_id}`).join(", ");
+    super(`Conflicting Plane project bindings for workspace identity ${identity}: ${targets}. Explicitly choose a binding before continuing.`);
+    this.name = "ProjectBindingConflictError";
+  }
+};
 var Storage = class {
   db;
   leaseMs;
@@ -29143,6 +29283,7 @@ var Storage = class {
       CREATE TABLE IF NOT EXISTS project_contexts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         canonical_cwd TEXT NOT NULL UNIQUE,
+        workspace_identity TEXT,
         plane_base_url TEXT NOT NULL,
         workspace_slug TEXT NOT NULL,
         plane_project_id TEXT NOT NULL,
@@ -29176,6 +29317,13 @@ var Storage = class {
         acknowledged_at TEXT NOT NULL,
         UNIQUE(project_context_id, session_id, turn_id)
       );
+      CREATE TABLE IF NOT EXISTS workspace_binding_preferences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_identity TEXT NOT NULL UNIQUE,
+        preference TEXT NOT NULL CHECK (preference IN ('declined', 'restored')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS source_references (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         batch_id TEXT NOT NULL,
@@ -29200,6 +29348,7 @@ var Storage = class {
         identifier TEXT NOT NULL,
         title TEXT NOT NULL,
         description TEXT,
+        parent_item_id TEXT,
         kind TEXT,
         status TEXT,
         due_date TEXT,
@@ -29222,12 +29371,16 @@ var Storage = class {
         turn_id TEXT,
         hook_event_name TEXT NOT NULL,
         record_tool_called INTEGER NOT NULL DEFAULT 0,
+        binding_list_tool_called INTEGER NOT NULL DEFAULT 0,
+        capture_decision_recorded INTEGER,
+        binding_prompt_delivered INTEGER,
         hook_error TEXT,
         started_at TEXT NOT NULL,
         ended_at TEXT,
         UNIQUE(session_id, turn_id, hook_event_name)
       );
     `);
+    this.ensureColumn("project_contexts", "workspace_identity", "TEXT");
     this.ensureColumn("outbox_batches", "next_attempt_at", "TEXT");
     this.ensureColumn("outbox_batches", "synced_at", "TEXT");
     this.ensureColumn("outbox_batches", "claim_version", "INTEGER NOT NULL DEFAULT 0");
@@ -29238,45 +29391,185 @@ var Storage = class {
     this.ensureColumn("source_references", "projection_error", "TEXT");
     this.ensureColumn("source_references", "projected_at", "TEXT");
     this.ensureColumn("source_references", "remote_source_id", "TEXT");
+    this.ensureColumn("plane_item_cache", "parent_item_id", "TEXT");
+    this.ensureColumn("turn_audits", "binding_list_tool_called", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("turn_audits", "capture_decision_recorded", "INTEGER");
+    this.ensureColumn("turn_audits", "binding_prompt_delivered", "INTEGER");
     this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_context_workspace_identity ON project_contexts(workspace_identity);
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_batches(status, next_attempt_at, lease_until);
       CREATE INDEX IF NOT EXISTS idx_no_project_event_reviews_turn ON no_project_event_reviews(project_context_id, session_id, turn_id);
+      CREATE INDEX IF NOT EXISTS idx_binding_preferences_identity ON workspace_binding_preferences(workspace_identity);
       CREATE INDEX IF NOT EXISTS idx_source_batch ON source_references(batch_id);
       CREATE INDEX IF NOT EXISTS idx_source_event ON source_references(event_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_source_remote ON source_references(remote_source_id);
       CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
       CREATE INDEX IF NOT EXISTS idx_cache_context ON plane_item_cache(project_context_id, archived, updated_at);
     `);
+    this.migrateWorkspaceIdentities();
   }
   ensureColumn(table, column, definition) {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all();
     if (!columns.some((item) => item.name === column))
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+  migrateWorkspaceIdentities() {
+    const rows = this.db.prepare("SELECT id, canonical_cwd FROM project_contexts WHERE workspace_identity IS NULL OR workspace_identity='' ORDER BY id").all();
+    const identities = rows.map((row) => {
+      try {
+        return { id: row.id, identity: resolveWorkspaceIdentity(row.canonical_cwd).value };
+      } catch (error40) {
+        if (error40 instanceof Error && error40.message.startsWith("cwd must be an absolute path"))
+          return { id: row.id, identity: `legacy:${canonicalizeCwd(row.canonical_cwd)}` };
+        throw error40;
+      }
+    });
+    const update = this.db.prepare("UPDATE project_contexts SET workspace_identity=? WHERE id=? AND (workspace_identity IS NULL OR workspace_identity='')");
+    for (const row of identities)
+      update.run(row.identity, row.id);
+  }
   close() {
     this.db.close();
   }
+  contextRowsForIdentity(identity) {
+    return this.db.prepare("SELECT * FROM project_contexts WHERE workspace_identity=? ORDER BY id").all(identity);
+  }
+  planeTarget(row) {
+    return `${row.plane_base_url.replace(/\/+$/, "")}/${row.workspace_slug}/${row.plane_project_id}`;
+  }
+  contextForRows(identity, rows) {
+    if (!rows.length)
+      return null;
+    const first = rows[0];
+    const hasConflict = rows.some((row) => this.planeTarget(row) !== this.planeTarget(first));
+    if (hasConflict)
+      throw new ProjectBindingConflictError(identity, rows);
+    return first;
+  }
+  contextForIdentity(identity) {
+    return this.contextForRows(identity, this.contextRowsForIdentity(identity));
+  }
+  pathIdentityCandidates(candidatePath) {
+    const rows = this.db.prepare("SELECT DISTINCT workspace_identity FROM project_contexts WHERE workspace_identity LIKE 'path:%'").all();
+    return rows.map((row) => row.workspace_identity ?? "").filter((identity) => {
+      const path = pathFromWorkspaceIdentity(identity);
+      return path ? isWorkspacePathAncestor(path, candidatePath) : false;
+    }).sort((left, right) => (pathFromWorkspaceIdentity(right)?.length ?? 0) - (pathFromWorkspaceIdentity(left)?.length ?? 0));
+  }
+  inheritedPathContextRows(candidatePath) {
+    for (const identity of this.pathIdentityCandidates(candidatePath)) {
+      const rows = this.contextRowsForIdentity(identity);
+      if (rows.length)
+        return rows;
+    }
+    return [];
+  }
+  bindingPreferenceRowForIdentity(identity) {
+    const exact = this.db.prepare("SELECT * FROM workspace_binding_preferences WHERE workspace_identity=?").get(identity.value);
+    if (exact)
+      return exact;
+    if (identity.kind !== "path")
+      return null;
+    const rows = this.db.prepare("SELECT * FROM workspace_binding_preferences WHERE workspace_identity LIKE 'path:%'").all();
+    return rows.filter((row) => {
+      const path = pathFromWorkspaceIdentity(row.workspace_identity);
+      return path ? isWorkspacePathAncestor(path, identity.canonicalPath) : false;
+    }).sort((left, right) => (pathFromWorkspaceIdentity(right.workspace_identity)?.length ?? 0) - (pathFromWorkspaceIdentity(left.workspace_identity)?.length ?? 0))[0] ?? null;
+  }
+  bindingPreferenceFromRow(row) {
+    return { id: row.id, workspaceIdentity: row.workspace_identity, preference: row.preference, createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+  writeBindingPreference(identity, preference) {
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO workspace_binding_preferences (workspace_identity, preference, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(workspace_identity) DO UPDATE SET preference=excluded.preference, updated_at=excluded.updated_at`).run(identity, preference, timestamp, timestamp);
+    const row = this.db.prepare("SELECT * FROM workspace_binding_preferences WHERE workspace_identity=?").get(identity);
+    if (!row)
+      throw new Error("Binding preference was not persisted");
+    return row;
+  }
+  clearBindingPreference(identity) {
+    const preference = this.bindingPreferenceRowForIdentity(identity);
+    if (preference?.preference === "declined")
+      this.writeBindingPreference(identity.value, "restored");
+  }
+  getBindingPreference(cwd) {
+    const preference = this.bindingPreferenceRowForIdentity(resolveWorkspaceIdentity(cwd));
+    return preference?.preference === "declined" ? this.bindingPreferenceFromRow(preference) : null;
+  }
+  declineBinding(cwd) {
+    const identity = resolveWorkspaceIdentity(cwd);
+    const inherited = this.bindingPreferenceRowForIdentity(identity);
+    if (inherited?.preference === "declined" && inherited.workspace_identity !== identity.value)
+      return this.bindingPreferenceFromRow(inherited);
+    const row = this.writeBindingPreference(identity.value, "declined");
+    return this.bindingPreferenceFromRow(row);
+  }
+  restoreBinding(cwd) {
+    const identity = resolveWorkspaceIdentity(cwd);
+    const preference = this.bindingPreferenceRowForIdentity(identity);
+    if (preference?.preference !== "declined")
+      return { restored: false, workspaceIdentity: identity.value };
+    this.writeBindingPreference(identity.value, "restored");
+    return { restored: true, workspaceIdentity: identity.value };
+  }
   getContextByCwd(cwd) {
-    const row = this.db.prepare("SELECT * FROM project_contexts WHERE canonical_cwd = ?").get(canonicalizeCwd(cwd));
-    return row ? this.contextFromRow(row) : null;
+    const legacy = this.db.prepare("SELECT * FROM project_contexts WHERE canonical_cwd=? AND (workspace_identity IS NULL OR workspace_identity LIKE 'legacy:%')").get(canonicalizeCwd(cwd));
+    if (legacy)
+      return this.contextFromRow(legacy);
+    const identity = resolveWorkspaceIdentity(cwd);
+    const exact = this.contextForIdentity(identity.value);
+    if (exact)
+      return this.contextFromRow(exact);
+    if (identity.kind !== "path")
+      return null;
+    for (const candidateIdentity of this.pathIdentityCandidates(identity.canonicalPath)) {
+      const candidate = this.contextForIdentity(candidateIdentity);
+      if (candidate)
+        return this.contextFromRow(candidate);
+    }
+    return null;
   }
   getContext(id) {
     const row = this.db.prepare("SELECT * FROM project_contexts WHERE 'project_' || id = ?").get(id);
     return row ? this.contextFromRow(row) : null;
   }
   bindContext(input, replace = false) {
-    const canonicalCwd = canonicalizeCwd(input.cwd);
-    const existing = this.getContextByCwd(canonicalCwd);
-    if (existing && !replace)
-      throw new Error(`A project context already exists for ${canonicalCwd}`);
-    const timestamp = now();
-    if (existing) {
-      this.db.prepare(`UPDATE project_contexts SET plane_base_url=?, workspace_slug=?, plane_project_id=?, plane_project_name=?, auto_capture_enabled=?, updated_at=? WHERE id=?`).run(input.planeBaseUrl, input.workspaceSlug, input.planeProjectId, input.planeProjectName ?? null, input.autoCaptureEnabled === false ? 0 : 1, timestamp, Number(existing.id.replace("project_", "")));
-      return this.getContextByCwd(canonicalCwd);
+    const identity = resolveWorkspaceIdentity(input.cwd);
+    const canonicalCwd = identity.canonicalPath;
+    let rows = this.contextRowsForIdentity(identity.value);
+    if (rows.length && !replace) {
+      const existing = this.contextForRows(identity.value, rows);
+      const requested = `${input.planeBaseUrl.replace(/\/+$/, "")}/${input.workspaceSlug}/${input.planeProjectId}`;
+      const bound = this.planeTarget(existing);
+      if (requested !== bound)
+        throw new Error(`Conflicting Plane project binding for workspace identity ${identity.value}: already bound to ${bound}, requested ${requested}. Use change_binding only after the user explicitly chooses the new project.`);
+      this.clearBindingPreference(identity);
+      return this.contextFromRow(existing);
     }
-    const result = this.db.prepare(`INSERT INTO project_contexts (canonical_cwd, plane_base_url, workspace_slug, plane_project_id, plane_project_name, auto_capture_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(canonicalCwd, input.planeBaseUrl, input.workspaceSlug, input.planeProjectId, input.planeProjectName ?? null, input.autoCaptureEnabled === false ? 0 : 1, timestamp, timestamp);
-    return this.getContextByCwd(canonicalCwd);
+    if (replace && !rows.length && identity.kind === "path") {
+      rows = this.inheritedPathContextRows(canonicalCwd);
+      if (!rows.length)
+        throw new Error(`No project binding exists for ${canonicalCwd}`);
+    }
+    if (replace && !rows.length && identity.kind === "git")
+      throw new Error(`No project binding exists for ${canonicalCwd}`);
+    const timestamp = now();
+    if (rows.length) {
+      const update = this.db.prepare(`UPDATE project_contexts SET plane_base_url=?, workspace_slug=?, plane_project_id=?, plane_project_name=?, auto_capture_enabled=?, updated_at=? WHERE id=?`);
+      const transaction = this.db.transaction(() => {
+        for (const row of rows)
+          update.run(input.planeBaseUrl, input.workspaceSlug, input.planeProjectId, input.planeProjectName ?? null, input.autoCaptureEnabled === false ? 0 : 1, timestamp, row.id);
+      });
+      transaction.immediate();
+      this.clearBindingPreference(identity);
+      return this.getContext(`project_${rows[0].id}`);
+    }
+    const result = this.db.prepare(`INSERT INTO project_contexts (canonical_cwd, workspace_identity, plane_base_url, workspace_slug, plane_project_id, plane_project_name, auto_capture_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(canonicalCwd, identity.value, input.planeBaseUrl, input.workspaceSlug, input.planeProjectId, input.planeProjectName ?? null, input.autoCaptureEnabled === false ? 0 : 1, timestamp, timestamp);
+    this.clearBindingPreference(identity);
+    return this.getContext(`project_${Number(result.lastInsertRowid)}`);
   }
   setAutoCapture(contextId, enabled) {
     const result = this.db.prepare("UPDATE project_contexts SET auto_capture_enabled=?, updated_at=? WHERE 'project_' || id=?").run(enabled ? 1 : 0, now(), contextId);
@@ -29420,21 +29713,21 @@ var Storage = class {
   }
   cacheItem(contextId, item, isSystemCreated = item.isSystemCreated ?? false) {
     const current = this.getCachedItem(item.id);
-    this.db.prepare(`INSERT INTO plane_item_cache (plane_item_id, project_context_id, identifier, title, description, kind, status, due_date, url, is_system_created, updated_at, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(plane_item_id) DO UPDATE SET identifier=excluded.identifier,title=excluded.title,description=excluded.description,kind=excluded.kind,status=excluded.status,due_date=excluded.due_date,url=excluded.url,updated_at=excluded.updated_at,archived=excluded.archived`).run(item.id, contextId, item.identifier, item.title, item.description ?? null, item.kind ?? null, item.status ?? item.stateName ?? null, item.dueDate ?? null, item.url ?? null, current?.isSystemCreated ?? isSystemCreated ? 1 : 0, item.updatedAt ?? now(), item.archived ? 1 : 0);
+    this.db.prepare(`INSERT INTO plane_item_cache (plane_item_id, project_context_id, identifier, title, description, parent_item_id, kind, status, due_date, url, is_system_created, updated_at, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(plane_item_id) DO UPDATE SET identifier=excluded.identifier,title=excluded.title,description=excluded.description,parent_item_id=excluded.parent_item_id,kind=excluded.kind,status=excluded.status,due_date=excluded.due_date,url=excluded.url,updated_at=excluded.updated_at,archived=excluded.archived`).run(item.id, contextId, item.identifier, item.title, item.description ?? null, item.parentId ?? null, item.kind ?? null, item.status ?? item.stateName ?? null, item.dueDate ?? null, item.url ?? null, current?.isSystemCreated ?? isSystemCreated ? 1 : 0, item.updatedAt ?? now(), item.archived ? 1 : 0);
   }
   getCachedItem(planeItemId) {
     const row = this.db.prepare("SELECT * FROM plane_item_cache WHERE plane_item_id=?").get(planeItemId);
     if (!row)
       return null;
-    return { id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? void 0, kind: row.kind ?? void 0, status: row.status ?? void 0, dueDate: row.due_date, url: row.url ?? void 0, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at, contextId: row.project_context_id };
+    return { id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? void 0, parentId: row.parent_item_id ?? void 0, kind: row.kind ?? void 0, status: row.status ?? void 0, dueDate: row.due_date, url: row.url ?? void 0, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at, contextId: row.project_context_id };
   }
   listCachedItems(contextId) {
     const rows = this.db.prepare("SELECT * FROM plane_item_cache WHERE project_context_id=? AND archived=0 ORDER BY updated_at DESC").all(contextId);
-    return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? void 0, kind: row.kind ?? void 0, status: row.status ?? void 0, dueDate: row.due_date, url: row.url ?? void 0, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at }));
+    return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? void 0, parentId: row.parent_item_id ?? void 0, kind: row.kind ?? void 0, status: row.status ?? void 0, dueDate: row.due_date, url: row.url ?? void 0, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at }));
   }
   listAllCachedItems(contextId) {
     const rows = this.db.prepare("SELECT * FROM plane_item_cache WHERE project_context_id=? ORDER BY archived, updated_at DESC").all(contextId);
-    return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? void 0, kind: row.kind ?? void 0, status: row.status ?? void 0, dueDate: row.due_date, url: row.url ?? void 0, isSystemCreated: Boolean(row.is_system_created), updatedAt: row.updated_at, archived: Boolean(row.archived) }));
+    return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? void 0, parentId: row.parent_item_id ?? void 0, kind: row.kind ?? void 0, status: row.status ?? void 0, dueDate: row.due_date, url: row.url ?? void 0, isSystemCreated: Boolean(row.is_system_created), updatedAt: row.updated_at, archived: Boolean(row.archived) }));
   }
   markCacheArchived(itemId, archived = true) {
     this.db.prepare("UPDATE plane_item_cache SET archived=?, updated_at=? WHERE plane_item_id=?").run(archived ? 1 : 0, now(), itemId);
@@ -29452,10 +29745,26 @@ var Storage = class {
   }
   auditHook(input) {
     const turnId = input.turnId ?? null;
-    this.db.prepare(`INSERT INTO turn_audits (session_id,turn_id,hook_event_name,record_tool_called,hook_error,started_at,ended_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(session_id,turn_id,hook_event_name) DO UPDATE SET record_tool_called=MAX(record_tool_called,excluded.record_tool_called),hook_error=COALESCE(excluded.hook_error,hook_error),ended_at=COALESCE(excluded.ended_at,ended_at)`).run(input.sessionId, turnId, input.eventName, input.toolCalled ? 1 : 0, input.error ?? null, now(), input.ended ? now() : null);
+    const captureDecisionRecorded = input.captureDecisionRecorded === void 0 || input.captureDecisionRecorded === null ? null : input.captureDecisionRecorded ? 1 : 0;
+    const bindingPromptDelivered = input.bindingPromptDelivered === void 0 || input.bindingPromptDelivered === null ? null : input.bindingPromptDelivered ? 1 : 0;
+    this.db.prepare(`INSERT INTO turn_audits (session_id,turn_id,hook_event_name,record_tool_called,binding_list_tool_called,capture_decision_recorded,binding_prompt_delivered,hook_error,started_at,ended_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(session_id,turn_id,hook_event_name) DO UPDATE SET
+        record_tool_called=MAX(record_tool_called,excluded.record_tool_called),
+        binding_list_tool_called=MAX(binding_list_tool_called,excluded.binding_list_tool_called),
+        capture_decision_recorded=COALESCE(excluded.capture_decision_recorded,capture_decision_recorded),
+        binding_prompt_delivered=COALESCE(excluded.binding_prompt_delivered,binding_prompt_delivered),
+        hook_error=COALESCE(excluded.hook_error,hook_error),
+        ended_at=COALESCE(excluded.ended_at,ended_at)`).run(input.sessionId, turnId, input.eventName, input.toolCalled ? 1 : 0, input.eventName === "PostToolUse" && input.bindingListToolCalled ? 1 : 0, captureDecisionRecorded, bindingPromptDelivered, input.error ?? null, now(), input.ended ? now() : null);
   }
   listAudits(sessionId) {
     return sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all();
+  }
+  hasHookAudit(sessionId, eventName) {
+    return Boolean(this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND hook_event_name=? LIMIT 1").get(sessionId, eventName));
+  }
+  didCallListProjects(sessionId, turnId) {
+    return Boolean(this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND binding_list_tool_called=1 LIMIT 1").get(sessionId, turnId));
   }
   didRecordProjectEvents(projectContextId, sessionId, turnId) {
     const batch = this.db.prepare("SELECT 1 FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(projectContextId, sessionId, turnId);
@@ -29546,7 +29855,7 @@ var Storage = class {
     return result.changes === 1;
   }
   contextFromRow(row) {
-    return { id: `project_${row.id}`, canonicalCwd: row.canonical_cwd, cwd: row.canonical_cwd, planeBaseUrl: row.plane_base_url, workspaceSlug: row.workspace_slug, planeProjectId: row.plane_project_id, planeProjectName: row.plane_project_name ?? void 0, autoCaptureEnabled: Boolean(row.auto_capture_enabled), createdAt: row.created_at, updatedAt: row.updated_at };
+    return { id: `project_${row.id}`, canonicalCwd: row.canonical_cwd, cwd: row.canonical_cwd, workspaceIdentity: row.workspace_identity ?? void 0, planeBaseUrl: row.plane_base_url, workspaceSlug: row.workspace_slug, planeProjectId: row.plane_project_id, planeProjectName: row.plane_project_name ?? void 0, autoCaptureEnabled: Boolean(row.auto_capture_enabled), createdAt: row.created_at, updatedAt: row.updated_at };
   }
 };
 
@@ -29690,7 +29999,9 @@ function createService(args = {}) {
   app.get("/health", async () => ({ ok: true }));
   app.get("/api/context", async (request, reply) => {
     try {
-      return storage.getContextByCwd(request.query.cwd ?? process.cwd());
+      if (!request.query.cwd?.trim())
+        throw new Error("cwd is required; identity resolution never uses the service process cwd");
+      return storage.getContextByCwd(request.query.cwd);
     } catch (error40) {
       return reply.code(400).send(jsonError(error40));
     }
@@ -29852,6 +30163,7 @@ var bindingSchema = external_exports2.object({
   planeProjectName: external_exports2.string().trim().min(1).max(240).optional(),
   autoCaptureEnabled: external_exports2.boolean().optional()
 });
+var cwdSchema = external_exports2.object({ cwd: external_exports2.string().trim().min(1) });
 var bindInput = (input) => ({ ...input, planeBaseUrl: input.planeBaseUrl ?? process.env.PLANE_BASE_URL ?? "https://api.plane.so" });
 function createMcpServer(dependencies = {}) {
   const plane = dependencies.plane ?? createPlaneAdapter();
@@ -29866,7 +30178,7 @@ function createMcpServer(dependencies = {}) {
     name: "ambient-project",
     version: "0.1.0"
   }, {
-    instructions: "Maintain project context quietly. Use list_projects only to help a user choose a project, bind only after explicit choice, and before the final reply either record meaningful events in one non-empty batch or acknowledge that this turn has no project events. Do not expose Plane CRUD, delete items, reassign people, or use a second semantic model."
+    instructions: `Maintain project context quietly. For an unbound cwd, follow the onboarding phase injected by SessionStart/UserPromptSubmit and the visible conversation: if no actual onboarding question has appeared yet, immediately call list_projects, show the real returned Plane projects, and ask the user to choose; if the current user message explicitly says do not bind or do not ask again, call decline_project_binding without list_projects; if it only says later, skip, or continues another task, defer for this session without a preference or repeated question; if it explicitly asks to restore or bind, call restore_project_binding if needed, then list projects. When get_binding returns null for the cwd, do not call open_project_panel; call it only after get_binding, bind_project, or change_binding returns a real project context. Do not guess from a Codex Project name, directory name, Git remote, or conversation, and call bind_project only after an explicit choice. If list_projects is called, ${projectBindingFinalDeliveryRule} Before the final reply for a bound, auto-capture-enabled turn, decide whether the user's request, plan, tool results, or conclusion created a meaningful project event; if yes, record it in one non-empty batch, otherwise acknowledge that the turn has no project events. ${supersededPlanRule} ${parentChildClosureRule} The Stop Hook only audits the turn and always allows it to end; it never blocks, injects a follow-up prompt, or asks for a second reply. Do not expose Plane CRUD, delete items, reassign people, save user wording, or use a second semantic model.`
   });
   const panelConnectDomains = panelSession ? [new URL(panelSession.serviceBaseUrl).origin] : [];
   N3(server, "ambient-project-panel", PANEL_RESOURCE_URI, {
@@ -29890,13 +30202,13 @@ function createMcpServer(dependencies = {}) {
   }, async () => text(await plane.listProjects()));
   server.registerTool("get_binding", {
     title: "Get project binding",
-    description: "Get the project context bound to a normalized cwd.",
+    description: "Get the project context bound to an explicit cwd using the shared workspace identity resolver.",
     inputSchema: external_exports2.object({ cwd: external_exports2.string().min(1) }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ cwd }) => text(storage.getContextByCwd(cwd)));
   K3(server, "open_project_panel", {
     title: "Open project panel",
-    description: "Open the Ambient project panel for an explicitly identified project context.",
+    description: "Open the Ambient project panel only for a project context returned by get_binding, bind_project, or change_binding; after get_binding returns null, do not call this tool.",
     inputSchema: {
       projectContextId: external_exports2.string().regex(/^project_[0-9]+$/).optional(),
       cwd: external_exports2.string().trim().min(1).optional()
@@ -29955,6 +30267,18 @@ function createMcpServer(dependencies = {}) {
     inputSchema: bindingSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async (input) => text(storage.bindContext(bindInput(input), true)));
+  server.registerTool("decline_project_binding", {
+    title: "Decline project binding",
+    description: "Persist or reuse a do-not-ask-again preference for the effective stable workspace identity only after the user explicitly gives a long-term refusal.",
+    inputSchema: cwdSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ cwd }) => text(storage.declineBinding(cwd)));
+  server.registerTool("restore_project_binding", {
+    title: "Restore project binding onboarding",
+    description: "Restore the current stable workspace identity's project-selection flow only after the user explicitly asks to resume; inherited path refusals use an exact local override.",
+    inputSchema: cwdSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ cwd }) => text(storage.restoreBinding(cwd)));
   server.registerTool("record_project_events", {
     title: "Record project events",
     description: "Reliably accept one non-empty batch of meaningful project events for the current work turn. Plane synchronization is asynchronous.",

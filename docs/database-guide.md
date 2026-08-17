@@ -65,9 +65,10 @@ Codex MCP  ─┘        │                                  │
 
 各表的职责：
 
-- `project_contexts`：规范化工作目录到 Plane 项目的本地关联；`project_<rowid>` 只是该数据库内的 ID。
+- `project_contexts`：稳定工作区身份到 Plane 项目的本地关联；`workspace_identity` 使用可读的 `git:<真实 common dir>` 或 `path:<真实绑定根路径>`，`canonical_cwd` 保留为展示和旧绑定兼容字段；`project_<rowid>` 只是该数据库内的 ID。
 - `outbox_batches`：按 `project_context_id + session_id + turn_id` 幂等保存等待或已经完成的投射批次。
 - `no_project_event_reviews`：记录某工作回合已审查但没有项目事件，不进入 Outbox。
+- `workspace_binding_preferences`：独立保存用户明确给出的稳定 workspace identity 绑定偏好；只存 `declined` 或可读的精确 `restored` override，以及自增主键/时间戳，不保存用户原话，不创建 `project_contexts` 伪绑定。
 - `source_references`：来源事件与 Plane 工作项/活动的追踪关系及投射状态。
 
 `source_references.event_id` 是当前 SQLite 内部定位键（`event_<batch rowid>_<index>`）；`remote_source_id` 才能写入 Plane，其值由 `project_context_id + session_id + turn_id + event index` 组成。不要把本地自增 rowid 派生的 `event_id` 当成跨数据库幂等键。
@@ -88,12 +89,22 @@ PLANE_API_KEY=... pnpm migrate:source-ids -- \
 ```
 
 脚本不删除 Plane 工作项、评论或 Outbox 内容，只修改来源标记与 `source_references.remote_source_id`。不要在 Codex Desktop 或 sidecar 仍写入数据库时执行；正式库执行前必须先看 dry-run 输出。
-- `plane_item_cache`：Panel 和 Hook 使用的 Plane 精简缓存，不是真相源。
+- `plane_item_cache`：Panel 和 Hook 使用的 Plane 精简缓存，不是真相源；保存 `parent_item_id` 以便 Hook 注入明确的父子关系。
 - `field_ownership`：记录系统或用户对受管理 Plane 字段的所有权。
-- `turn_audits`：Hook 生命周期、工具调用及 Hook 错误审计。
+- `turn_audits`：Hook 生命周期、工具调用及 Hook 错误审计。`record_tool_called` 只表示精确调用过 `mcp__ambient_project__record_project_events`；`binding_list_tool_called` 是可读布尔标记，只在同一 `session_id + turn_id` 的 `PostToolUse` 聚合中由精确的 `mcp__ambient_project__list_projects` 置为 1。Stop 行的 `capture_decision_recorded` 只在 cwd 已绑定且自动捕获开启时写入：同回合存在 Outbox 批次或无事件审查为 1，否则为 0；其他场景为 `NULL`。Stop 行的 `binding_prompt_delivered` 只在 cwd 未绑定且同回合已调用 `list_projects` 时写入：内存中的最终消息满足固定绑定区块为 1，否则为 0；其他场景为 `NULL`。两个字段只保存布尔结果，不保存 `last_assistant_message`、用户原文或秘密内容。
 - `schema_migrations`：预留的迁移版本表；当前实际迁移主要由 `CREATE TABLE IF NOT EXISTS` 和 `ensureColumn` 在 `Storage` 打开时执行。
 
+旧库升级时保留 `project_contexts` 的自增 ID 及所有关联行，只为 `workspace_identity` 为空的旧上下文按其 `canonical_cwd` 回填身份。旧行先读出，身份解析完成后才写回数据库，不在事务内启动 Git 子进程；重复打开数据库不会重复写入或合并上下文。多个旧行解析到同一身份时保留全部行，由绑定查询报告不同 Plane 项目的冲突。
+
 两个数据库中的自增 ID 各自独立，所以不同文件中的 `project_1`、`batch_1` 或 `event_1_0` 没有跨库同一性。不要复制某一行或仅凭同名 ID 合并数据。
+
+### 未绑定目录的持久偏好
+
+`workspace_binding_preferences.workspace_identity` 使用与 `project_contexts` 相同的稳定身份解析：Git 仓库根目录、子目录、symlink 和 linked worktree 共享真实 `git common dir`；独立 clone 使用不同身份。非 Git 路径按真实路径保存，并对未绑定查询采用最长祖先匹配。偏好表有独立的 `INTEGER PRIMARY KEY AUTOINCREMENT`，唯一约束只落在可读 identity 上，不使用哈希或 UUID。
+
+模糊的“之后再说”、忽略首次询问和继续工作不会写入该表；它们只由当前对话判断为本 session 暂缓。只有明确的长期“不要绑定/以后不要再问”指令才通过 `decline_project_binding` 写入 `declined`。非 Git 的 root 拒绝由 child/sibling 通过最长祖先继承；对已继承拒绝再次 `declineBinding(child)` 直接复用祖先记录，不插入 child 行。`restore_project_binding(child)` 或成功的显式 `bind_project(child)` 写入 child 的精确 `restored` override，所以 child 恢复后 `getBindingPreference(child)` 为空而 sibling 仍看到 root 的 `declined`；只有显式恢复或绑定 root 才解除整个 root 下面没有更具体 override 的路径。Hook 仍然运行；Stop 只写结束审计，始终允许回合结束，不对任何 cwd 阻断 record/ack 或绑定交付。
+
+调用 `list_projects` 后，工具输出、commentary 和思考过程不是最终交付；Skill、SessionStart/UserPromptSubmit 与 MCP instructions 负责在最终答复前提醒当前 Codex 交付固定绑定区块。Stop 只在内存中读取当前 context、同回合工具审计、record/ack 状态和 `last_assistant_message`，将 `capture_decision_recorded`/`binding_prompt_delivered` 布尔结果写入 Stop 审计行，始终返回空响应并允许回合结束，不补问、不注入二次提示，也不保存最终消息。`binding_list_tool_called` 仍准确记录同回合是否调用过精确的 `list_projects`；旧库打开时用 `ensureColumn` 幂等添加两个可空结果列，不改动已有审计行。
 
 ## 2026-08-13 只读盘点
 
