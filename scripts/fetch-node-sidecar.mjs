@@ -36,15 +36,7 @@ async function extractArchive(archivePath, extractedRoot, target) {
 
   if (process.platform === "win32") {
     const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
-    const powershell = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    await execFile(powershell, [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
-      archivePath,
-      extractedRoot,
-    ]);
+    await execFile(join(systemRoot, "System32", "tar.exe"), ["-xf", archivePath, "-C", extractedRoot]);
     return;
   }
 
