@@ -5,6 +5,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { ensureNodeSidecar } from "./fetch-node-sidecar.mjs";
+import { targetHooksConfig, targetMcpConfig } from "./plugin-config.mjs";
 import {
   getNodeSidecarTarget,
   getNodeSidecarTargetForHost,
@@ -140,32 +141,6 @@ async function copyPluginScaffold(destinationPluginRoot) {
   }
 }
 
-function targetMcpConfig(target) {
-  return {
-    mcpServers: {
-      "ambient-project": {
-        command: target.launcherRelativePath,
-        args: ["runtime/mcp/index.js"],
-        cwd: ".",
-        env_vars: ["AMBIENT_DB_PATH", "PLANE_MODE", "PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"],
-      },
-    },
-  };
-}
-
-function targetHooksConfig(target) {
-  const command = `"${"${PLUGIN_ROOT}"}/${target.launcherRelativePath}" "${"${PLUGIN_ROOT}"}/runtime/hook-adapter/index.js"`;
-  return {
-    hooks: Object.fromEntries(Object.entries(sourceHooks.hooks).map(([eventName, groups]) => [
-      eventName,
-      groups.map((group) => ({
-        ...group,
-        hooks: group.hooks.map((hook) => ({ ...hook, command })),
-      })),
-    ])),
-  };
-}
-
 async function packageTarget(target, destinationPluginRoot) {
   const inPlace = resolve(destinationPluginRoot) === resolve(sourcePluginRoot);
   if (inPlace) {
@@ -216,7 +191,7 @@ async function packageTarget(target, destinationPluginRoot) {
     sqlite: "node:sqlite",
   }, null, 2)}\n`);
   await writeFile(join(destinationPluginRoot, ".mcp.json"), `${JSON.stringify(targetMcpConfig(target), null, 2)}\n`);
-  await writeFile(join(destinationPluginRoot, "hooks", "hooks.json"), `${JSON.stringify(targetHooksConfig(target), null, 2)}\n`);
+  await writeFile(join(destinationPluginRoot, "hooks", "hooks.json"), `${JSON.stringify(targetHooksConfig(sourceHooks, target), null, 2)}\n`);
   await normalizeRuntimeText(runtimeRoot);
 
   return {

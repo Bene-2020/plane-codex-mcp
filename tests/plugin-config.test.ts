@@ -2,9 +2,9 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { getExtractedNodePaths, getNodeSidecarTarget, NODE_SIDECAR_TARGET_IDS } from "../scripts/node-sidecar-targets.mjs";
+import { PLUGIN_ENV_VARS, targetHooksConfig, targetMcpConfig } from "../scripts/plugin-config.mjs";
 
 const pluginRoot = fileURLToPath(new URL("../plugin/", import.meta.url));
-const expectedHookCommand = '"${PLUGIN_ROOT}/runtime/bin/ambient-node" "${PLUGIN_ROOT}/runtime/hook-adapter/index.js"';
 
 interface HookGroup { hooks: Array<{ type: string; command: string }> }
 
@@ -14,20 +14,25 @@ describe("plugin runtime paths", () => {
     expect(manifest).not.toHaveProperty("hooks");
     expect(manifest).toMatchObject({ name: "ambient-project-layer", version: "0.1.0", author: { name: "Wenyan Wei" }, interface: { displayName: "Ambient Project Layer", developerName: "Wenyan Wei" } });
 
-    const mcp = JSON.parse(await readFile(`${pluginRoot}/.mcp.json`, "utf8")) as { mcpServers: Record<string, { args: string[]; cwd: string; env?: Record<string, string>; env_vars: string[] }> };
-    expect(mcp.mcpServers["ambient-project"]?.command).toBe("runtime/bin/ambient-node");
-    expect(mcp.mcpServers["ambient-project"]?.args).toEqual(["runtime/mcp/index.js"]);
-    expect(mcp.mcpServers["ambient-project"]?.cwd).toBe(".");
-    expect(mcp.mcpServers["ambient-project"]?.env).toBeUndefined();
-    expect(mcp.mcpServers["ambient-project"]?.env_vars).toEqual(["AMBIENT_DB_PATH", "PLANE_MODE", "PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"]);
+    const sourceHooks = JSON.parse(await readFile(`${pluginRoot}/hooks/hooks.json`, "utf8")) as { hooks: Record<string, HookGroup[]> };
+    for (const targetId of NODE_SIDECAR_TARGET_IDS) {
+      const target = getNodeSidecarTarget(targetId);
+      const mcp = targetMcpConfig(target) as { mcpServers: Record<string, { command: string; args: string[]; cwd: string; env?: Record<string, string>; env_vars: string[] }> };
+      expect(mcp.mcpServers["ambient-project"]?.command).toBe(target.launcherRelativePath);
+      expect(mcp.mcpServers["ambient-project"]?.args).toEqual(["runtime/mcp/index.js"]);
+      expect(mcp.mcpServers["ambient-project"]?.cwd).toBe(".");
+      expect(mcp.mcpServers["ambient-project"]?.env).toBeUndefined();
+      expect(mcp.mcpServers["ambient-project"]?.env_vars).toEqual(PLUGIN_ENV_VARS);
 
-    const hooks = JSON.parse(await readFile(`${pluginRoot}/hooks/hooks.json`, "utf8")) as { hooks: Record<string, HookGroup[]> };
-    const handlers = Object.values(hooks.hooks).flatMap((groups) => groups.flatMap((group) => group.hooks));
-    expect(handlers).toHaveLength(5);
-    expect(handlers.map((handler) => handler.command)).toEqual(new Array(5).fill(expectedHookCommand));
-    expect(hooks.hooks.PostToolUse?.[0]?.matcher).toBe("^mcp__ambient_project__(list_projects|record_project_events|acknowledge_no_project_events|decline_project_binding|restore_project_binding)$");
-    expect(handlers.every((handler) => !handler.command.includes(".."))).toBe(true);
-    expect(handlers.every((handler) => !Object.hasOwn(handler, "statusMessage"))).toBe(true);
+      const hooks = targetHooksConfig(sourceHooks, target) as { hooks: Record<string, HookGroup[]> };
+      const handlers = Object.values(hooks.hooks).flatMap((groups) => groups.flatMap((group) => group.hooks));
+      const expectedHookCommand = `"${"${PLUGIN_ROOT}"}/${target.launcherRelativePath}" "${"${PLUGIN_ROOT}"}/runtime/hook-adapter/index.js"`;
+      expect(handlers).toHaveLength(5);
+      expect(handlers.map((handler) => handler.command)).toEqual(new Array(5).fill(expectedHookCommand));
+      expect(hooks.hooks.PostToolUse?.[0]?.matcher).toBe("^mcp__ambient_project__(list_projects|record_project_events|acknowledge_no_project_events|decline_project_binding|restore_project_binding)$");
+      expect(handlers.every((handler) => !handler.command.includes(".."))).toBe(true);
+      expect(handlers.every((handler) => !Object.hasOwn(handler, "statusMessage"))).toBe(true);
+    }
   });
 
   it("keeps workspace package metadata aligned with the public release", async () => {
