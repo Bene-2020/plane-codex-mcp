@@ -17,6 +17,8 @@ Ambient Project Layer 是一个 Codex 插件。它从当前工作回合中捕获
 
 Panel 默认展示最多 5 个相关工作项，支持按 Backlog、Todo、In Progress 和 Done 筛选，并可通过状态菜单或拖拽更新状态。完整创建、编辑、归档和项目管理仍在 Plane 中完成。
 
+Panel 的 UI 直接沿用 Plane 开源产品的视觉风格，包括配色、状态标签、卡片层级和交互方式，让用户在 Codex 与 Plane 之间获得一致的使用体验。该界面由本项目实现，并非 Plane 官方组件，也不表示 Plane 对本项目提供官方背书。
+
 ## 主要能力
 
 - 自动识别任务、Bug、决定、想法、风险、里程碑、计划、进展和完成事件。
