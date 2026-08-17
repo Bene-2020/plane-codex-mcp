@@ -2,6 +2,8 @@
 
 让 Codex 在工作过程中安静地整理项目进展，并将任务、Bug、决定、风险和里程碑同步到 Plane。
 
+[Plane](https://plane.so/open-source) 是一款采用 AGPL-3.0 许可证的开源项目管理平台，既可以免费自行部署 Community Edition，也提供免费的云端方案。其自托管 Community Edition 不限制用户数，云端 Free 方案目前支持最多 12 名用户，因此非常适合个人开发者、一人公司（OPC）和小团队使用；具体额度以 [Plane 官方定价页](https://plane.so/pricing) 为准。
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-v0.1.0-4f6bed.svg)](CHANGELOG.md)
 
