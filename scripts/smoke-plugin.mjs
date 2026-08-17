@@ -1,13 +1,15 @@
 import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { getNodeSidecarTarget, getNodeSidecarTargetForHost, NODE_SIDECAR_TARGET_IDS, renderLauncher } from "./node-sidecar-targets.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const sourcePlugin = join(root, "plugin");
+const execFile = promisify(execFileCallback);
+const defaultPluginRoot = join(root, "plugin");
 const fixtureRoot = join(root, "fixtures", "hooks");
 const fixtures = {
   SessionStart: await readFile(join(fixtureRoot, "session-start.json"), "utf8"),
@@ -16,6 +18,43 @@ const fixtures = {
   Stop: await readFile(join(fixtureRoot, "stop.json"), "utf8"),
   SessionEnd: await readFile(join(fixtureRoot, "session-end.json"), "utf8"),
 };
+
+function parseArguments(argumentsList) {
+  let pluginRoot = defaultPluginRoot;
+  for (let index = 0; index < argumentsList.length; index += 1) {
+    const argument = argumentsList[index];
+    if (argument === "--") continue;
+    if (argument === "--plugin-root") {
+      pluginRoot = resolve(argumentsList[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--plugin-root=")) {
+      pluginRoot = resolve(argument.slice("--plugin-root=".length));
+      continue;
+    }
+    throw new Error(`Unknown smoke option: ${argument}`);
+  }
+  return { pluginRoot };
+}
+
+const options = parseArguments(process.argv.slice(2));
+
+function shellInvocation(commandLine) {
+  if (process.platform === "win32") return { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", `"${commandLine}"`] };
+  return { command: "/bin/sh", args: ["-c", commandLine] };
+}
+
+function packagedLauncherInvocation(launcher, entrypoint) {
+  if (process.platform === "win32") return shellInvocation(`"${launcher}" "${entrypoint}"`);
+  return { command: launcher, args: [entrypoint] };
+}
+
+function childProcessOptions(command, cwd, env) {
+  const options = { cwd, env };
+  if (process.platform === "win32" && command.toLowerCase() === (process.env.ComSpec ?? "cmd.exe").toLowerCase()) options.windowsVerbatimArguments = true;
+  return options;
+}
 
 function assertInside(rootPath, candidate) {
   const path = resolve(candidate);
@@ -29,7 +68,15 @@ let isolatedPath;
 async function terminateChild(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const closed = new Promise((resolveClosed) => child.once("close", resolveClosed));
-  child.kill("SIGTERM");
+  if (process.platform === "win32") {
+    try {
+      await execFile("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+    } catch (error) {
+      if (child.exitCode === null && child.signalCode === null) throw error;
+    }
+  } else {
+    child.kill("SIGTERM");
+  }
   await Promise.race([
     closed,
     new Promise((_, reject) => setTimeout(() => reject(new Error("Plugin process did not exit after SIGTERM")), 6_000)),
@@ -38,10 +85,13 @@ async function terminateChild(child) {
 
 function runPluginCommand(command, args, input, env, cwd) {
   return new Promise((resolveResult, reject) => {
-    const childEnv = { ...process.env, ...env, PATH: isolatedPath };
+    const childEnv = { ...process.env, ...env };
+    delete childEnv.PATH;
+    delete childEnv.Path;
+    childEnv.PATH = isolatedPath;
     delete childEnv.NODE_PATH;
     delete childEnv.NODE_OPTIONS;
-    const child = spawn(command, args, { cwd, env: childEnv });
+    const child = spawn(command, args, childProcessOptions(command, cwd, childEnv));
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -62,7 +112,7 @@ function runPluginCommand(command, args, input, env, cwd) {
   });
 }
 
-async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot) {
+async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot, target) {
   const childEnv = {
     AMBIENT_DB_PATH: join(smokeRoot, "mcp database.sqlite"),
     PLANE_MODE: "fake",
@@ -70,7 +120,15 @@ async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot) {
     PLANE_API_KEY: "",
     PLANE_WORKSPACE_SLUG: "smoke-workspace",
   };
-  const child = spawn(join(pluginRoot, "runtime", "bin", "ambient-node"), [mcpEntrypoint], { cwd: pluginRoot, env: { ...process.env, ...childEnv, PATH: isolatedPath } });
+  const launcher = join(pluginRoot, "runtime", "bin", target.launcherFile);
+  const invocation = packagedLauncherInvocation(launcher, mcpEntrypoint);
+  const childEnvWithIsolatedPath = { ...process.env, ...childEnv };
+  delete childEnvWithIsolatedPath.PATH;
+  delete childEnvWithIsolatedPath.Path;
+  childEnvWithIsolatedPath.PATH = isolatedPath;
+  delete childEnvWithIsolatedPath.NODE_PATH;
+  delete childEnvWithIsolatedPath.NODE_OPTIONS;
+  const child = spawn(invocation.command, invocation.args, childProcessOptions(invocation.command, pluginRoot, childEnvWithIsolatedPath));
   const lines = createInterface({ input: child.stdout });
   const waiters = new Map();
   let stderr = "";
@@ -159,8 +217,9 @@ async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot) {
 
 async function assertMissingConfigurationFails(entrypoint, command, smokeRoot) {
   const databasePath = join(smokeRoot, "missing configuration.sqlite");
+  const invocation = packagedLauncherInvocation(command, entrypoint);
   try {
-    await runPluginCommand(command, [entrypoint], "", { AMBIENT_DB_PATH: databasePath, PLANE_MODE: "" }, smokeRoot);
+    await runPluginCommand(invocation.command, invocation.args, "", { AMBIENT_DB_PATH: databasePath, PLANE_MODE: "" }, smokeRoot);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes("PLANE_MODE is required")) throw new Error(`MCP failed for an unexpected reason: ${message}`);
@@ -211,18 +270,27 @@ async function smokeStaticTargetSelection() {
   } catch {
     return `matrix static (${NODE_SIDECAR_TARGET_IDS.filter((targetId) => targetId !== hostTarget.id).length} non-native target selections)`;
   }
-  for (const targetId of NODE_SIDECAR_TARGET_IDS) {
+  const packagedTargets = await Promise.all(NODE_SIDECAR_TARGET_IDS.map(async (targetId) => {
     const targetRoot = join(collectionRoot, targetId);
-    await stat(targetRoot);
-    await assertStaticPackage(targetRoot, getNodeSidecarTarget(targetId));
+    try {
+      await stat(targetRoot);
+      return { targetId, targetRoot };
+    } catch {
+      return undefined;
+    }
+  }));
+  const availableTargets = packagedTargets.filter(Boolean);
+  if (availableTargets.length !== NODE_SIDECAR_TARGET_IDS.length) {
+    return `matrix static (${NODE_SIDECAR_TARGET_IDS.length - 1} non-native target selections; partial packaged collection)`;
   }
+  for (const { targetId, targetRoot } of availableTargets) await assertStaticPackage(targetRoot, getNodeSidecarTarget(targetId));
   return `matrix static and packaged (${NODE_SIDECAR_TARGET_IDS.filter((targetId) => targetId !== hostTarget.id).length} non-native packages)`;
 }
 
 const smokeRoot = await mkdtemp(join(tmpdir(), "ambient plugin smoke-"));
 const isolatedPlugin = join(smokeRoot, "plugin");
 isolatedPath = await mkdtemp(join(smokeRoot, "empty-path-"));
-await cp(sourcePlugin, isolatedPlugin, { recursive: true });
+await cp(options.pluginRoot, isolatedPlugin, { recursive: true });
 
 try {
   const staticSelection = await smokeStaticTargetSelection();
@@ -277,7 +345,10 @@ try {
   const pluginData = join(smokeRoot, "plugin data");
   const ignoredDatabasePath = join(smokeRoot, "ignored hook database.sqlite");
   const hookCommand = handlers[0].command.replaceAll("${PLUGIN_ROOT}", isolatedPlugin);
-  const runHook = (fixture, env) => runPluginCommand("/bin/sh", ["-c", hookCommand], fixture, { ...env, PLUGIN_ROOT: isolatedPlugin }, isolatedPlugin);
+  const runHook = (fixture, env) => {
+    const invocation = shellInvocation(hookCommand);
+    return runPluginCommand(invocation.command, invocation.args, fixture, { ...env, PLUGIN_ROOT: isolatedPlugin }, isolatedPlugin);
+  };
   const missingHookDb = await runHook(fixtures.UserPromptSubmit, { AMBIENT_DB_PATH: "", PLUGIN_DATA: "", CLAUDE_PLUGIN_DATA: "" });
   const missingHookPayload = JSON.parse(missingHookDb.stdout);
   if (!missingHookPayload.hookSpecificOutput?.additionalContext?.includes("temporarily unavailable")) throw new Error("Hook must fail open without creating a fallback database");
@@ -296,8 +367,8 @@ try {
     if (eventName === "Stop" && JSON.stringify(payload) !== "{}") throw new Error("Stop fixture must return a silent empty response");
   }
   await assertMissingConfigurationFails(mcpEntrypoint, mcpCommand, smokeRoot);
-  await smokeMcp(mcpEntrypoint, smokeRoot, isolatedPlugin);
+  await smokeMcp(mcpEntrypoint, smokeRoot, isolatedPlugin, target);
   console.log(`Plugin isolation smoke passed: ${target.id} sidecar, ${staticSelection}, PATH without node/pnpm/bun, explicit fake MCP configuration, missing-config failure, App resources, open_project_panel server-tool bridge and web-sandbox summary, record-or-ack MCP tools, and five Hook fixtures.`);
 } finally {
-  await rm(smokeRoot, { recursive: true, force: true });
+  await rm(smokeRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

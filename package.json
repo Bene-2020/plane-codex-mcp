@@ -25,9 +25,11 @@
     "dev:panel": "pnpm --filter @ambient/panel dev",
     "dev:mcp": "pnpm --filter @ambient/mcp dev",
     "package:plugin": "node scripts/package-plugin.mjs",
+    "package:release-asset": "node scripts/package-release-asset.mjs",
     "smoke:plugin": "node scripts/smoke-plugin.mjs",
     "migrate:source-ids": "node --env-file-if-exists=.env scripts/migrate-source-ids.mjs",
     "validate:plugin": "node scripts/validate-plugin-runtime.mjs plugin",
+    "verify:release-tag": "node scripts/verify-release-tag.mjs",
     "fetch:node-sidecar": "node scripts/fetch-node-sidecar.mjs"
   },
   "devDependencies": {

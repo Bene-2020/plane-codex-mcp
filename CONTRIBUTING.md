@@ -71,4 +71,16 @@ pnpm dev:panel
 - 用户可见变化已更新 README 或 `CHANGELOG.md`；
 - PR 描述说明了问题、解决方式、验证结果和已知限制。
 
+## 发布版本
+
+正式版本通过 [CI and Release](.github/workflows/ci-release.yml) 工作流发布：
+
+1. 在 `release/v<version>` 分支完成版本号、更新日志和文档，推送后等待五个平台的原生构建与 smoke test 全部通过。
+2. 合并到 `main` 后再次确认 CI 通过。
+3. 创建与 `package.json` 完全一致的标签（例如 `v0.1.0`）并推送。标签不匹配时工作流会直接失败，不会创建 Release。
+4. 标签工作流会重新构建并验证 `darwin-arm64`、`darwin-x64`、`linux-arm64`、`linux-x64` 和 `win32-x64`，随后创建 GitHub Release、上传五个安装包及 `SHA256SUMS`。
+5. 发布后按 README 的安装步骤抽查下载、解压和 Codex 安装流程。
+
+不要手工上传未经对应 Runner 原生验证的安装包，也不要在 CI 通过前推送正式标签。
+
 项目采用 MIT License。提交贡献即表示你有权提交该内容，并同意按仓库许可证分发。
