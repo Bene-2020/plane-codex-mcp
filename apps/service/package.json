@@ -4,7 +4,7 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx src/main.ts", "start": "node dist/main.js" },
+  "scripts": { "build": "tsc -p tsconfig.json", "dev": "tsx --env-file-if-exists=../../.env src/main.ts", "start": "node dist/main.js" },
   "dependencies": {
     "@ambient/core": "workspace:*",
     "@ambient/plane": "workspace:*",

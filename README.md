@@ -13,8 +13,15 @@ Inline card 只展示约 3–5 个相关工作项，提供“全部”与四状�
 ```bash
 corepack enable pnpm
 pnpm install
-cp .env.example .env
 pnpm build
+```
+
+正式 Codex 插件不读取仓库根目录的 `.env`。Plane 连接配置应写入用户级 `~/.codex/config.toml` 的 `[mcp_servers.ambient-project.env]`，至少包括 `AMBIENT_DB_PATH`、`PLANE_MODE=sdk`、`PLANE_BASE_URL`、`PLANE_API_KEY` 和 `PLANE_WORKSPACE_SLUG`；不要将真实 key 写入仓库。插件 Hook 的数据目录由 Codex 通过 `PLUGIN_DATA` 提供，正式 MCP 的临时会话令牌和本地端口由运行时自动生成。
+
+只有从源码运行开发入口时才使用根目录 `.env`。开发脚本会自动加载该文件；先从安全模板复制，再按需要修改：
+
+```bash
+cp .env.example .env
 
 # 开发降级：终端 1，固定端口的独立 Service 和 Outbox worker
 export AMBIENT_SESSION_TOKEN="$(node --input-type=module -e 'import { randomBytes } from "node:crypto"; process.stdout.write(randomBytes(32).toString("base64url"))')"
