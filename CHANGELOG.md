@@ -4,15 +4,12 @@
 
 ## [Unreleased]
 
-### Added
-
-- 为首次公开发布补充中文 README、安装说明、安全政策、贡献指南和 Issue 模板。
-- 增加产品 Panel 截图和五平台 Release 安装说明。
-
 ## [0.1.0] - 待发布
 
 ### Added
 
+- 为首次公开发布补充中英文 README、安装说明、安全政策、贡献指南和 Issue 模板。
+- 增加产品 Panel 演示和五平台 Release 安装说明。
 - 从 Codex 工作回合捕获任务、Bug、决定、想法、风险、里程碑、计划、进展和完成事件。
 - 使用本地 SQLite Outbox 可靠接收事件并异步同步到 Plane。
 - 支持项目目录与 Plane 项目的显式绑定、切换、暂缓和长期拒绝偏好。

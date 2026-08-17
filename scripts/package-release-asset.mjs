@@ -65,15 +65,28 @@ const marketplaceManifest = {
 
 await rm(options.output, { recursive: true, force: true });
 await mkdir(join(options.output, ".agents", "plugins"), { recursive: true });
+await mkdir(join(options.output, ".github", "workflows"), { recursive: true });
+await mkdir(join(options.output, "docs", "assets"), { recursive: true });
 await mkdir(join(options.output, "plugins"), { recursive: true });
 await Promise.all([
   cp(options.pluginRoot, join(options.output, "plugins", pluginManifest.name), { recursive: true }),
   cp(join(root, "README.md"), join(options.output, "README.md")),
+  cp(join(root, "README_EN.md"), join(options.output, "README_EN.md")),
+  cp(join(root, "CHANGELOG.md"), join(options.output, "CHANGELOG.md")),
+  cp(join(root, "CONTRIBUTING.md"), join(options.output, "CONTRIBUTING.md")),
+  cp(join(root, "LICENSE"), join(options.output, "LICENSE")),
+  cp(join(root, "SECURITY.md"), join(options.output, "SECURITY.md")),
+  cp(join(root, "THIRD_PARTY_NOTICES.md"), join(options.output, "THIRD_PARTY_NOTICES.md")),
+  cp(join(root, ".github", "workflows", "ci-release.yml"), join(options.output, ".github", "workflows", "ci-release.yml")),
+  cp(join(root, "docs", "assets", "ambient-project-panel.gif"), join(options.output, "docs", "assets", "ambient-project-panel.gif")),
   writeFile(join(options.output, ".agents", "plugins", "marketplace.json"), `${JSON.stringify(marketplaceManifest, null, 2)}\n`),
 ]);
 
 for (const requiredPath of [
   join(options.output, ".agents", "plugins", "marketplace.json"),
+  join(options.output, "LICENSE"),
+  join(options.output, "README_EN.md"),
+  join(options.output, "docs", "assets", "ambient-project-panel.gif"),
   join(options.output, "plugins", pluginManifest.name, ".codex-plugin", "plugin.json"),
   join(options.output, "plugins", pluginManifest.name, "runtime", "bin", target.sidecarFile),
   join(options.output, "plugins", pluginManifest.name, "LICENSE"),

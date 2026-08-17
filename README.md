@@ -1,5 +1,7 @@
 # Ambient Project Layer
 
+中文 | [English](README_EN.md)
+
 让 Codex 在工作过程中安静地整理项目进展，并将任务、Bug、决定、风险和里程碑同步到 Plane。
 
 [Plane](https://plane.so/open-source) 是一款采用 AGPL-3.0 许可证的开源项目管理平台，既可以免费自行部署 Community Edition，也提供免费的云端方案。其自托管 Community Edition 不限制用户数，云端 Free 方案目前支持最多 12 名用户，因此非常适合个人开发者、一人公司（OPC）和小团队使用；具体额度以 [Plane 官方定价页](https://plane.so/pricing) 为准。
@@ -115,11 +117,13 @@ codex mcp add ambient-project `
 
 自托管 Plane 用户还需要把 `PLANE_BASE_URL` 换成实例的 API Base URL。
 
-检查非敏感配置：
+在本机检查 MCP 配置：
 
 ```bash
 codex mcp get ambient-project
 ```
+
+该命令的输出可能包含 Plane API Key。不要把输出复制到 Issue、日志、聊天或截图中；对外排查问题时只提供已经移除凭据的内容。
 
 完成后完全退出并重新启动 Codex，再新建一个 task。已经运行的 MCP 进程不会自动读取修改后的配置。
 
