@@ -264,7 +264,7 @@ describe("SQLite storage", () => {
     const firstClaim = first.claimPendingBatches()[0]!;
     expect(second.claimPendingBatches()).toHaveLength(0);
     await new Promise((resolve) => setTimeout(resolve, 15));
-    const secondClaim = second.claimPendingBatches()[0]!;
+    const secondClaim = second.claimPendingBatches(1, 1_000)[0]!;
     expect(secondClaim.claimToken).not.toBe(firstClaim.claimToken);
     expect(first.renewBatchLease(secondClaim.id, firstClaim.claimToken!)).toBe(false);
     expect(() => first.markEventCompleted("event_1_0", "stale-item", firstClaim.claimToken)).toThrow("claim lost");
