@@ -45,7 +45,7 @@ async function validatePackage(pluginRoot, { executeNative = true } = {}) {
   const mcpConfig = JSON.parse(await readFile(join(pluginRoot, ".mcp.json"), "utf8"));
   const hooksConfig = JSON.parse(await readFile(join(pluginRoot, "hooks", "hooks.json"), "utf8"));
   const manifest = JSON.parse(await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
-  if (manifest.name !== "ambient-project-layer" || manifest.version !== "0.1.0" || manifest.author?.name !== "Bene-2020" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error(`${pluginRoot}: manifest product metadata is inconsistent`);
+  if (manifest.name !== "ambient-project-layer" || manifest.version !== "0.1.0" || manifest.author?.name !== "Wenyan Wei" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error(`${pluginRoot}: manifest product metadata is inconsistent`);
   if (!manifest.interface?.longDescription?.includes("platform-specific")) throw new Error(`${pluginRoot}: manifest must describe platform-specific packages`);
   if (!manifest.interface?.longDescription?.includes("Windows x64")) throw new Error(`${pluginRoot}: manifest must list the Windows x64 target`);
   for (const legalFile of [join(pluginRoot, "LICENSE"), join(pluginRoot, "THIRD_PARTY_NOTICES.md")]) {

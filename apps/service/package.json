@@ -4,7 +4,7 @@
   "description": "Local service and Plane synchronization worker for Ambient Project Layer.",
   "private": true,
   "license": "MIT",
-  "author": "Bene-2020",
+  "author": "Wenyan Wei",
   "repository": { "type": "git", "url": "git+https://github.com/Bene-2020/plane-codex-mcp.git", "directory": "apps/service" },
   "type": "module",
   "main": "dist/index.js",

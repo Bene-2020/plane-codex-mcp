@@ -231,7 +231,7 @@ try {
   const target = getNodeSidecarTarget(runtimeMetadata.target);
   if (target.platform !== process.platform || target.arch !== process.arch) throw new Error(`Native plugin smoke must use the host target, found ${target.id} on ${process.platform}/${process.arch}`);
   if (!manifest.interface?.longDescription?.includes("platform-specific")) throw new Error("Plugin manifest must describe platform-specific packages");
-  if (manifest.name !== "ambient-project-layer" || manifest.version !== "0.1.0" || manifest.author?.name !== "Bene-2020" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error("Plugin manifest product metadata is inconsistent");
+  if (manifest.name !== "ambient-project-layer" || manifest.version !== "0.1.0" || manifest.author?.name !== "Wenyan Wei" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error("Plugin manifest product metadata is inconsistent");
   if (Object.hasOwn(manifest, "hooks")) throw new Error("Manifest must rely on default hooks/hooks.json discovery");
   const mcpConfig = JSON.parse(await readFile(join(isolatedPlugin, ".mcp.json"), "utf8"));
   const mcpServer = mcpConfig.mcpServers["ambient-project"];

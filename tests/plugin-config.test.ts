@@ -12,7 +12,7 @@ describe("plugin runtime paths", () => {
   it("keeps MCP and Hook commands inside the plugin root", async () => {
     const manifest = JSON.parse(await readFile(`${pluginRoot}/.codex-plugin/plugin.json`, "utf8")) as Record<string, unknown>;
     expect(manifest).not.toHaveProperty("hooks");
-    expect(manifest).toMatchObject({ name: "ambient-project-layer", version: "0.1.0", author: { name: "Bene-2020" }, interface: { displayName: "Ambient Project Layer", developerName: "Bene-2020" } });
+    expect(manifest).toMatchObject({ name: "ambient-project-layer", version: "0.1.0", author: { name: "Wenyan Wei" }, interface: { displayName: "Ambient Project Layer", developerName: "Wenyan Wei" } });
 
     const mcp = JSON.parse(await readFile(`${pluginRoot}/.mcp.json`, "utf8")) as { mcpServers: Record<string, { args: string[]; cwd: string; env?: Record<string, string>; env_vars: string[] }> };
     expect(mcp.mcpServers["ambient-project"]?.command).toBe("runtime/bin/ambient-node");
@@ -43,7 +43,7 @@ describe("plugin runtime paths", () => {
     ] as const;
     for (const [path, directory] of packages) {
       const metadata = JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), "utf8")) as Record<string, unknown>;
-      expect(metadata).toMatchObject({ version: "0.1.0", private: true, license: "MIT", author: "Bene-2020" });
+      expect(metadata).toMatchObject({ version: "0.1.0", private: true, license: "MIT", author: "Wenyan Wei" });
       expect(metadata.repository).toEqual({ type: "git", url: "git+https://github.com/Bene-2020/plane-codex-mcp.git", ...(directory ? { directory } : {}) });
     }
   });

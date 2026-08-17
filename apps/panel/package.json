@@ -4,7 +4,7 @@
   "description": "Inline project panel for Ambient Project Layer.",
   "private": true,
   "license": "MIT",
-  "author": "Bene-2020",
+  "author": "Wenyan Wei",
   "repository": { "type": "git", "url": "git+https://github.com/Bene-2020/plane-codex-mcp.git", "directory": "apps/panel" },
   "scripts": {
     "build": "vite build",
