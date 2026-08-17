@@ -1,0 +1,30 @@
+name: 功能建议
+description: 提出一个范围清晰的产品改进
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 用户问题
+      description: 请先描述要解决的问题，而不是只描述实现方式。
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+      description: 用户完成什么操作后，应看到怎样的结果？
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 建议范围
+      description: 哪些内容应包含，哪些内容可以不做？
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 当前替代方案
+      description: 现在如何绕过或手动完成这件事？

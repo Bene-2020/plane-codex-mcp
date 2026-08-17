@@ -1,0 +1,62 @@
+name: Bug 报告
+description: 报告一个可以复现的产品问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请勿提交 Plane API Key、Panel 会话令牌、真实项目数据或未经脱敏的日志。安全漏洞请按 SECURITY.md 私下报告。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 例如 v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - macOS arm64
+        - macOS x64
+        - Linux x64
+        - Linux arm64
+        - Windows x64
+        - 从源码运行
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 实际发生了什么？你原本期望什么？
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小复现步骤
+      placeholder: |
+        1. 安装……
+        2. 新建 task……
+        3. 执行……
+        4. 看到……
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 已脱敏的诊断信息
+      description: 可提供 Codex 版本、插件状态、Hook 信任状态和错误文案。请移除凭据、真实项目数据和个人绝对路径。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，未发现相同问题。
+          required: true
+        - label: 我确认内容中不包含 API Key、会话令牌或其他秘密。
+          required: true

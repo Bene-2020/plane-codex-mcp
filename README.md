@@ -1,95 +1,210 @@
 # Ambient Project Layer
 
-Ambient Project Layer 通过 MCP 将当前工作回合的项目事件可靠写入本地 SQLite Outbox，服务进程异步投射到 Plane，并提供轻量 React Inline 项目卡片查看相关工作和直接修改状态。Plane 是用户可见项目数据的最终真相源和完整项目管理界面；Panel 不直接持有或调用 Plane API Key。
+让 Codex 在工作过程中安静地整理项目进展，并将任务、Bug、决定、风险和里程碑同步到 Plane。
 
-正式 UI 入口是 MCP App：Codex 调用 `open_project_panel` 后，组件从官方 MCP Apps 工具结果 `_meta` 中读取一次性本地会话 bootstrap。在生产 Codex Desktop 中，Panel 通过官方 `App.callServerTool` 桥接由 MCP 进程访问动态 localhost Fastify Service；这样不依赖宿主对沙盒发起本地 HTTP。4318 页面仍用于独立开发/宿主降级，不是正式认证协议。
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.1.0-4f6bed.svg)](CHANGELOG.md)
 
-Inline card 只展示约 3–5 个相关工作项，提供“全部”与四状态查看切换，并支持把卡片拖到四状态更新状态；列表摘要明确区分当前显示数与 Plane 项目级总数。底部主要 CTA 为“在 Plane 中打开 ↗”。
+Ambient Project Layer 是一个 Codex 插件。它从当前工作回合中捕获真正有项目价值的事件，先可靠写入本地 SQLite Outbox，再异步同步到 Plane。你可以继续在 Plane 中做完整的项目管理，也可以在 Codex 内通过轻量 Panel 查看最近工作项并修改状态。
 
-## 快速启动
+它解决的是一个很具体的问题：开发工作已经在 Codex 中发生，但任务、决定和风险往往要靠人再次整理到项目管理工具中。Ambient Project Layer 把这段重复劳动压缩成一个安静、可审查的后台流程。
 
-开发构建需要 Node.js 22 和 Corepack。项目通过 `package.json` 的 `packageManager` 固定使用 pnpm 10.34.5；正式插件不使用用户的 Node/pnpm/bun。
+## 产品界面
+
+![Ambient Project Layer Panel](docs/assets/ambient-project-panel.png)
+
+Panel 默认展示最多 5 个相关工作项，支持按 Backlog、Todo、In Progress 和 Done 筛选，并可通过状态菜单或拖拽更新状态。完整创建、编辑、归档和项目管理仍在 Plane 中完成。
+
+## 主要能力
+
+- 自动识别任务、Bug、决定、想法、风险、里程碑、计划、进展和完成事件。
+- 使用本地 SQLite Outbox 保证事件先落盘，再异步同步到 Plane。
+- 首次进入项目目录时列出真实 Plane 项目，由用户明确选择绑定目标。
+- 在 Codex 内提供轻量 Inline Panel，查看相关工作项、同步状态并跳转 Plane。
+- 不保存完整对话、源码、终端输出或 Plane API Key。
+- 每个平台的 Release 包自带 Node.js 22.22.1，无需用户另装 Node、pnpm 或 bun。
+
+## 支持平台
+
+从 [GitHub Releases](https://github.com/Bene-2020/plane-codex-mcp/releases/latest) 下载与机器匹配的压缩包：
+
+| Release 目标 | 系统 | 架构 |
+| --- | --- | --- |
+| `darwin-arm64` | macOS | Apple Silicon |
+| `darwin-x64` | macOS | Intel |
+| `linux-x64` | Linux | x86_64 |
+| `linux-arm64` | Linux | ARM64 / aarch64 |
+| `win32-x64` | Windows | x86_64 |
+
+不确定架构时，可在 macOS/Linux 运行 `uname -m`：`arm64` 或 `aarch64` 选择 ARM64，`x86_64` 选择 x64。当前不提供 Windows ARM64 安装包。
+
+## 安装
+
+### 1. 准备 Plane
+
+你需要：
+
+- 一个可访问的 Plane Cloud 或自托管实例；
+- Workspace slug，例如 `https://app.plane.so/my-team/` 中的 `my-team`；
+- 一个有目标项目读写权限的 Plane Personal Access Token。
+
+Plane 官方文档说明了 [API Key 的创建位置与使用方式](https://developers.plane.so/api-reference/introduction)。请把 API Key 当作密码保管。
+
+### 2. 安装对应平台的插件包
+
+下载形如 `ambient-project-layer-v0.1.0-<target>.zip` 的资产，解压到不会随意移动的目录。下文用 `<RELEASE_DIR>` 表示解压后的绝对路径；该目录应直接包含 `.agents/plugins/marketplace.json`。
 
 ```bash
+codex plugin marketplace add "<RELEASE_DIR>"
+codex plugin add ambient-project-layer@ambient
+codex plugin list
+```
+
+Codex 官方将插件定义为可安装的技能、MCP Server 和可选 UI 组合；本地开发或独立分发的插件通过 local marketplace 安装。可参考 [Build plugins](https://learn.chatgpt.com/docs/build-plugins)。
+
+安装后，打开 Codex 的 Hook 管理界面，逐一复核并信任当前版本的以下 Hook：
+
+- `SessionStart`
+- `UserPromptSubmit`
+- `PostToolUse`
+- `Stop`
+- `SessionEnd`
+
+插件显示 `enabled` 不等于 Hook 已获得信任。安装或升级后如果 Hook 显示 `modified`，需要重新信任。
+
+### 3. 配置 Plane 连接
+
+正式插件不读取仓库或项目目录中的 `.env`。Plane 配置保存在用户级 `~/.codex/config.toml` 中，并由 Codex 启动 `ambient-project` MCP Server 时注入。
+
+先新建一次 Codex task，让 Hook 创建插件数据目录。随后把 MCP 的 `AMBIENT_DB_PATH` 指向同一个 `PLUGIN_DATA/ambient.sqlite`：
+
+- macOS/Linux：`$HOME/.codex/plugins/data/ambient-project-layer-ambient/ambient.sqlite`
+- Windows：`%USERPROFILE%\.codex\plugins\data\ambient-project-layer-ambient\ambient.sqlite`
+
+macOS/Linux 示例：
+
+```bash
+codex mcp add ambient-project \
+  --env "AMBIENT_DB_PATH=$HOME/.codex/plugins/data/ambient-project-layer-ambient/ambient.sqlite" \
+  --env "PLANE_MODE=sdk" \
+  --env "PLANE_BASE_URL=https://api.plane.so" \
+  --env "PLANE_WORKSPACE_SLUG=replace-with-your-workspace" \
+  --env "PLANE_API_KEY=replace-in-config-toml" \
+  -- "<RELEASE_DIR>/plugins/ambient-project-layer/runtime/bin/ambient-node" \
+     "<RELEASE_DIR>/plugins/ambient-project-layer/runtime/mcp/index.js"
+```
+
+Windows PowerShell 示例：
+
+```powershell
+codex mcp add ambient-project `
+  --env "AMBIENT_DB_PATH=$env:USERPROFILE\.codex\plugins\data\ambient-project-layer-ambient\ambient.sqlite" `
+  --env "PLANE_MODE=sdk" `
+  --env "PLANE_BASE_URL=https://api.plane.so" `
+  --env "PLANE_WORKSPACE_SLUG=replace-with-your-workspace" `
+  --env "PLANE_API_KEY=replace-in-config-toml" `
+  -- "<RELEASE_DIR>\plugins\ambient-project-layer\runtime\bin\ambient-node.cmd" `
+     "<RELEASE_DIR>\plugins\ambient-project-layer\runtime\mcp\index.js"
+```
+
+然后编辑 `~/.codex/config.toml`，仅在 `[mcp_servers.ambient-project.env]` 中把占位值替换为真实 Workspace slug 和 API Key。不要把真实 Key 放进上面的命令、仓库、Issue、日志或截图中，以免进入 shell history 或公开记录。
+
+自托管 Plane 用户还需要把 `PLANE_BASE_URL` 换成实例的 API Base URL。
+
+检查非敏感配置：
+
+```bash
+codex mcp get ambient-project
+```
+
+完成后完全退出并重新启动 Codex，再新建一个 task。已经运行的 MCP 进程不会自动读取修改后的配置。
+
+## 第一次使用
+
+1. 在一个真实项目目录中新建 Codex task。
+2. Ambient Project Layer 会列出当前 Plane Workspace 中的项目并询问绑定目标。
+3. 明确选择一个项目；插件不会根据目录名或 Git remote 自动猜测。
+4. 继续正常使用 Codex。发生有意义的项目变化时，事件会先进入本地 Outbox，再同步到 Plane。
+5. 对 Codex 说“打开项目面板”，即可查看相关工作项和同步状态。
+
+如果暂时不想选择，可以回复“稍后再说”；本次 task 不会重复询问。如果明确要求某个目录以后不再询问，插件会只在本地保存这一偏好，之后也可以要求恢复绑定。
+
+## 数据、权限与隐私
+
+Ambient Project Layer 的数据边界如下：
+
+| 数据 | 保存位置 | 说明 |
+| --- | --- | --- |
+| 工作项和项目状态 | Plane | 用户可见项目数据的最终来源 |
+| 项目绑定、Outbox、精简缓存和 Hook 审计 | 本地 SQLite | 默认位于插件的 `PLUGIN_DATA` 目录 |
+| Plane API Key | Codex 用户级配置与 MCP 进程内存 | 不写入 SQLite、Panel 或 Hook 输出 |
+| Panel 临时令牌 | 当前 MCP 进程内存 | 每次进程启动重新生成 |
+
+插件不会把完整 Codex transcript、源码、终端输出、附件或 API Key 保存到本地数据库，也不会把 Plane API Key 发送到浏览器 Panel。运行时对外只需要访问你配置的 Plane API。
+
+插件需要 Plane 项目读写权限，用于读取项目与工作项、创建捕获到的工作项、写入进展评论和更新状态。它不提供自动删除、跨项目移动或人员分配工具。
+
+## 升级
+
+1. 从 Releases 下载同一平台的新版本，用新内容替换原来的稳定 Release 目录。
+2. 从同一个 local marketplace 重新安装插件：
+
+   ```bash
+   codex plugin add ambient-project-layer@ambient
+   ```
+
+3. 确认 `ambient-project` MCP 仍指向稳定的 Release 目录和原有 SQLite 文件。
+4. 在 Hook 管理界面重新复核并信任五个 Hook。
+5. 完全退出并重启 Codex，再用新 task 验证绑定、同步和 Panel。
+
+升级时不要删除或切换已有 SQLite 文件，否则本地绑定、Outbox 和来源引用不会自动迁移到新文件。
+
+## 卸载
+
+```bash
+codex plugin remove ambient-project-layer@ambient
+codex plugin marketplace remove ambient
+codex mcp remove ambient-project
+```
+
+这些命令不会替你删除 Plane 中已经同步的工作项。若确定不再需要本地绑定和 Outbox，可在备份后手动删除对应的 `ambient.sqlite`；保留数据库不会影响 Plane 数据。
+
+## 常见问题
+
+### 插件已启用，但新 task 没有项目引导
+
+先检查五个 Hook 是否已被当前版本信任。若显示未信任或 `modified`，重新信任并新建 task；已错过的 `SessionStart` 不会在旧 task 中补跑。
+
+### `list_projects` 返回认证错误或没有项目
+
+检查 `PLANE_MODE=sdk`、Base URL、Workspace slug、API Key 以及 Token 对目标 Workspace 的权限。修改配置后必须完全重启 Codex。
+
+### MCP 工具正常，但 Panel 暂时不可用
+
+重新调用“打开项目面板”。MCP 进程重启后，旧 Panel 的临时会话会失效；新调用会创建新的 Panel 会话。
+
+### 工作项显示“待同步”
+
+本地事件已经落盘，但 Plane 同步失败。检查网络、API Key 和 Plane 服务状态；恢复后 Outbox 会继续处理，不要通过删除 SQLite 来“重试”。
+
+### 项目根目录为什么没有 `.env`？
+
+正式插件使用 `~/.codex/config.toml`，不需要项目级 `.env`。只有从源码运行独立开发入口时才复制 `.env.example` 为 `.env`。
+
+### 它会上传我的代码或完整对话吗？
+
+不会。插件只记录经过归纳的项目事件、短来源摘录和同步所需元数据；不保存完整 transcript、源码或终端输出。
+
+## 从源码构建
+
+开发环境需要 Node.js 22、Corepack 和 Git。
+
+```bash
+git clone https://github.com/Bene-2020/plane-codex-mcp.git
+cd plane-codex-mcp
 corepack enable pnpm
-pnpm install
-pnpm build
-```
-
-正式 Codex 插件不读取仓库根目录的 `.env`。Plane 连接配置应写入用户级 `~/.codex/config.toml` 的 `[mcp_servers.ambient-project.env]`，至少包括 `AMBIENT_DB_PATH`、`PLANE_MODE=sdk`、`PLANE_BASE_URL`、`PLANE_API_KEY` 和 `PLANE_WORKSPACE_SLUG`；不要将真实 key 写入仓库。插件 Hook 的数据目录由 Codex 通过 `PLUGIN_DATA` 提供，正式 MCP 的临时会话令牌和本地端口由运行时自动生成。
-
-只有从源码运行开发入口时才使用根目录 `.env`。开发脚本会自动加载该文件；先从安全模板复制，再按需要修改：
-
-```bash
+pnpm install --frozen-lockfile
 cp .env.example .env
-
-# 开发降级：终端 1，固定端口的独立 Service 和 Outbox worker
-export AMBIENT_SESSION_TOKEN="$(node --input-type=module -e 'import { randomBytes } from "node:crypto"; process.stdout.write(randomBytes(32).toString("base64url"))')"
-pnpm dev:service
-
-# 开发降级：终端 2，独立 4318 Panel
-pnpm dev:panel
-```
-
-正式 Codex 插件路径不需要启动上面的独立 Service，也不需要 export 任何会话变量。插件的 `apps/mcp` 入口在每个 MCP 子进程内：
-
-- 生成一次 32-byte CSPRNG、43 字符 base64url 临时令牌；
-- 在 `127.0.0.1:0` 启动该进程专属的 Fastify BFF 和 Outbox worker；
-- 将实际端口、BFF 地址和令牌直接注入 MCP App bootstrap；
-- MCP 进程关闭时按 MCP transport → Fastify → worker/Storage 顺序清理。
-
-因此每个 Codex/MCP 进程拥有独立的动态端口和令牌；进程重启后旧 Panel 请求新 BFF 会得到 401。正式插件 `.mcp.json` 不注入 `AMBIENT_SESSION_TOKEN` 或 `AMBIENT_SERVICE_BASE_URL`。正式入口不再默认选择 Plane 模式：缺少 `PLANE_MODE` 会在打开数据库前明确失败，不会创建 `Demo Project` 或默认缓存库。Fake 只通过显式的 `PLANE_MODE=fake` 本地测试入口使用。
-
-独立 `apps/service` + 4318 页面只用于开发/宿主降级：开发者必须显式设置 `AMBIENT_SESSION_TOKEN`，Service 使用 `SERVICE_PORT=4317`，Panel 通过 Vite proxy 访问它。Service 若未设置开发令牌会安全地生成内存令牌，但 4318 页面无法自动取得该值。
-
-在 Codex 中显式请求打开项目面板时，模型调用 `open_project_panel`（传入 Hook 上下文中的 `projectContextId` 或当前 `cwd`）。工具的普通 `content` 只返回 “Project panel initialized.”；`serviceBaseUrl`、`sessionToken`、`projectContextId` 只放在组件可见的结果 `_meta["ambient-project/bootstrap"]`，不会进入模型 content、全局 instructions、Hook 输出、SQLite、Plane 或日志。
-
-Panel 的两条加载路径刻意分开：Codex host 收到 `App.ontoolresult` 后直接使用 bootstrap 中的 `projectContextId` 读取 summary；独立 4318 页面才按输入的 cwd 查询绑定。Codex host 若工具返回错误、缺少/非法 bootstrap、宿主或首次 summary 请求失败，统一显示 Plane 风格 720px 异常卡片，不把技术原因透传给用户。React 保存 API client 时必须把 callable value 包在 state updater 中；回归测试还会让真实 MCP `tools/call` 结果经过 SDK `AppBridge` 和 `ui/notifications/tool-result` 到达 `App.ontoolresult`，证明组件私有 `_meta` 没有被模型 content 代替。
-
-独立开发降级页面仍可用：`pnpm dev:panel` 后打开 <http://127.0.0.1:4318>，手工输入 cwd 和临时令牌。Vite proxy 只转发 `/api` 和 `/health`，不会注入令牌；页面内存中使用令牌，刷新后需要重新输入。
-
-接入真实 Plane 时，独立开发入口可以在 `.env` 中设置 `PLANE_MODE=sdk`、`PLANE_BASE_URL`、`PLANE_API_KEY` 和 `PLANE_WORKSPACE_SLUG`。Codex Desktop 正式插件由 GUI 启动，不能假定它继承终端 `export`；请将这些变量持久写入用户级 `~/.codex/config.toml` 的 MCP `env`，不要写入仓库。Plane SDK 当前使用 Axios；当宿主提供明文 `https_proxy` 时，运行时只把配置的 Plane HTTPS host 加入当前 MCP 进程的 `no_proxy`，避免 SDK 把明文 HTTP 发到 HTTPS 端口。这不是 fake 或本地数据 fallback，直连失败会明确报错。真实 Plane 连接统一通过官方 `@makeplane/plane-node-sdk` 完成；API key 只由 MCP/Service 服务端读取，不进入 SQLite、Hook 上下文、Panel、模型 content 或日志。Task、Bug、Decision、Idea、Risk、Milestone 会复用或按需创建同名 Plane Work Item Type，并把 type ID 写入 Work Item；远端刷新时再由该原生 type 恢复 Panel 分类。计划父子项使用 Task 类型，进展写评论，完成写状态。
-
-## Codex 插件
-
-`plugin/` 保存插件 manifest、五种 Hook 配置和 `ambient-project` Skill；构建时生成目标平台 `.mcp.json`、Panel 与 runtime。Codex 插件的 MCP/Hook 配置是单一命令字符串，没有按宿主 OS/架构条件选择命令的字段，因此正式发布采用平台专属包：每个包只携带一个固定 Node 22.22.1 sidecar，并由安装/marketplace 选择与宿主匹配的包。支持矩阵严格为：
-
-| 包目录 | 宿主 | Node 官方归档 | sidecar | launcher |
-| --- | --- | --- | --- | --- |
-| `darwin-arm64` | macOS arm64 | `node-v22.22.1-darwin-arm64.tar.gz` | `runtime/bin/node` | `runtime/bin/ambient-node` |
-| `darwin-x64` | macOS x64 | `node-v22.22.1-darwin-x64.tar.gz` | `runtime/bin/node` | `runtime/bin/ambient-node` |
-| `linux-x64` | Linux x64 | `node-v22.22.1-linux-x64.tar.gz` | `runtime/bin/node` | `runtime/bin/ambient-node` |
-| `linux-arm64` | Linux arm64 | `node-v22.22.1-linux-arm64.tar.gz` | `runtime/bin/node` | `runtime/bin/ambient-node` |
-| `win32-x64` | Windows x64 | `node-v22.22.1-win-x64.zip` | `runtime/bin/node.exe` | `runtime/bin/ambient-node.cmd` |
-
-`pnpm build` 默认构建当前宿主的可安装包到 `plugin/`；发布全部目标时先构建应用，再运行 `pnpm package:plugin -- --all`，产物位于 `dist/plugins/ambient-project-layer/<target>/`，每个目标目录本身就是可安装插件根目录。也可以单独构建，例如 `pnpm package:plugin -- --target=linux-arm64 --output=dist/plugins/ambient-project-layer/linux-arm64`。每个包的 `runtime/runtime.json` 声明唯一 target、平台、架构、Node 版本、sidecar 文件名和 `node:sqlite`；Unix 包使用目标专属 POSIX launcher，Windows 包使用 `ambient-node.cmd` 和 `node.exe`，不会把 Unix shell wrapper 交给 Windows。
-
-包布局为：
-
-```text
-<target-package>/
-├── .codex-plugin/plugin.json
-├── .mcp.json
-├── hooks/hooks.json
-├── panel/dist/index.html
-└── runtime/
-    ├── bin/ambient-node       # Unix；Windows 为 ambient-node.cmd
-    ├── bin/node               # Unix；Windows 为 node.exe
-    ├── LICENSE.nodejs
-    ├── runtime.json
-    ├── mcp/index.js
-    └── hook-adapter/index.js
-```
-
-`pnpm validate:plugin` 验证当前 `plugin/`，验证完整平台集合使用 `node scripts/validate-plugin-runtime.mjs dist/plugins/ambient-project-layer --all`。验证器对当前原生目标执行 sidecar `--version`，对其他目标检查 manifest、runtime manifest、归档对应的 sidecar 文件名、Node license、MCP 与全部五个 Hook 的 launcher 选择，并拒绝 `.node`/`better-sqlite3` 和系统 runtime fallback。launcher 在错装到其他 OS/arch 时直接报告兼容性错误并退出，不调用用户本机的 node、pnpm 或 bun。MCP 与 Hook 都使用插件内入口，路径带引号并支持含空格的安装目录；MCP 配置以插件根目录为 `cwd`，`.mcp.json` 的 `env_vars` 只白名单转发宿主已经提供的变量，不能替代 Codex Desktop 的用户级持久配置。Hook 使用宿主保证的稳定 `PLUGIN_DATA/ambient.sqlite`；MCP 的 `AMBIENT_DB_PATH` 必须明确指向同一文件。Plane Key 只留在 MCP env，不进入 Hook、数据库、Panel 或模型上下文。
-
-安装或升级插件后，必须在 Codex 的 Hook 管理界面人工复核并信任当前版本的五个 Hook，然后再新建 task 验收。`enabled = true` 只表示 Hook 已配置，不代表它已获准执行；如果运行时信任状态为 `modified`，Codex 会在启动 Hook 进程前拦截它。即使 `hooks.json` 文本没有变化，版本化缓存路径或解析后的命令变化也可能改变定义哈希，因此不要沿用上一版本的信任结果。典型症状是 MCP 工具仍可用，但新 task 没有项目上下文注入，正式插件数据库也没有该 session 的 `SessionStart` 或 `UserPromptSubmit` 审计。重新信任后，当前 task 的下一次提示可恢复 `UserPromptSubmit`；已经错过的 `SessionStart` 不会补跑，必须再新建 task 验证完整启动链。
-
-MCP 暴露八个项目工作流工具和一个 UI bootstrap 工具：`list_projects`、`get_binding`、`open_project_panel`、`bind_project`、`change_binding`、`decline_project_binding`、`restore_project_binding`、`record_project_events`、`acknowledge_no_project_events`。未绑定 cwd 的新 session 首次 UserPromptSubmit 会依据当前消息和可见对话主动引导列出真实 Plane 项目并等待用户选择；漏问时后续 prompt 会补问，模糊暂缓只影响当前 session，明确长期拒绝才写入按稳定 workspace identity 归属的本地偏好。非 Git root 拒绝由 child/sibling 按最长祖先继承，child 重复 decline 复用 root，child restore/bind 使用精确 override，不静默影响 sibling。`PostToolUse` 可审计 `list_projects`、record/ack 和两个绑定偏好工具；`record_tool_called` 只由 `record_project_events` 置为 1，`binding_list_tool_called` 只由精确的 `list_projects` 置为 1。调用 `list_projects` 后，工具输出、commentary 和思考过程不算用户交付；最终 `last_assistant_message` 必须展示真实项目，并包含“项目绑定（待确认）”区块、至少一个 Markdown 项目列表项和“请选择一个项目，或回复‘稍后再说’。”，同时继续完成主任务。用户明确推翻计划时，系统创建的计划父项及其步骤会逐项先完成再归档；完成、替换或归档父项前必须检查并处理全部已知子项，不能只关闭主项。Panel 另有仅组件可见的 `ambient_project_panel_request` server-tool bridge；它只代理固定的 Panel API 路径，不进入模型工具目录，且由 MCP 进程在同一动态 BFF 会话中带 token 请求。后者只持久化当前回合“已审查且无项目事件”的幂等确认，不创建 Plane 项目记录或 Outbox 批次。没有自动删除、跨项目移动或分配人员的模型工具。Panel 资源 URI 是 `ui://ambient-project/panel/v1.html`，使用官方 `_meta.ui.resourceUri` 连接工具和组件资源；它是自制 Codex Inline/宿主 UI，Plane SDK/API 不进入浏览器代码。
-
-## 验证
-
-```bash
 pnpm test
 pnpm lint
 pnpm build
@@ -97,20 +212,28 @@ pnpm validate:plugin
 pnpm smoke:plugin
 ```
 
-Hook 可用 fixture 直接试跑：
+`.env.example` 默认使用隔离的 `PLANE_MODE=fake`，适合本地测试。连接真实 Plane 时，请只在本地 `.env` 中填写凭据，不要提交 `.env`。
+
+构建全部五个平台的插件目录：
 
 ```bash
-node apps/hook-adapter/dist/index.js < fixtures/hooks/user-prompt-submit.json
+pnpm run build:packages
+pnpm run build:apps
+pnpm package:plugin -- --all
+node scripts/validate-plugin-runtime.mjs dist/plugins/ambient-project-layer --all
 ```
 
-隔离验证只复制 `plugin/`（含空格的临时路径），把 PATH 设为不含 node/pnpm/bun 的目录，并检查 MCP STDIO `initialize`/`tools/list`/`resources/read`/`open_project_panel`、带 `https://web-sandbox.oaiusercontent.com` Origin 的 token summary 请求与五种 Hook fixture：
+产物位于 `dist/plugins/ambient-project-layer/<target>/`。当前机器会真实执行本机架构的 sidecar；其他平台只做结构验证，最终 Release 还应在对应平台的 CI Runner 上完成原生 smoke test。
 
-```bash
-pnpm smoke:plugin
-```
+## 参与项目
 
-## 数据边界
+- 提交代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要公开提交含漏洞细节的 Issue。
+- 版本变化记录在 [CHANGELOG.md](CHANGELOG.md)。
+- 第三方组件许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-本地 SQLite 默认文件为 `ambient-project.sqlite`，由 Node 内置 `node:sqlite` 访问，只保存项目上下文、Outbox 批次、无事件审查确认、来源引用、Plane 精简缓存、字段所有权、同步元数据和 Hook 审计。`turn_audits.binding_list_tool_called` 只表示同一 `session_id + turn_id` 是否收到过精确的 `list_projects` PostToolUse；Stop 行的 `capture_decision_recorded` 与 `binding_prompt_delivered` 只保存当前回合捕获/绑定交付的布尔结果，非适用场景为 `NULL`，不保存 `last_assistant_message` 或用户原文。Stop 始终允许回合结束，不返回用户可见反馈或注入二次提示。Plane 是用户可见项目数据的唯一真相源。本地不保存完整 Codex transcript、源码、终端输出、评论附件或密钥。
+## 许可证
 
-仓库开发数据库与 Codex Desktop 已安装插件数据库彼此独立，不会自动同步。
+Copyright © 2026 Wenyan Wei。
+
+本项目使用 [MIT License](LICENSE)。
