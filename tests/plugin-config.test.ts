@@ -12,6 +12,7 @@ describe("plugin runtime paths", () => {
   it("keeps MCP and Hook commands inside the plugin root", async () => {
     const manifest = JSON.parse(await readFile(`${pluginRoot}/.codex-plugin/plugin.json`, "utf8")) as Record<string, unknown>;
     expect(manifest).not.toHaveProperty("hooks");
+    expect(manifest).toMatchObject({ name: "ambient-project-layer", version: "0.1.0", author: { name: "Bene-2020" }, interface: { displayName: "Ambient Project Layer", developerName: "Bene-2020" } });
 
     const mcp = JSON.parse(await readFile(`${pluginRoot}/.mcp.json`, "utf8")) as { mcpServers: Record<string, { args: string[]; cwd: string; env?: Record<string, string>; env_vars: string[] }> };
     expect(mcp.mcpServers["ambient-project"]?.command).toBe("runtime/bin/ambient-node");
@@ -27,6 +28,24 @@ describe("plugin runtime paths", () => {
     expect(hooks.hooks.PostToolUse?.[0]?.matcher).toBe("^mcp__ambient_project__(list_projects|record_project_events|acknowledge_no_project_events|decline_project_binding|restore_project_binding)$");
     expect(handlers.every((handler) => !handler.command.includes(".."))).toBe(true);
     expect(handlers.every((handler) => !Object.hasOwn(handler, "statusMessage"))).toBe(true);
+  });
+
+  it("keeps workspace package metadata aligned with the public release", async () => {
+    const packages = [
+      ["package.json", undefined],
+      ["apps/hook-adapter/package.json", "apps/hook-adapter"],
+      ["apps/mcp/package.json", "apps/mcp"],
+      ["apps/panel/package.json", "apps/panel"],
+      ["apps/service/package.json", "apps/service"],
+      ["packages/core/package.json", "packages/core"],
+      ["packages/plane/package.json", "packages/plane"],
+      ["packages/storage/package.json", "packages/storage"],
+    ] as const;
+    for (const [path, directory] of packages) {
+      const metadata = JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), "utf8")) as Record<string, unknown>;
+      expect(metadata).toMatchObject({ version: "0.1.0", private: true, license: "MIT", author: "Bene-2020" });
+      expect(metadata.repository).toEqual({ type: "git", url: "git+https://github.com/Bene-2020/plane-codex-mcp.git", ...(directory ? { directory } : {}) });
+    }
   });
 
   it("defines the strict five-target sidecar matrix", () => {

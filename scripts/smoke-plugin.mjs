@@ -189,7 +189,12 @@ async function assertStaticPackage(packageRoot, target) {
   if (handlers.length !== 5 || handlers.some((handler) => handler.command !== expectedHookCommand)) throw new Error(`Static package ${packageRoot} has the wrong Hook selection`);
   const launcher = join(runtimeRoot, "bin", target.launcherFile);
   await stat(join(runtimeRoot, target.sidecarRelativePath.replace("runtime/", "")));
+  await stat(join(packageRoot, "LICENSE"));
+  await stat(join(packageRoot, "THIRD_PARTY_NOTICES.md"));
   await stat(join(runtimeRoot, "LICENSE.nodejs"));
+  await stat(join(runtimeRoot, "node_modules", "@makeplane", "plane-node-sdk", "LICENSE"));
+  await stat(join(runtimeRoot, "node_modules", "fastify", "LICENSE"));
+  await stat(join(runtimeRoot, "node_modules", "@fastify", "cors", "LICENSE"));
   if (await readFile(launcher, "utf8") !== renderLauncher(target)) throw new Error(`Static package ${packageRoot} does not enforce ${target.id}`);
 }
 
@@ -226,6 +231,7 @@ try {
   const target = getNodeSidecarTarget(runtimeMetadata.target);
   if (target.platform !== process.platform || target.arch !== process.arch) throw new Error(`Native plugin smoke must use the host target, found ${target.id} on ${process.platform}/${process.arch}`);
   if (!manifest.interface?.longDescription?.includes("platform-specific")) throw new Error("Plugin manifest must describe platform-specific packages");
+  if (manifest.name !== "ambient-project-layer" || manifest.version !== "0.1.0" || manifest.author?.name !== "Bene-2020" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error("Plugin manifest product metadata is inconsistent");
   if (Object.hasOwn(manifest, "hooks")) throw new Error("Manifest must rely on default hooks/hooks.json discovery");
   const mcpConfig = JSON.parse(await readFile(join(isolatedPlugin, ".mcp.json"), "utf8"));
   const mcpServer = mcpConfig.mcpServers["ambient-project"];
@@ -243,7 +249,12 @@ try {
   await stat(hookEntrypoint);
   await stat(mcpCommand);
   await stat(join(isolatedPlugin, "runtime", "bin", target.sidecarFile));
+  await stat(join(isolatedPlugin, "LICENSE"));
+  await stat(join(isolatedPlugin, "THIRD_PARTY_NOTICES.md"));
   await stat(join(isolatedPlugin, "runtime", "LICENSE.nodejs"));
+  await stat(join(isolatedPlugin, "runtime", "node_modules", "@makeplane", "plane-node-sdk", "LICENSE"));
+  await stat(join(isolatedPlugin, "runtime", "node_modules", "fastify", "LICENSE"));
+  await stat(join(isolatedPlugin, "runtime", "node_modules", "@fastify", "cors", "LICENSE"));
   await stat(join(isolatedPlugin, "runtime", "runtime.json"));
   await stat(join(isolatedPlugin, "panel", "dist", "index.html"));
   try {

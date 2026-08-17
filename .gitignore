@@ -24,6 +24,8 @@ CONTEXT.md
 
 # Generated plugin and release content
 plugin/.mcp.json
+plugin/LICENSE
+plugin/THIRD_PARTY_NOTICES.md
 plugin/panel/
 plugin/runtime/
 vendor/node/

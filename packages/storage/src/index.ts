@@ -75,7 +75,7 @@ export class Storage {
   readonly db: SqliteDatabase;
   private readonly leaseMs: number;
 
-  constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project-demo.sqlite", options: StorageOptions = {}) {
+  constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project.sqlite", options: StorageOptions = {}) {
     this.leaseMs = options.leaseMs ?? 30_000;
     this.db = new SqliteDatabase(filename);
     this.db.pragma("journal_mode = WAL");

@@ -1,6 +1,11 @@
 {
   "name": "@ambient/storage",
   "version": "0.1.0",
+  "description": "SQLite storage and Outbox implementation for Ambient Project Layer.",
+  "private": true,
+  "license": "MIT",
+  "author": "Bene-2020",
+  "repository": { "type": "git", "url": "git+https://github.com/Bene-2020/plane-codex-mcp.git", "directory": "packages/storage" },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -1,4 +1,4 @@
-# Ambient Project Layer Demo
+# Ambient Project Layer
 
 Ambient Project Layer 通过 MCP 将当前工作回合的项目事件可靠写入本地 SQLite Outbox，服务进程异步投射到 Plane，并提供轻量 React Inline 项目卡片查看相关工作和直接修改状态。Plane 是用户可见项目数据的最终真相源和完整项目管理界面；Panel 不直接持有或调用 Plane API Key。
 
@@ -111,6 +111,6 @@ pnpm smoke:plugin
 
 ## 数据边界
 
-本地 SQLite 默认文件为 `ambient-project-demo.sqlite`，由 Node 内置 `node:sqlite` 访问，只保存项目上下文、Outbox 批次、无事件审查确认、来源引用、Plane 精简缓存、字段所有权、同步元数据和 Hook 审计。`turn_audits.binding_list_tool_called` 只表示同一 `session_id + turn_id` 是否收到过精确的 `list_projects` PostToolUse；Stop 行的 `capture_decision_recorded` 与 `binding_prompt_delivered` 只保存当前回合捕获/绑定交付的布尔结果，非适用场景为 `NULL`，不保存 `last_assistant_message` 或用户原文。Stop 始终允许回合结束，不返回用户可见反馈或注入二次提示。Plane 是用户可见项目数据的唯一真相源。本地不保存完整 Codex transcript、源码、终端输出、评论附件或密钥。
+本地 SQLite 默认文件为 `ambient-project.sqlite`，由 Node 内置 `node:sqlite` 访问，只保存项目上下文、Outbox 批次、无事件审查确认、来源引用、Plane 精简缓存、字段所有权、同步元数据和 Hook 审计。`turn_audits.binding_list_tool_called` 只表示同一 `session_id + turn_id` 是否收到过精确的 `list_projects` PostToolUse；Stop 行的 `capture_decision_recorded` 与 `binding_prompt_delivered` 只保存当前回合捕获/绑定交付的布尔结果，非适用场景为 `NULL`，不保存 `last_assistant_message` 或用户原文。Stop 始终允许回合结束，不返回用户可见反馈或注入二次提示。Plane 是用户可见项目数据的唯一真相源。本地不保存完整 Codex transcript、源码、终端输出、评论附件或密钥。
 
 仓库开发数据库与 Codex Desktop 已安装插件数据库彼此独立，不会自动同步。

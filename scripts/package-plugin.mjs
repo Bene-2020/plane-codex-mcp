@@ -75,9 +75,10 @@ function runtimeFileFilter(packageRoot, source) {
   const relativeSource = relative(packageRoot, source);
   const pathParts = relativeSource.split(sep);
   const fileName = pathParts.at(-1);
-  if (pathParts.includes("node_modules") || ["test", "tests", "__tests__"].some((part) => pathParts.includes(part))) return false;
+  if (pathParts.includes("node_modules") || ["test", "tests", "__tests__", "benchmark", "benchmarks"].some((part) => pathParts.includes(part))) return false;
   if (fileName === "tsconfig.json" || fileName === "bench.js" || fileName === "eslint.config.mjs") return false;
   if (statSync(source).isDirectory()) return true;
+  if (/^(license|notice|copying)(\.|$)/i.test(fileName)) return true;
   return [".cjs", ".js", ".json", ".mjs", ".node"].includes(source.endsWith(".node") ? ".node" : source.slice(source.lastIndexOf(".")));
 }
 
@@ -173,6 +174,10 @@ async function packageTarget(target, destinationPluginRoot) {
   } else {
     await copyPluginScaffold(destinationPluginRoot);
   }
+  await Promise.all([
+    cp(join(root, "LICENSE"), join(destinationPluginRoot, "LICENSE")),
+    cp(join(root, "THIRD_PARTY_NOTICES.md"), join(destinationPluginRoot, "THIRD_PARTY_NOTICES.md")),
+  ]);
 
   const runtimeRoot = join(destinationPluginRoot, "runtime");
   const runtimeNodeModules = join(runtimeRoot, "node_modules");

@@ -45,8 +45,12 @@ async function validatePackage(pluginRoot, { executeNative = true } = {}) {
   const mcpConfig = JSON.parse(await readFile(join(pluginRoot, ".mcp.json"), "utf8"));
   const hooksConfig = JSON.parse(await readFile(join(pluginRoot, "hooks", "hooks.json"), "utf8"));
   const manifest = JSON.parse(await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
+  if (manifest.name !== "ambient-project-layer" || manifest.version !== "0.1.0" || manifest.author?.name !== "Bene-2020" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error(`${pluginRoot}: manifest product metadata is inconsistent`);
   if (!manifest.interface?.longDescription?.includes("platform-specific")) throw new Error(`${pluginRoot}: manifest must describe platform-specific packages`);
   if (!manifest.interface?.longDescription?.includes("Windows x64")) throw new Error(`${pluginRoot}: manifest must list the Windows x64 target`);
+  for (const legalFile of [join(pluginRoot, "LICENSE"), join(pluginRoot, "THIRD_PARTY_NOTICES.md")]) {
+    if ((await stat(legalFile)).size === 0) throw new Error(`${pluginRoot}: release legal file is empty: ${legalFile}`);
+  }
 
   const metadata = JSON.parse(await readFile(join(runtimeRoot, "runtime.json"), "utf8"));
   if (!NODE_SIDECAR_TARGET_IDS.includes(metadata.target)) throw new Error(`${pluginRoot}: runtime manifest has unsupported target ${metadata.target}`);
@@ -84,10 +88,14 @@ async function validatePackage(pluginRoot, { executeNative = true } = {}) {
   const launcherText = await readFile(launcher, "utf8");
   if (launcherText !== renderLauncher(target)) throw new Error(`${pluginRoot}: launcher does not enforce ${target.id} or does not invoke its internal sidecar`);
   if ((await stat(sidecar)).size === 0 || (await stat(join(runtimeRoot, "LICENSE.nodejs"))).size === 0) throw new Error(`${pluginRoot}: sidecar and Node license must be non-empty`);
+  for (const dependencyLicense of ["@makeplane/plane-node-sdk/LICENSE", "fastify/LICENSE", "@fastify/cors/LICENSE"]) {
+    if ((await stat(join(runtimeRoot, "node_modules", dependencyLicense))).size === 0) throw new Error(`${pluginRoot}: runtime dependency license is empty: ${dependencyLicense}`);
+  }
   if (!(await readFile(join(runtimeRoot, "mcp/index.js"), "utf8")).includes("acknowledge_no_project_events")) throw new Error(`${pluginRoot}: packaged MCP runtime must expose acknowledge_no_project_events`);
 
   const runtimeFiles = await collectFiles(runtimeRoot);
   if (runtimeFiles.some((path) => path.endsWith(".node") || path.includes("better-sqlite3"))) throw new Error(`${pluginRoot}: packaged runtime must not contain a native SQLite ABI artifact`);
+  if (runtimeFiles.some((path) => path.split(/[\\/]/).some((part) => part === "benchmark" || part === "benchmarks"))) throw new Error(`${pluginRoot}: packaged runtime must not contain dependency benchmark fixtures`);
   if (mcpServer.command === "node" || handlers.some((handler) => handler.command === "node")) throw new Error(`${pluginRoot}: runtime must not fall back to a system Node command`);
 
   const isNative = target.platform === process.platform && target.arch === process.arch;
@@ -110,4 +118,4 @@ if (options.all) {
 
 const results = [];
 for (const pluginRoot of roots) results.push(await validatePackage(pluginRoot));
-process.stdout.write(`Plugin runtime valid: ${results.join(", ")}, Node ${NODE_SIDECAR_VERSION}, internal sidecar, Node license, no native SQLite module.\n`);
+process.stdout.write(`Plugin runtime valid: ${results.join(", ")}, version 0.1.0, project and dependency licenses, Node ${NODE_SIDECAR_VERSION} sidecar, no native SQLite module.\n`);
