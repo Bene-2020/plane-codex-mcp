@@ -1,20 +1,29 @@
 node_modules/
 dist/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and data
+.env
+.env.*
+!.env.example
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
-.env
-coverage/
-*.tsbuildinfo
-.DS_Store
-!plugin/runtime/
-!plugin/runtime/**
-!plugin/panel/
-!plugin/panel/dist/
-!plugin/panel/dist/**
+*.log
 
-# Pinned Node sidecar build cache and generated plugin binary. The packaging
-# script downloads the declared version and places it in plugin/runtime/bin/.
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local development instructions
+AGENTS.md
+CONTEXT.md
+
+# Generated plugin and release content
+plugin/.mcp.json
+plugin/panel/
+plugin/runtime/
 vendor/node/
-plugin/runtime/bin/node
-plugin/runtime/bin/node.exe
