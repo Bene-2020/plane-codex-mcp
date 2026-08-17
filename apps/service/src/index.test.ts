@@ -218,10 +218,12 @@ describe("local service and outbox worker", () => {
     const plane = new FakePlaneAdapter();
     plane.delayMs = 70;
     plane.delayOperation = "createItem";
+    const renewBatchLease = storageA.renewBatchLease.bind(storageA);
+    const renew = vi.spyOn(storageA, "renewBatchLease").mockImplementation((batchId, claimToken) => renewBatchLease(batchId, claimToken, 1_000));
     const workerA = new OutboxWorker(storageA, new EventCoordinator(storageA, plane));
     const workerB = new OutboxWorker(storageB, new EventCoordinator(storageB, plane));
     const firstRun = workerA.processOnce();
-    await new Promise((resolve) => setTimeout(resolve, 35));
+    await vi.waitFor(() => expect(renew).toHaveBeenCalled());
     expect(await workerB.processOnce()).toBe(0);
     expect(await firstRun).toBe(1);
     expect(plane.calls.filter((call) => call.startsWith("create:")).length).toBe(1);
