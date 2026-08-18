@@ -137,7 +137,7 @@ codex mcp get ambient-project
 
 如果暂时不想选择，可以回复“稍后再说”；本次 task 不会重复询问。如果明确要求某个目录以后不再询问，插件会只在本地保存这一偏好，之后也可以要求恢复绑定。
 
-Ambient Plane 绑定只使用宿主工具 `mcp__ambient_project__list_projects` 的本轮真实返回；用户明确请求 Codex Projects 时，`codex_app__list_projects` 仍可正常使用，但不能作为 Plane 绑定证据。绑定提示只接受 Ambient 返回中的 `name` + `identifier`，不会展示或接受 `path`、`projectKind`、`hostId` 或本地项目名。
+Ambient Plane 绑定只使用宿主工具 `mcp__ambient_project__list_projects` 的本轮真实返回；用户明确请求 Codex Projects 时，`codex_app__list_projects` 仍可正常使用，但不能作为 Plane 绑定证据。绑定提示中的每个 bullet 只接受精确的 `identifier | name` 成对格式（允许字段分别使用 Markdown 粗体、下划线粗体或行内代码），不会接受前后缀、额外字段、`path`、`projectKind`、`hostId` 或本地项目名。
 
 ## 数据、权限与隐私
 

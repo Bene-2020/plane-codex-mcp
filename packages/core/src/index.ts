@@ -135,10 +135,10 @@ export const supersededPlanRule = "When the user explicitly overturns, abandons,
 export const parentChildClosureRule = "Before completing, superseding, or archiving a parent item, inspect every known child item and resolve each child explicitly. Never leave planned or in-progress children behind only because their parent changed.";
 export const projectBindingFinalDeliveryRule = [
   `After calling ${projectBindingListProjectsToolName}, its tool output, commentary, and thought are internal context, not user delivery.`,
-  `The fixed block may contain only name+identifier pairs from that turn's real ${projectBindingListProjectsToolName} return; if the result is empty, exceptional, from another tool, or contains path/projectKind/hostId, do not deliver a binding prompt.`,
+  `The fixed block may contain only exact name+identifier pairs from that turn's real ${projectBindingListProjectsToolName} return. Each Markdown bullet must use this finite format: - **<identifier>** | <name> (plain fields or individually wrapped in Markdown bold, underscore-bold, or inline code are also allowed). Reject prefixes, suffixes, labels, extra separators, extra fields, path/projectKind/hostId, empty results, exceptional results, and results from another tool.`,
   "Before the final reply, last_assistant_message must contain this fixed block with the real returned Plane projects:",
   `### ${projectBindingPromptHeader}`,
-  "- <真实返回的 Plane 项目>",
+  "- **<identifier>** | <name>",
   projectBindingPromptInstruction,
   "Continue the user's main task normally.",
 ].join("\n");
@@ -148,6 +148,27 @@ function hasForbiddenBindingMetadataLabel(value: string): boolean {
   return /(?:^|[^A-Za-z0-9_])(?:path|projectKind|hostId)(?:$|[^A-Za-z0-9_])/i.test(value);
 }
 
+function normalizeBindingText(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+function escapeBindingRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function bindingFieldPattern(value: string): string {
+  const escaped = escapeBindingRegExp(normalizeBindingText(value));
+  return `(?:${escaped}|\\*\\*${escaped}\\*\\*|__${escaped}__|\`${escaped}\`)`;
+}
+
+function matchesBindingCandidate(item: string, candidate: BindingProjectCandidate): boolean {
+  const normalizedItem = normalizeBindingText(item);
+  const identifier = normalizeBindingText(candidate.identifier);
+  const name = normalizeBindingText(candidate.name);
+  if (!normalizedItem || !identifier || !name || hasForbiddenBindingMetadataLabel(normalizedItem)) return false;
+  return new RegExp(`^${bindingFieldPattern(identifier)}\\s*\\|\\s*${bindingFieldPattern(name)}$`, "u").test(normalizedItem);
+}
+
 export function hasCompleteProjectBindingPrompt(message: string | null | undefined, candidates?: BindingProjectCandidate[] | null): boolean {
   if (!message) return false;
   const visibleMessage = message.replace(/<!--[\s\S]*?-->/g, "");
@@ -155,11 +176,12 @@ export function hasCompleteProjectBindingPrompt(message: string | null | undefin
   if (headerIndex < 0) return false;
   const instructionIndex = visibleMessage.indexOf(projectBindingPromptInstruction, headerIndex);
   if (instructionIndex < 0) return false;
-  const items = [...visibleMessage.slice(headerIndex, instructionIndex).matchAll(/^\s*[-*+]\s+(.+?)\s*$/gm)].map((match) => match[1] ?? "");
-  if (!items.length) return false;
+  const blockLines = visibleMessage.slice(headerIndex + projectBindingPromptHeader.length, instructionIndex).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!blockLines.length || blockLines.some((line) => !/^-\s+.+$/.test(line))) return false;
+  const items = blockLines.map((line) => line.replace(/^-\s+/, ""));
   if (candidates === undefined) return true;
   if (!candidates?.length) return false;
-  return items.every((item) => !hasForbiddenBindingMetadataLabel(item) && candidates.some((candidate) => item.includes(candidate.name) && item.includes(candidate.identifier)));
+  return items.every((item) => candidates.some((candidate) => matchesBindingCandidate(item, candidate)));
 }
 
 export function canonicalizeCwd(cwd: string): string {

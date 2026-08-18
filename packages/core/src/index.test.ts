@@ -101,6 +101,8 @@ describe("core project contracts", () => {
     expect(hasCompleteProjectBindingPrompt("<!--\n" + complete + "\n-->")).toBe(false);
     expect(hasCompleteProjectBindingPrompt("工作继续完成了。\n<!-- " + complete + " -->")).toBe(false);
     expect(projectBindingFinalDeliveryRule).toContain("tool output, commentary, and thought are internal context");
+    expect(projectBindingFinalDeliveryRule).toContain("- **<identifier>** | <name>");
+    expect(projectBindingFinalDeliveryRule).toContain("Reject prefixes, suffixes, labels, extra separators, extra fields");
     expect(projectBindingFinalDeliveryRule).toContain(projectBindingPromptInstruction);
   });
 
@@ -116,11 +118,17 @@ describe("core project contracts", () => {
   });
 
   it("matches binding block projects to the saved name and identifier source", () => {
-    const candidates = [{ name: "Demo Project", identifier: "DEMO" }];
-    const complete = "工作继续完成了。\n\n### " + projectBindingPromptHeader + "\n- **DEMO** | Demo Project\n" + projectBindingPromptInstruction;
+    const candidates = [{ name: "Demo", identifier: "P1" }, { name: "演示项目", identifier: "项目-1" }];
+    const complete = "工作继续完成了。\n\n### " + projectBindingPromptHeader + "\n- **P1** | Demo\n- 项目-1 | `演示项目`\n" + projectBindingPromptInstruction;
     expect(hasCompleteProjectBindingPrompt(complete, candidates)).toBe(true);
-    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- **LOCAL** | Local Project\n" + projectBindingPromptInstruction, candidates)).toBe(false);
-    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- **DEMO** | Demo Project | path: /tmp/project\n" + projectBindingPromptInstruction, candidates)).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- P10 | Demo\n" + projectBindingPromptInstruction, candidates)).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- P1 | Demo Local\n" + projectBindingPromptInstruction, candidates)).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- prefix P1 | Demo\n" + projectBindingPromptInstruction, candidates)).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- P1 | Demo suffix\n" + projectBindingPromptInstruction, candidates)).toBe(false);
+    for (const metadata of ["path: /tmp/project", "projectKind: local", "hostId: desktop"]) {
+      expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- P1 | Demo | " + metadata + "\n" + projectBindingPromptInstruction, candidates)).toBe(false);
+    }
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- P1 | Demo\nsource: local\n" + projectBindingPromptInstruction, candidates)).toBe(false);
     expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- **DEMO** | Demo Project\n" + projectBindingPromptInstruction, [])).toBe(false);
   });
 });

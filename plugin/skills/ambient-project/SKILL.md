@@ -13,11 +13,11 @@ When the injected context says this cwd has no project context, follow its onboa
 
 During Ambient Plane binding, use only `mcp__ambient_project__list_projects` as the candidate source. `codex_app__list_projects` may still be used for an explicit Codex Projects request, but never as Plane binding evidence. Binding candidates may only come from the real return of `mcp__ambient_project__list_projects` in this turn. Never show or accept `path`, `projectKind`, or `hostId`, and never use a Codex local project name as a Plane candidate. Before an explicit user choice, do not call `mcp__ambient_project__bind_project`; never guess from a directory name, Codex Project, Git remote, or history.
 
-Only when this turn actually calls `mcp__ambient_project__list_projects` and the cwd remains unbound with no permanent refusal or current-session deferral does the final binding-delivery rule apply. Its tool output, commentary, and thought are not user delivery; the fixed block may contain only name+identifier pairs from that turn's real `mcp__ambient_project__list_projects` return. If the result is empty, exceptional, from another tool, or contains `path`/`projectKind`/`hostId`, do not deliver a binding prompt. Before the final reply, put the real returned projects into the final `last_assistant_message` under this fixed block, while continuing the user's main task normally:
+Only when this turn actually calls `mcp__ambient_project__list_projects` and the cwd remains unbound with no permanent refusal or current-session deferral does the final binding-delivery rule apply. Its tool output, commentary, and thought are not user delivery; each fixed-block bullet must exactly be `- **<identifier>** | <name>` (plain fields or individually wrapped in Markdown bold, underscore-bold, or inline code are also allowed), using one name+identifier pair from that turn's real `mcp__ambient_project__list_projects` return. Reject prefixes, suffixes, labels, extra separators, extra fields, `path`/`projectKind`/`hostId`, empty results, exceptional results, or results from another tool. Before the final reply, put the real returned projects into the final `last_assistant_message` under this fixed block, while continuing the user's main task normally:
 
 ```text
 ### 项目绑定（待确认）
-- <真实返回的 Plane 项目>
+- **<identifier>** | <name>
 请选择一个项目，或回复‘稍后再说’。
 ```
 

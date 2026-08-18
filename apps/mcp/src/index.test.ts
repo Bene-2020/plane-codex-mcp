@@ -28,6 +28,7 @@ describe("ambient MCP tools and App bootstrap", () => {
       expect(client.getInstructions()).toContain(projectBindingToolSourceRule);
       expect(client.getInstructions()).toContain(projectBindingListProjectsToolName);
       expect(client.getInstructions()).toContain(codexDesktopListProjectsToolName);
+      expect(client.getInstructions()).toContain("- **<identifier>** | <name>");
       expect(client.getInstructions()).toContain("may still be used for an explicit Codex Projects request, but never as Plane binding evidence");
       expect(client.getInstructions()).toContain(projectBindingToolName);
       expect(client.getInstructions()).toContain(relatedItemIdContract);
@@ -85,6 +86,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     expect(skill).toContain("call `mcp__ambient_project__restore_project_binding` first, then `mcp__ambient_project__list_projects`");
     expect(skill).toContain("before that, even a normal work request is the first onboarding prompt");
     expect(skill).toContain("`codex_app__list_projects` may still be used for an explicit Codex Projects request, but never as Plane binding evidence");
+    expect(skill).toContain("`- **<identifier>** | <name>`");
     expect(skill).toContain("`path`, `projectKind`, or `hostId`");
   });
 

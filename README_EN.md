@@ -137,7 +137,7 @@ Completely quit and restart Codex, then create a new task. An already running MC
 
 If you do not want to choose yet, reply "later"; the current task will not ask again. If you explicitly ask a directory never to prompt again, the plugin stores that preference only locally. You can ask to restore binding later.
 
-Ambient Plane binding uses only the real return from the host tool `mcp__ambient_project__list_projects` in the current turn. `codex_app__list_projects` remains available for explicit Codex Projects requests, but it must never be used as Plane binding evidence. Binding prompts accept only Ambient-returned `name` + `identifier` pairs and never display or accept `path`, `projectKind`, `hostId`, or a local project name.
+Ambient Plane binding uses only the real return from the host tool `mcp__ambient_project__list_projects` in the current turn. `codex_app__list_projects` remains available for explicit Codex Projects requests, but it must never be used as Plane binding evidence. Each binding bullet must use an exact `identifier | name` pair (the fields may be individually wrapped in Markdown bold, underscore-bold, or inline code); prefixes, suffixes, extra fields, `path`, `projectKind`, `hostId`, and local project names are rejected.
 
 ## Data, permissions, and privacy
 
