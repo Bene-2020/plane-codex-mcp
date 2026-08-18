@@ -26,6 +26,21 @@ export interface FakePlaneFailure {
   afterWrite?: boolean;
 }
 
+export const UNRESOLVED_RELATED_ITEM_ERROR_CODE = "UNRESOLVED_RELATED_ITEM" as const;
+
+export class UnresolvedRelatedItemError extends Error {
+  readonly code = UNRESOLVED_RELATED_ITEM_ERROR_CODE;
+
+  constructor(
+    readonly relatedItemId: string,
+    readonly eventType: SourceEvent["type"],
+    readonly sourceEventId: string,
+  ) {
+    super(`${UNRESOLVED_RELATED_ITEM_ERROR_CODE}: relatedItemId ${JSON.stringify(relatedItemId)} did not resolve to a Plane item for ${eventType} source event ${sourceEventId}.`);
+    this.name = "UnresolvedRelatedItemError";
+  }
+}
+
 export function sourceMarker(sourceEventId: string): string { return `[ambient-source:${sourceEventId}]`; }
 function activityMarker(sourceEventId: string): string { return `[ambient:${sourceEventId}]`; }
 function hasSourceMarker(value: string | undefined, sourceEventId: string): boolean {
@@ -471,12 +486,13 @@ export class EventCoordinator {
 
   private resolveItem(currentEventId: string, currentRemoteSourceId: string, event: SourceEvent, planeItems: PlaneItem[], claimToken?: string): PlaneItem | null {
     const reference = this.storage.getSourceReference(currentEventId);
-    const relatedItemId = reference?.planeItemId ?? event.relatedItemId;
+    const relatedItemId = reference?.planeItemId ?? event.relatedItemId?.trim();
     // relatedItemId is an exact Plane UUID or user-visible identifier; titles are never used as references.
     if (relatedItemId) {
       const resolved = planeItems.find((item) => item.id === relatedItemId)
         ?? planeItems.find((item) => item.identifier === relatedItemId)
         ?? this.storage.getCachedItem(relatedItemId);
+      if (!resolved) throw new UnresolvedRelatedItemError(relatedItemId, event.type, currentEventId);
       if (resolved && reference?.planeItemId !== resolved.id) this.storage.updateSourcePlaneItem(currentEventId, resolved.id, claimToken);
       return resolved;
     }

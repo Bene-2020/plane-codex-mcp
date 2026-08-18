@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createPlaneAdapter, EventCoordinator, FakePlaneAdapter, PlaneSdkAdapter } from "./index.js";
+import { createPlaneAdapter, EventCoordinator, FakePlaneAdapter, PlaneSdkAdapter, UnresolvedRelatedItemError } from "./index.js";
 import { Storage } from "@ambient/storage";
 import { PlaneClient } from "@makeplane/plane-node-sdk";
-import { recordKinds, remoteSourceId, type RecordKind } from "@ambient/core";
+import { recordKinds, remoteSourceId, type RecordKind, type SourceEvent } from "@ambient/core";
 
 const bug = (title = "登录页面偶尔会白屏") => ({ type: "bug" as const, title, summary: title, userDirected: true, sourceExcerpt: title });
 
@@ -47,7 +47,44 @@ function sdkHarness(stateDefinitions = [{ id: "state-captured", name: "Backlog",
 
 const sdkContext = { id: "project_1", cwd: "/work", canonicalCwd: "/work", planeBaseUrl: "https://api.plane.so", workspaceSlug: "demo-workspace", planeProjectId: "demo-project", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" };
 
+const unresolvedRelatedEvents: Array<[string, SourceEvent]> = [
+  ["completed", { type: "completed", title: "完成工作项", summary: "完成工作项", relatedItemId: "DEMO-999", userDirected: false, sourceExcerpt: "完成工作项" }],
+  ["progress", { type: "progress", title: "推进工作项", summary: "推进工作项", relatedItemId: "DEMO-999", userDirected: false, sourceExcerpt: "推进工作项" }],
+  ["task", { type: "task", title: "关联任务", summary: "关联任务", relatedItemId: "DEMO-999", userDirected: false, sourceExcerpt: "关联任务" }],
+  ["decision", { type: "decision", title: "关联决策", summary: "关联决策", relatedItemId: "DEMO-999", userDirected: false, sourceExcerpt: "关联决策" }],
+  ["plan", { type: "plan", title: "关联计划", summary: "关联计划", relatedItemId: "DEMO-999", userDirected: false, sourceExcerpt: "关联计划", steps: [{ title: "不应创建的步骤", summary: "不应创建" }] }],
+];
+
+function planeMutations(plane: FakePlaneAdapter): string[] {
+  return plane.calls.filter((call) => call.startsWith("create:") || call.startsWith("create-existing:") || call.startsWith("update:") || call.startsWith("activity:") || call.startsWith("activity-existing:") || call.startsWith("delete:"));
+}
+
 describe("Plane projection", () => {
+  it.each(unresolvedRelatedEvents)("fails an unresolved explicit reference before any Plane mutation for %s", async (_label, event) => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "unresolved", events: [event] });
+
+    await expect(coordinator.syncBatch(storage.listPendingBatches()[0]!)).rejects.toMatchObject({
+      name: "UnresolvedRelatedItemError",
+      code: "UNRESOLVED_RELATED_ITEM",
+      relatedItemId: "DEMO-999",
+      eventType: event.type,
+      sourceEventId: "event_1_0",
+    } satisfies Partial<UnresolvedRelatedItemError>);
+
+    const source = storage.getSourceReference("event_1_0");
+    expect(source).toMatchObject({ projectionStatus: "failed", projectionAttempts: 1, planeItemId: null });
+    expect(source?.projectionError).toContain("UNRESOLVED_RELATED_ITEM");
+    expect(source?.projectionError).not.toContain("PLANE_API_KEY");
+    expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("pending");
+    expect(planeMutations(plane)).toEqual([]);
+    expect(await plane.listItems(context)).toHaveLength(0);
+    storage.close();
+  });
+
   it("loads every Plane work-item page for authoritative project counts", async () => {
     const { adapter, items } = sdkHarness();
     for (let index = 0; index < 101; index += 1) items.push({ id: `item-${index}`, sequence_id: index + 1, project: "demo-project", name: `Item ${index}`, state: "state-captured", updated_at: "2026-08-13T00:00:00.000Z" });
@@ -245,6 +282,30 @@ describe("Plane projection", () => {
     expect(plane.getActivities(item.id)).toHaveLength(1);
     expect((await plane.listItems(context))).toHaveLength(1);
     expect(storage.getSourceReference("event_2_0")?.planeItemId).toBe(item.id);
+    storage.close();
+  });
+
+  it("retries an unresolved reference after the target appears and stores its UUID", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    const event: SourceEvent = { type: "progress", title: "继续修复", summary: "继续修复", userDirected: false, relatedItemId: "DEMO-1", sourceExcerpt: "继续修复" };
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "retry", events: [event] });
+
+    await expect(coordinator.syncBatch(storage.listPendingBatches()[0]!)).rejects.toBeInstanceOf(UnresolvedRelatedItemError);
+    const failedBatch = storage.listPendingBatches()[0]!;
+    const target = await plane.createItem(context, { title: "目标工作项", description: "目标工作项", kind: "task", status: "captured", sourceEventId: "target-source" });
+    expect(target.identifier).toBe("DEMO-1");
+    expect(storage.setBatchStatus(failedBatch.id, "failed", "unresolved relation")).toBe(true);
+    storage.retryBatch(failedBatch.id);
+
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(storage.getSourceReference("event_1_0")).toMatchObject({ projectionStatus: "completed", planeItemId: target.id });
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get()).toMatchObject({ status: "synced" });
+    expect(plane.getActivities(target.id)).toHaveLength(1);
+    expect(plane.calls.filter((call) => call === `activity:${target.id}`)).toHaveLength(1);
     storage.close();
   });
 

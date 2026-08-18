@@ -129,6 +129,23 @@ describe("local service and outbox worker", () => {
     await service.app.close();
   });
 
+  it("fails an unresolved explicit reference through the worker without mutating Plane", async () => {
+    const storage = new Storage(":memory:");
+    const plane = new FakePlaneAdapter();
+    const service = createService({ storage, plane });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "unresolved-worker", events: [{ type: "completed", title: "完成不存在的工作项", summary: "完成不存在的工作项", relatedItemId: "DEMO-999", userDirected: false, sourceExcerpt: "完成不存在的工作项" }] });
+
+    expect(await service.worker.processOnce()).toBe(1);
+
+    expect(storage.getSourceReference("event_1_0")).toMatchObject({ projectionStatus: "failed", planeItemId: null });
+    expect(storage.listFailedBatches(context.id)[0]).toMatchObject({ status: "failed", last_error: expect.stringContaining("UNRESOLVED_RELATED_ITEM") });
+    expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).not.toBe("synced");
+    expect(plane.calls.filter((call) => call.startsWith("create:") || call.startsWith("update:") || call.startsWith("activity:"))).toEqual([]);
+    expect(await plane.listItems(context)).toHaveLength(0);
+    await service.app.close();
+  });
+
   it("persists an Inline status change through the narrow Service and Plane path", async () => {
     const storage = new Storage(":memory:");
     const plane = new FakePlaneAdapter();
