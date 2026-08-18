@@ -115,7 +115,8 @@ export type BindingOnboardingPhase = "session_start" | "first_user_prompt" | "co
 export const projectBindingPromptHeader = "项目绑定（待确认）";
 export const projectBindingPromptInstruction = "请选择一个项目，或回复‘稍后再说’。";
 export const projectBindingPermanentRefusalRule = "An explicit long-term do-not-bind/do-not-ask-again instruction takes precedence over every onboarding instruction: call decline_project_binding without calling list_projects, do not ask about binding again, and do not emit the fixed project-binding block.";
-export const projectBindingSessionDeferralRule = "A temporary later/skip/this-time refusal (including this-round/not-now), or continuing another task without choosing, is quiet only for the current session: do not call list_projects, do not ask again, and do not write a binding preference; a new session may ask once again.";
+export const projectBindingSessionDeferralRule = "An explicit temporary later/skip/this-time refusal (including this-round/not-now) is quiet only for the current session: do not call list_projects, do not ask again, and do not write a binding preference; a new session may ask once again.";
+export const projectBindingPostPromptDeferralRule = "Continuing another task without choosing is a current-session deferral only after the visible conversation has already shown an actual binding question or list_projects result. In that case, do not call list_projects or ask again this session; if no binding question has been shown, treat a normal work request as the first onboarding prompt and call list_projects.";
 export const projectBindingRestoreRule = "Only an explicit request to restore or resume binding authorizes restore_project_binding; after restoring, call list_projects and wait for an explicit project choice before calling bind_project.";
 export const supersededPlanRule = "When the user explicitly overturns, abandons, or replaces a plan, include archiveAfterCompletion=true on a user-directed completed event for every affected plan item and generated step item. This completes each item before archiving it. Never delete the items.";
 export const parentChildClosureRule = "Before completing, superseding, or archiving a parent item, inspect every known child item and resolve each child explicitly. Never leave planned or in-progress children behind only because their parent changed.";
@@ -215,7 +216,7 @@ export function buildAdditionalContext(args: {
         lines.push(projectBindingPermanentRefusalRule);
         lines.push(projectBindingSessionDeferralRule);
         lines.push(projectBindingRestoreRule);
-        lines.push("If no actual onboarding question has been asked yet, call list_projects, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid.");
+        lines.push("The next prompt is a normal first onboarding prompt unless it explicitly refuses, defers, or asks to restore; even a normal work request must call list_projects, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid.");
         lines.push("Do not guess from a Codex Project name, directory name, Git remote, or conversation, and do not call bind_project before the user explicitly chooses a returned project.");
         break;
       case "first_user_prompt":
@@ -223,16 +224,17 @@ export function buildAdditionalContext(args: {
         lines.push(projectBindingPermanentRefusalRule);
         lines.push(projectBindingSessionDeferralRule);
         lines.push(projectBindingRestoreRule);
-        lines.push("Otherwise, if no actual onboarding question has appeared yet, in this first user-visible reply immediately call list_projects, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid.");
+        lines.push("Otherwise, in this first user-visible reply immediately call list_projects, show the real returned Plane projects, and ask the user to choose one; a normal work request is not a current-session deferral. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid.");
         lines.push("Do not guess from a Codex Project name, directory name, Git remote, or conversation, and do not call bind_project before the user explicitly chooses a returned project.");
-        lines.push("Only an explicit project choice authorizes bind_project. A vague answer, ignoring the question, or continuing another task is not a project choice.");
+        lines.push("Only an explicit project choice authorizes bind_project. After a binding question is visible, a vague answer, ignoring the question, or continuing another task is not a project choice.");
         break;
       case "continuing_session":
         lines.push("This is a later UserPromptSubmit, but this lifecycle hint does not prove that onboarding was actually asked. Use the visible conversation and current user message, applying the explicit refusal and deferral branches before any fallback onboarding.");
         lines.push(projectBindingPermanentRefusalRule);
         lines.push(projectBindingSessionDeferralRule);
+        lines.push(projectBindingPostPromptDeferralRule);
         lines.push(projectBindingRestoreRule);
-        lines.push("If no actual onboarding question has appeared yet, now call list_projects, show the real returned Plane projects, and ask the user to choose one; if onboarding was asked and the user only deferred, skipped, ignored it, or continued another task, do not repeat the question in this session. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid. Do not bind before an explicit choice.");
+        lines.push("If no actual onboarding question has appeared yet, now call list_projects, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid. Do not bind before an explicit choice.");
         break;
       case "permanently_declined":
         lines.push("This cwd is unbound and has an explicit permanent do-not-ask-again preference. Keep the user's task uninterrupted. Do not proactively discover projects, ask about binding, or include the fixed project-binding block. Only if the current user message explicitly asks to restore or resume project selection, follow restore_project_binding, then list_projects, wait for an explicit project choice, and call bind_project only after that choice.");
@@ -241,6 +243,7 @@ export function buildAdditionalContext(args: {
         lines.push("This cwd is unbound. Inspect the visible conversation and apply the explicit refusal, temporary deferral, and restore branches before fallback onboarding.");
         lines.push(projectBindingPermanentRefusalRule);
         lines.push(projectBindingSessionDeferralRule);
+        lines.push(projectBindingPostPromptDeferralRule);
         lines.push(projectBindingRestoreRule);
         lines.push("If onboarding has not actually been asked, call list_projects, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid. Do not guess or call bind_project before an explicit choice.");
         break;

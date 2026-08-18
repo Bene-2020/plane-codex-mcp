@@ -4,7 +4,7 @@ import { App as McpApp } from "@modelcontextprotocol/ext-apps";
 import { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
-import { parentChildClosureRule, projectBindingConditionalFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPromptInstruction, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
+import { parentChildClosureRule, projectBindingConditionalFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
 import { FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { createMcpServer, PANEL_BOOTSTRAP_META_KEY, PANEL_PROXY_TOOL_NAME, PANEL_RESOURCE_URI, startMcpRuntime } from "./index.js";
@@ -22,6 +22,7 @@ describe("ambient MCP tools and App bootstrap", () => {
       expect(client.getInstructions()).toContain(projectBindingConditionalFinalDeliveryRule);
       expect(client.getInstructions()).toContain(projectBindingPermanentRefusalRule);
       expect(client.getInstructions()).toContain(projectBindingSessionDeferralRule);
+      expect(client.getInstructions()).toContain(projectBindingPostPromptDeferralRule);
       expect(client.getInstructions()).toContain(projectBindingRestoreRule);
       expect(client.getInstructions()).toContain(projectBindingPromptInstruction);
       expect(client.getInstructions()).toContain(relatedItemIdContract);
@@ -73,6 +74,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     expect(skill).toContain("do not call `list_projects`, do not ask again, and do not write a binding preference");
     expect(skill).toContain("Only when this turn actually calls `list_projects`");
     expect(skill).toContain("call `restore_project_binding` first, then `list_projects`");
+    expect(skill).toContain("before that, even a normal work request is the first onboarding prompt");
   });
 
   it("keeps the service bootstrap in component metadata instead of model-visible content", async () => {

@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import { eventBatchSchema, isSessionToken, noProjectEventsReviewSchema, parentChildClosureRule, projectBindingConditionalFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
+import { eventBatchSchema, isSessionToken, noProjectEventsReviewSchema, parentChildClosureRule, projectBindingConditionalFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
 import { createPlaneAdapter } from "@ambient/plane";
 import type { PlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
@@ -80,6 +80,7 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
       "For an unbound cwd, follow the onboarding phase injected by SessionStart/UserPromptSubmit and the visible conversation. Apply the current user's explicit branch before fallback onboarding.",
       projectBindingPermanentRefusalRule,
       projectBindingSessionDeferralRule,
+      projectBindingPostPromptDeferralRule,
       projectBindingRestoreRule,
       "If no actual onboarding question has appeared yet, call list_projects, show the real returned Plane projects, and ask the user to choose. Do not guess from a Codex Project name, directory name, Git remote, or conversation, and call bind_project only after an explicit choice.",
       "When get_binding returns null for the cwd, do not call open_project_panel; call it only after get_binding, bind_project, or change_binding returns a real project context.",

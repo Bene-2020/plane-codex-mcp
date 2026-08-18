@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPromptInstruction, projectBindingPromptHeader, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
+import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingPromptHeader, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
 
 describe("core project contracts", () => {
   it("normalizes cwd without changing its identity", () => {
@@ -54,7 +54,7 @@ describe("core project contracts", () => {
   it("uses distinct unbound onboarding templates and never guesses a project", () => {
     const sessionStart = buildAdditionalContext({ eventName: "SessionStart", sessionId: "session_1", currentCwd: "/unbound/work", onboardingPhase: "session_start" });
     expect(sessionStart).toContain("SessionStart; it cannot interact");
-    expect(sessionStart).toContain("If no actual onboarding question has been asked yet, call list_projects");
+    expect(sessionStart).toContain("even a normal work request must call list_projects");
     expect(sessionStart).toContain("Current cwd: /unbound/work");
     expect(sessionStart).toContain("When get_binding returns null for this cwd, do not call open_project_panel");
     expect(sessionStart).toContain("do not call bind_project before the user explicitly chooses");
@@ -70,6 +70,8 @@ describe("core project contracts", () => {
     expect(firstPrompt).toContain(projectBindingPermanentRefusalRule);
     expect(firstPrompt).toContain(projectBindingSessionDeferralRule);
     expect(firstPrompt).toContain(projectBindingRestoreRule);
+    expect(firstPrompt).not.toContain(projectBindingPostPromptDeferralRule);
+    expect(firstPrompt).toContain("a normal work request is not a current-session deferral");
     expect(firstPrompt).toContain("fixed final binding block is required only after list_projects actually runs");
     expect(firstPrompt).not.toContain("last_assistant_message");
     expect(firstPrompt).not.toContain(projectBindingFinalDeliveryRule);
@@ -78,8 +80,8 @@ describe("core project contracts", () => {
     const continuing = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_1", turnId: "turn_2", currentCwd: "/unbound/work", onboardingPhase: "continuing_session" });
     expect(continuing).toContain("does not prove that onboarding was actually asked");
     expect(continuing).toContain("If no actual onboarding question has appeared yet, now call list_projects");
-    expect(continuing).toContain("if onboarding was asked and the user only deferred");
     expect(continuing).toContain("takes precedence over every onboarding instruction");
+    expect(continuing).toContain(projectBindingPostPromptDeferralRule);
     expect(continuing).toContain("Only an explicit request to restore or resume binding authorizes restore_project_binding");
     expect(continuing).not.toContain("This is the first user prompt");
 
