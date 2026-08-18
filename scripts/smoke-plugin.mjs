@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { getNodeSidecarTarget, getNodeSidecarTargetForHost, NODE_SIDECAR_TARGET_IDS, renderLauncher } from "./node-sidecar-targets.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const releaseVersion = JSON.parse(await readFile(join(root, "package.json"), "utf8")).version;
 const execFile = promisify(execFileCallback);
 const defaultPluginRoot = join(root, "plugin");
 const fixtureRoot = join(root, "fixtures", "hooks");
@@ -169,7 +170,7 @@ async function smokeMcp(mcpEntrypoint, smokeRoot, pluginRoot, target) {
     const initialize = await request(1, "initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "ambient-plugin-smoke", version: "0.1.0" },
+      clientInfo: { name: "ambient-plugin-smoke", version: releaseVersion },
     });
     if (initialize.error || initialize.result?.serverInfo?.name !== "ambient-project") throw new Error(`MCP initialize failed: ${JSON.stringify(initialize)}`);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
@@ -299,7 +300,7 @@ try {
   const target = getNodeSidecarTarget(runtimeMetadata.target);
   if (target.platform !== process.platform || target.arch !== process.arch) throw new Error(`Native plugin smoke must use the host target, found ${target.id} on ${process.platform}/${process.arch}`);
   if (!manifest.interface?.longDescription?.includes("platform-specific")) throw new Error("Plugin manifest must describe platform-specific packages");
-  if (manifest.name !== "ambient-project-layer" || manifest.version !== "0.1.0" || manifest.author?.name !== "Wenyan Wei" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error("Plugin manifest product metadata is inconsistent");
+  if (manifest.name !== "ambient-project-layer" || manifest.version !== releaseVersion || manifest.author?.name !== "Wenyan Wei" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error("Plugin manifest product metadata is inconsistent");
   if (Object.hasOwn(manifest, "hooks")) throw new Error("Manifest must rely on default hooks/hooks.json discovery");
   const mcpConfig = JSON.parse(await readFile(join(isolatedPlugin, ".mcp.json"), "utf8"));
   const mcpServer = mcpConfig.mcpServers["ambient-project"];

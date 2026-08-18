@@ -10,9 +10,11 @@ interface HookGroup { hooks: Array<{ type: string; command: string }> }
 
 describe("plugin runtime paths", () => {
   it("keeps MCP and Hook commands inside the plugin root", async () => {
+    const packageMetadata = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as Record<string, unknown>;
     const manifest = JSON.parse(await readFile(`${pluginRoot}/.codex-plugin/plugin.json`, "utf8")) as Record<string, unknown>;
     expect(manifest).not.toHaveProperty("hooks");
-    expect(manifest).toMatchObject({ name: "ambient-project-layer", version: "0.1.0", author: { name: "Wenyan Wei" }, interface: { displayName: "Ambient Project Layer", developerName: "Wenyan Wei" } });
+    expect(packageMetadata.version).toBe("0.1.1");
+    expect(manifest).toMatchObject({ name: "ambient-project-layer", version: packageMetadata.version, author: { name: "Wenyan Wei" }, interface: { displayName: "Ambient Project Layer", developerName: "Wenyan Wei" } });
 
     const sourceHooks = JSON.parse(await readFile(`${pluginRoot}/hooks/hooks.json`, "utf8")) as { hooks: Record<string, HookGroup[]> };
     for (const targetId of NODE_SIDECAR_TARGET_IDS) {
@@ -36,6 +38,7 @@ describe("plugin runtime paths", () => {
   });
 
   it("keeps workspace package metadata aligned with the public release", async () => {
+    const packageMetadata = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as Record<string, unknown>;
     const packages = [
       ["package.json", undefined],
       ["apps/hook-adapter/package.json", "apps/hook-adapter"],
@@ -48,7 +51,7 @@ describe("plugin runtime paths", () => {
     ] as const;
     for (const [path, directory] of packages) {
       const metadata = JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), "utf8")) as Record<string, unknown>;
-      expect(metadata).toMatchObject({ version: "0.1.0", private: true, license: "MIT", author: "Wenyan Wei" });
+      expect(metadata).toMatchObject({ version: packageMetadata.version, private: true, license: "MIT", author: "Wenyan Wei" });
       expect(metadata.repository).toEqual({ type: "git", url: "git+https://github.com/Bene-2020/plane-codex-mcp.git", ...(directory ? { directory } : {}) });
     }
   });

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,7 @@ describe("release asset packaging", () => {
     await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
     await mkdir(join(pluginRoot, "runtime", "bin"), { recursive: true });
     await Promise.all([
-      writeFile(join(pluginRoot, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "ambient-project-layer", version: "0.1.0" })),
+      writeFile(join(pluginRoot, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "ambient-project-layer", version: "0.1.1" })),
       writeFile(join(pluginRoot, "runtime", "runtime.json"), JSON.stringify({ target: "darwin-arm64", platform: "darwin", arch: "arm64" })),
       writeFile(join(pluginRoot, "runtime", "bin", "node"), "test sidecar"),
       writeFile(join(pluginRoot, "LICENSE"), "test license"),
@@ -50,5 +50,13 @@ describe("release asset packaging", () => {
     ]) {
       expect(existsSync(join(outputRoot, relativePath)), relativePath).toBe(true);
     }
+
+    const marketplace = JSON.parse(await readFile(join(outputRoot, ".agents", "plugins", "marketplace.json"), "utf8"));
+    const packagedPlugin = JSON.parse(await readFile(join(outputRoot, "plugins", "ambient-project-layer", ".codex-plugin", "plugin.json"), "utf8"));
+    expect(marketplace).toMatchObject({
+      name: "ambient",
+      plugins: [{ name: "ambient-project-layer", source: { source: "local", path: "./plugins/ambient-project-layer" } }],
+    });
+    expect(packagedPlugin.version).toBe("0.1.1");
   });
 });

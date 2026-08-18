@@ -41,6 +41,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        id: install
         run: pnpm install --frozen-lockfile
 
       - name: Check diff whitespace
@@ -107,26 +108,33 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        id: install
         run: pnpm install --frozen-lockfile
 
       - name: Build packages and applications
+        id: build
         run: |
           pnpm run build:packages
           pnpm run build:apps
 
       - name: Package native target
+        id: package_target
         run: node scripts/package-plugin.mjs --target "${{ matrix.target }}" --output "${{ env.PACKAGE_ROOT }}"
 
       - name: Validate native runtime and layout
+        id: validate
         run: node scripts/validate-plugin-runtime.mjs "${{ env.PACKAGE_ROOT }}"
 
       - name: Run native MCP and Hook smoke
+        id: smoke
         run: node scripts/smoke-plugin.mjs --plugin-root "${{ env.PACKAGE_ROOT }}"
 
       - name: Build installable marketplace directory
+        id: release_asset
         run: node scripts/package-release-asset.mjs --plugin-root "${{ env.PACKAGE_ROOT }}" --output "${{ env.MARKETPLACE_ROOT }}"
 
       - name: Create Release archive on Unix
+        id: archive_unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -135,11 +143,169 @@ jobs:
           zip -qry "$ARCHIVE_PATH" .
 
       - name: Create Release archive on Windows
+        id: archive_windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path (Split-Path $env:ARCHIVE_PATH) | Out-Null
           tar.exe -a -c -f $env:ARCHIVE_PATH -C $env:MARKETPLACE_ROOT .
+
+      - name: Write candidate evidence
+        if: always()
+        id: evidence
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.quality.outputs.version }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+          RUNNER_LABEL: ${{ matrix.runner }}
+          JOB_STATUS: ${{ job.status }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package_target.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+          RELEASE_ASSET_OUTCOME: ${{ steps.release_asset.outcome }}
+          ARCHIVE_UNIX_OUTCOME: ${{ steps.archive_unix.outcome }}
+          ARCHIVE_WINDOWS_OUTCOME: ${{ steps.archive_windows.outcome }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist/evidence/$TARGET"
+          node --input-type=module <<'NODE'
+          import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+          import { join, relative } from "node:path";
+
+          const workspace = process.env.GITHUB_WORKSPACE;
+          const evidenceRoot = join(workspace, "dist", "evidence", process.env.TARGET);
+          const packageRoot = process.env.PACKAGE_ROOT;
+          const marketplaceRoot = process.env.MARKETPLACE_ROOT;
+          const archivePath = process.env.ARCHIVE_PATH;
+          const textExtensions = new Set([".cjs", ".js", ".json", ".mjs", ".md", ".ts", ".tsx", ".yml", ".yaml"]);
+
+          async function collectFiles(directory) {
+            const files = [];
+            async function collect(current) {
+              let entries;
+              try {
+                entries = await readdir(current, { withFileTypes: true });
+              } catch (error) {
+                if (error?.code === "ENOENT") return;
+                throw error;
+              }
+              for (const entry of entries) {
+                const path = join(current, entry.name);
+                if (entry.isDirectory()) await collect(path);
+                else files.push(path);
+              }
+            }
+            await collect(directory);
+            return files;
+          }
+
+          const files = [...new Set((await Promise.all([packageRoot, marketplaceRoot].map(collectFiles))).flat())];
+          const relativeFiles = files.map((file) => relative(workspace, file).replaceAll("\\", "/"));
+          const forbiddenPathMatches = relativeFiles.filter((file) => /(^|\/)(\.env(?:\..*)?|.*\.(?:sqlite|sqlite3|db)|.*(?:transcript|credential).*)$/i.test(file));
+          const credentialPatterns = [
+            /\bsk-[A-Za-z0-9]{20,}\b/g,
+            /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
+            /\bBearer\s+[A-Za-z0-9._-]{20,}\b/g,
+            /PLANE_API_KEY\s*=\s*(?!replace-in-config-toml\b)\S+/g,
+          ];
+          const credentialMatches = [];
+          for (const file of files) {
+            if (!textExtensions.has(file.slice(file.lastIndexOf("."))) || (await stat(file)).size > 5 * 1024 * 1024) continue;
+            const contents = await readFile(file, "utf8");
+            for (const pattern of credentialPatterns) {
+              if (pattern.test(contents)) credentialMatches.push(relative(workspace, file).replaceAll("\\", "/"));
+              pattern.lastIndex = 0;
+            }
+          }
+          if (forbiddenPathMatches.length || credentialMatches.length) {
+            throw new Error(`Release boundary check failed: forbidden paths=${JSON.stringify(forbiddenPathMatches)}, credential matches=${JSON.stringify(credentialMatches)}`);
+          }
+
+          const pluginManifest = await (async () => {
+            try { return JSON.parse(await readFile(join(packageRoot, ".codex-plugin", "plugin.json"), "utf8")); }
+            catch { return null; }
+          })();
+          const runtimeManifest = await (async () => {
+            try { return JSON.parse(await readFile(join(packageRoot, "runtime", "runtime.json"), "utf8")); }
+            catch { return null; }
+          })();
+          const checks = {
+            install: process.env.INSTALL_OUTCOME,
+            build: process.env.BUILD_OUTCOME,
+            package: process.env.PACKAGE_OUTCOME,
+            validate: process.env.VALIDATE_OUTCOME,
+            smoke: process.env.SMOKE_OUTCOME,
+            releaseAsset: process.env.RELEASE_ASSET_OUTCOME,
+            archiveUnix: process.env.ARCHIVE_UNIX_OUTCOME,
+            archiveWindows: process.env.ARCHIVE_WINDOWS_OUTCOME,
+          };
+          const evidence = {
+            schemaVersion: 1,
+            version: process.env.RELEASE_VERSION,
+            commitSha: process.env.CANDIDATE_SHA,
+            target: process.env.TARGET,
+            runner: process.env.RUNNER_LABEL,
+            workflow: process.env.GITHUB_WORKFLOW,
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            jobStatus: process.env.JOB_STATUS,
+            checks,
+            plugin: pluginManifest ? { name: pluginManifest.name, version: pluginManifest.version } : null,
+            runtime: runtimeManifest,
+            artifacts: {
+              release: `release-${process.env.TARGET}`,
+              plugin: `plugin-${process.env.TARGET}`,
+              evidence: `evidence-${process.env.TARGET}`,
+              archive: archivePath ? relative(workspace, archivePath).replaceAll("\\", "/") : null,
+              retentionDays: 14,
+            },
+            safety: {
+              forbiddenPaths: [".env", ".sqlite", ".db", "transcript", "credential"],
+              forbiddenPathMatches,
+              credentialMatches,
+              fullTranscriptIncluded: false,
+              sessionTokensIncluded: false,
+            },
+          };
+          await writeFile(join(evidenceRoot, "evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
+          await writeFile(join(evidenceRoot, "summary.md"), [
+            `# Candidate evidence: ${process.env.TARGET}`,
+            "",
+            `- Version: ${process.env.RELEASE_VERSION}`,
+            `- Candidate SHA: ${process.env.CANDIDATE_SHA}`,
+            `- Runner: ${process.env.RUNNER_LABEL}`,
+            `- Job status: ${process.env.JOB_STATUS}`,
+            `- Actions run: https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+            "- Release publication: not performed on branch runs",
+            "- Safety boundary: no credentials, databases, session tokens, or full transcripts",
+            "",
+            "## Checks",
+            ...Object.entries(checks).map(([name, outcome]) => `- ${name}: ${outcome}`),
+          ].join("\n") + "\n");
+          await writeFile(join(evidenceRoot, "checks.txt"), Object.entries(checks).map(([name, outcome]) => `${name}=${outcome}`).join("\n") + "\n");
+          NODE
+          cat "$GITHUB_WORKSPACE/dist/evidence/$TARGET/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload packaged plugin
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: plugin-${{ matrix.target }}
+          path: ${{ env.PACKAGE_ROOT }}
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
+
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: evidence-${{ matrix.target }}
+          path: ${{ github.workspace }}/dist/evidence/${{ matrix.target }}
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload verified platform archive
         uses: actions/upload-artifact@v6

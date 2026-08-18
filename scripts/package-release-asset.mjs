@@ -35,11 +35,13 @@ function parseArguments(argumentsList) {
 }
 
 const options = parseArguments(process.argv.slice(2));
+const packageManifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const pluginManifest = JSON.parse(await readFile(join(options.pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
 const runtimeManifest = JSON.parse(await readFile(join(options.pluginRoot, "runtime", "runtime.json"), "utf8"));
 const target = getNodeSidecarTarget(runtimeManifest.target);
 
 if (pluginManifest.name !== "ambient-project-layer") throw new Error(`Unexpected plugin name: ${pluginManifest.name}`);
+if (pluginManifest.version !== packageManifest.version) throw new Error(`Plugin version ${pluginManifest.version} does not match package version ${packageManifest.version}`);
 if (runtimeManifest.platform !== target.platform || runtimeManifest.arch !== target.arch) throw new Error(`Runtime metadata does not match ${target.id}`);
 
 const marketplaceManifest = {

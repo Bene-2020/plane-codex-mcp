@@ -128,7 +128,7 @@ describe("panel session attachment", () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const runtime = await startMcpRuntime({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter(), transport: serverTransport });
     const context = runtime.service.storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", planeProjectName: "Panel chain" });
-    const client = new Client({ name: "ambient-panel-chain-client", version: "0.1.0" });
+    const client = new Client({ name: "ambient-panel-chain-client", version: "0.1.1" });
     await client.connect(clientTransport);
     try {
       const toolResult = await client.callTool({ name: "open_project_panel", arguments: { projectContextId: context.id } });
@@ -155,9 +155,9 @@ describe("panel session attachment", () => {
     const [appTransport, bridgeTransport] = InMemoryTransport.createLinkedPair();
     const runtime = await startMcpRuntime({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter(), transport: serverTransport });
     const context = runtime.service.storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", planeProjectName: "Bridge panel" });
-    const client = new Client({ name: "ambient-panel-host-bridge-test", version: "0.1.0" });
-    const app = new McpApp({ name: "Ambient Project Panel", version: "0.1.0" }, {}, { autoResize: false });
-    const bridge = new AppBridge(client, { name: "Codex Desktop protocol test", version: "0.1.0" }, { serverTools: {} });
+    const client = new Client({ name: "ambient-panel-host-bridge-test", version: "0.1.1" });
+    const app = new McpApp({ name: "Ambient Project Panel", version: "0.1.1" }, {}, { autoResize: false });
+    const bridge = new AppBridge(client, { name: "Codex Desktop protocol test", version: "0.1.1" }, { serverTools: {} });
     await client.connect(clientTransport);
     await bridge.connect(bridgeTransport);
     await app.connect(appTransport);

@@ -167,7 +167,7 @@ function App() {
       setLoading(false);
       return;
     }
-    const host = new McpApp({ name: "Ambient Project Panel", version: "0.1.0" });
+    const host = new McpApp({ name: "Ambient Project Panel", version: "0.1.1" });
     const hostApiFactory = (_next: PanelBootstrap, onUnauthorized: () => void): PanelApi => createPanelToolApi(host.callServerTool.bind(host) as PanelServerToolCall, onUnauthorized);
     let active = true;
     host.ontoolresult = (result) => {

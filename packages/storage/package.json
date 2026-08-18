@@ -1,6 +1,6 @@
 {
   "name": "@ambient/storage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SQLite storage and Outbox implementation for Ambient Project Layer.",
   "private": true,
   "license": "MIT",

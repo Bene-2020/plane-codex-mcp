@@ -11,6 +11,8 @@ import {
   renderLauncher,
 } from "./node-sidecar-targets.mjs";
 
+const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const releaseVersion = JSON.parse(await readFile(join(root, "package.json"), "utf8")).version;
 const execFile = promisify(execFileCallback);
 
 function parseArguments(argumentsList) {
@@ -45,7 +47,7 @@ async function validatePackage(pluginRoot, { executeNative = true } = {}) {
   const mcpConfig = JSON.parse(await readFile(join(pluginRoot, ".mcp.json"), "utf8"));
   const hooksConfig = JSON.parse(await readFile(join(pluginRoot, "hooks", "hooks.json"), "utf8"));
   const manifest = JSON.parse(await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
-  if (manifest.name !== "ambient-project-layer" || manifest.version !== "0.1.0" || manifest.author?.name !== "Wenyan Wei" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error(`${pluginRoot}: manifest product metadata is inconsistent`);
+  if (manifest.name !== "ambient-project-layer" || manifest.version !== releaseVersion || manifest.author?.name !== "Wenyan Wei" || manifest.interface?.displayName !== "Ambient Project Layer") throw new Error(`${pluginRoot}: manifest product metadata is inconsistent`);
   if (!manifest.interface?.longDescription?.includes("platform-specific")) throw new Error(`${pluginRoot}: manifest must describe platform-specific packages`);
   if (!manifest.interface?.longDescription?.includes("Windows x64")) throw new Error(`${pluginRoot}: manifest must list the Windows x64 target`);
   for (const legalFile of [join(pluginRoot, "LICENSE"), join(pluginRoot, "THIRD_PARTY_NOTICES.md")]) {
@@ -118,4 +120,4 @@ if (options.all) {
 
 const results = [];
 for (const pluginRoot of roots) results.push(await validatePackage(pluginRoot));
-process.stdout.write(`Plugin runtime valid: ${results.join(", ")}, version 0.1.0, project and dependency licenses, Node ${NODE_SIDECAR_VERSION} sidecar, no native SQLite module.\n`);
+process.stdout.write(`Plugin runtime valid: ${results.join(", ")}, version ${releaseVersion}, project and dependency licenses, Node ${NODE_SIDECAR_VERSION} sidecar, no native SQLite module.\n`);

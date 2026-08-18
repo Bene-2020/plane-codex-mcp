@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-18
+
+### Fixed
+
+- 修复 Plane 项目、状态、工作项和活动读取的分页边界，并补充真实 SDK 链路回归覆盖。
+- 规范化工作项引用并拒绝未解析的关联，避免完成事件静默落错目标。
+- 修正项目绑定 onboarding 的拒绝与延后语义，以及使用界面编号时的状态同步。
+- 将 Plane SDK 的 axios 依赖定向锁定到 1.18.0，降低公开版本的安全告警风险。
+
 ## [0.1.0] - 2026-08-17
 
 ### Added
@@ -19,5 +28,6 @@
 - 提供五种 Codex Hook 的会话上下文注入与最小审计。
 - 隔离 Plane API Key、Panel 临时会话令牌和本地项目数据。
 
-[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.0

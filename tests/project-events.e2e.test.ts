@@ -293,7 +293,7 @@ describe("real project event projection", () => {
       service = createService({ storage, plane, sessionToken: "b".repeat(43) });
       const createdMcp = createMcpServer({ storage, plane });
       mcpServer = createdMcp.server;
-      client = new Client({ name: "real-project-events-e2e", version: "0.1.0" });
+      client = new Client({ name: "real-project-events-e2e", version: "0.1.1" });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
@@ -369,7 +369,7 @@ describe("real project event projection", () => {
       service = createService({ storage, plane, sessionToken: "c".repeat(43) });
       const createdMcp = createMcpServer({ storage, plane });
       mcpServer = createdMcp.server;
-      client = new Client({ name: "real-unresolved-reference-e2e", version: "0.1.0" });
+      client = new Client({ name: "real-unresolved-reference-e2e", version: "0.1.1" });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await mcpServer.connect(serverTransport);
       await client.connect(clientTransport);
