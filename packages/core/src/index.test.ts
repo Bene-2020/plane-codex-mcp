@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPromptInstruction, projectBindingPromptHeader, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
+import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPromptInstruction, projectBindingPromptHeader, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
 
 describe("core project contracts", () => {
   it("normalizes cwd without changing its identity", () => {
@@ -54,7 +54,7 @@ describe("core project contracts", () => {
   it("uses distinct unbound onboarding templates and never guesses a project", () => {
     const sessionStart = buildAdditionalContext({ eventName: "SessionStart", sessionId: "session_1", currentCwd: "/unbound/work", onboardingPhase: "session_start" });
     expect(sessionStart).toContain("SessionStart; it cannot interact");
-    expect(sessionStart).toContain("first user-visible reply must immediately call list_projects");
+    expect(sessionStart).toContain("If no actual onboarding question has been asked yet, call list_projects");
     expect(sessionStart).toContain("Current cwd: /unbound/work");
     expect(sessionStart).toContain("When get_binding returns null for this cwd, do not call open_project_panel");
     expect(sessionStart).toContain("do not call bind_project before the user explicitly chooses");
@@ -63,33 +63,41 @@ describe("core project contracts", () => {
     const firstPrompt = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_1", turnId: "turn_1", currentCwd: "/unbound/work", onboardingPhase: "first_user_prompt" });
     expect(firstPrompt).toContain("This is the first user prompt of this session");
     expect(firstPrompt).toContain("immediately call list_projects");
-    expect(firstPrompt).toContain("explicit long-term do-not-bind/do-not-ask-again instruction calls decline_project_binding");
-    expect(firstPrompt).toContain("ambiguous later/skip/continue is a current-session deferral");
-    expect(firstPrompt).toContain("explicit request to restore or bind calls restore_project_binding");
+    expect(firstPrompt).toContain("takes precedence over every onboarding instruction");
+    expect(firstPrompt).toContain("temporary later/skip/this-time refusal");
+    expect(firstPrompt).toContain("Only an explicit request to restore or resume binding authorizes restore_project_binding");
     expect(firstPrompt).toContain("Only an explicit project choice authorizes bind_project");
-    expect(firstPrompt).toContain("last_assistant_message");
-    expect(firstPrompt).toContain("项目绑定（待确认）");
-    expect(firstPrompt).toContain("请选择一个项目，或回复‘稍后再说’。");
+    expect(firstPrompt).toContain(projectBindingPermanentRefusalRule);
+    expect(firstPrompt).toContain(projectBindingSessionDeferralRule);
+    expect(firstPrompt).toContain(projectBindingRestoreRule);
+    expect(firstPrompt).toContain("fixed final binding block is required only after list_projects actually runs");
+    expect(firstPrompt).not.toContain("last_assistant_message");
+    expect(firstPrompt).not.toContain(projectBindingFinalDeliveryRule);
     expect(firstPrompt).toContain("Stop Hook only audits this turn and always allows it to end");
 
     const continuing = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_1", turnId: "turn_2", currentCwd: "/unbound/work", onboardingPhase: "continuing_session" });
     expect(continuing).toContain("does not prove that onboarding was actually asked");
-    expect(continuing).toContain("if no actual onboarding question has appeared yet, now call list_projects");
+    expect(continuing).toContain("If no actual onboarding question has appeared yet, now call list_projects");
     expect(continuing).toContain("if onboarding was asked and the user only deferred");
-    expect(continuing).toContain("explicit long-term do-not-bind/do-not-ask-again instruction calls decline_project_binding");
-    expect(continuing).toContain("explicit request to restore or bind calls restore_project_binding");
+    expect(continuing).toContain("takes precedence over every onboarding instruction");
+    expect(continuing).toContain("Only an explicit request to restore or resume binding authorizes restore_project_binding");
     expect(continuing).not.toContain("This is the first user prompt");
 
     const declined = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_2", turnId: "turn_1", currentCwd: "/unbound/work", onboardingPhase: "permanently_declined" });
     expect(declined).toContain("explicit permanent do-not-ask-again preference");
     expect(declined).toContain("restore_project_binding");
     expect(declined).not.toContain("immediately call list_projects");
+    expect(declined).not.toContain(projectBindingFinalDeliveryRule);
+    expect(declined).not.toContain(projectBindingPromptHeader);
+    expect(declined).not.toContain(projectBindingPromptInstruction);
   });
 
   it("defines the final project-binding delivery contract", () => {
-    const complete = `工作继续完成了。\n\n### ${projectBindingPromptHeader}\n- **SMWC-1** | Demo project\n${projectBindingPromptInstruction}`;
+    const complete = "工作继续完成了。\n\n### " + projectBindingPromptHeader + "\n- **SMWC-1** | Demo project\n" + projectBindingPromptInstruction;
     expect(hasCompleteProjectBindingPrompt(complete)).toBe(true);
-    expect(hasCompleteProjectBindingPrompt(`### ${projectBindingPromptHeader}\n${projectBindingPromptInstruction}`)).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n" + projectBindingPromptInstruction)).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("<!--\n" + complete + "\n-->")).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("工作继续完成了。\n<!-- " + complete + " -->")).toBe(false);
     expect(projectBindingFinalDeliveryRule).toContain("tool output, commentary, and thought are internal context");
     expect(projectBindingFinalDeliveryRule).toContain(projectBindingPromptInstruction);
   });

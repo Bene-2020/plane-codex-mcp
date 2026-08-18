@@ -56,7 +56,8 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
         ? storage.didRecordProjectEvents(context.id, sessionId, input.turn_id) || storage.didAcknowledgeNoProjectEvents(context.id, sessionId, input.turn_id)
         : null;
       const didCallListProjects = Boolean(input.turn_id && storage.didCallListProjects(sessionId, input.turn_id));
-      const bindingPromptDelivered = !context && input.turn_id && didCallListProjects
+      const bindingPreference = !context && input.cwd ? storage.getBindingPreference(input.cwd) : null;
+      const bindingPromptDelivered = !context && input.cwd && input.turn_id && didCallListProjects && !bindingPreference
         ? hasCompleteProjectBindingPrompt(input.last_assistant_message)
         : null;
       storage.auditHook({ eventName, sessionId, turnId: input.turn_id, ended: true, captureDecisionRecorded, bindingPromptDelivered });

@@ -576,15 +576,16 @@ export class Storage {
     const turnId = input.turnId ?? null;
     const captureDecisionRecorded = input.captureDecisionRecorded === undefined || input.captureDecisionRecorded === null ? null : input.captureDecisionRecorded ? 1 : 0;
     const bindingPromptDelivered = input.bindingPromptDelivered === undefined || input.bindingPromptDelivered === null ? null : input.bindingPromptDelivered ? 1 : 0;
+    const bindingPromptDeliveredWasProvided = input.bindingPromptDelivered !== undefined ? 1 : 0;
     this.db.prepare(`INSERT INTO turn_audits (session_id,turn_id,hook_event_name,record_tool_called,binding_list_tool_called,capture_decision_recorded,binding_prompt_delivered,hook_error,started_at,ended_at)
       VALUES (?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(session_id,turn_id,hook_event_name) DO UPDATE SET
         record_tool_called=MAX(record_tool_called,excluded.record_tool_called),
         binding_list_tool_called=MAX(binding_list_tool_called,excluded.binding_list_tool_called),
         capture_decision_recorded=COALESCE(excluded.capture_decision_recorded,capture_decision_recorded),
-        binding_prompt_delivered=COALESCE(excluded.binding_prompt_delivered,binding_prompt_delivered),
+        binding_prompt_delivered=CASE WHEN ? THEN excluded.binding_prompt_delivered ELSE binding_prompt_delivered END,
         hook_error=COALESCE(excluded.hook_error,hook_error),
-        ended_at=COALESCE(excluded.ended_at,ended_at)`).run(input.sessionId, turnId, input.eventName, input.toolCalled ? 1 : 0, input.eventName === "PostToolUse" && input.bindingListToolCalled ? 1 : 0, captureDecisionRecorded, bindingPromptDelivered, input.error ?? null, now(), input.ended ? now() : null);
+        ended_at=COALESCE(excluded.ended_at,ended_at)`).run(input.sessionId, turnId, input.eventName, input.toolCalled ? 1 : 0, input.eventName === "PostToolUse" && input.bindingListToolCalled ? 1 : 0, captureDecisionRecorded, bindingPromptDelivered, input.error ?? null, now(), input.ended ? now() : null, bindingPromptDeliveredWasProvided);
   }
 
   listAudits(sessionId?: string): unknown[] { return (sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all()) as unknown[]; }

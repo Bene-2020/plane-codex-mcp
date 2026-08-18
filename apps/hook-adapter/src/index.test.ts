@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { handleHook } from "./index.js";
 import { Storage } from "@ambient/storage";
+import { projectBindingFinalDeliveryRule, projectBindingPromptHeader, projectBindingPromptInstruction } from "@ambient/core";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
@@ -64,12 +65,12 @@ describe("hook adapter", () => {
     const first = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/work/src", session_id: "session-1", turn_id: "turn-1" }), storage);
     expect(JSON.stringify(first)).toContain("first user prompt of this session");
     expect(JSON.stringify(first)).toContain("immediately call list_projects");
-    expect(JSON.stringify(first)).toContain("explicit long-term do-not-bind/do-not-ask-again instruction calls decline_project_binding");
-    expect(JSON.stringify(first)).toContain("ambiguous later/skip/continue is a current-session deferral");
+    expect(JSON.stringify(first)).toContain("takes precedence over every onboarding instruction");
+    expect(JSON.stringify(first)).toContain("temporary later/skip/this-time refusal");
 
     const deferred = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/work/src", session_id: "session-1", turn_id: "turn-2" }), storage);
     expect(JSON.stringify(deferred)).toContain("does not prove that onboarding was actually asked");
-    expect(JSON.stringify(deferred)).toContain("if no actual onboarding question has appeared yet, now call list_projects");
+    expect(JSON.stringify(deferred)).toContain("If no actual onboarding question has appeared yet, now call list_projects");
     expect(JSON.stringify(deferred)).toContain("if onboarding was asked and the user only deferred");
     expect((storage.db.prepare("SELECT COUNT(*) AS count FROM workspace_binding_preferences").get() as { count: number }).count).toBe(0);
     const resumed = await handleHook(JSON.stringify({ hook_event_name: "SessionStart", cwd: "/unbound/work/src", session_id: "session-1" }), storage);
@@ -80,6 +81,82 @@ describe("hook adapter", () => {
     const nextFirst = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/work/src", session_id: "session-2", turn_id: "turn-1" }), storage);
     expect(JSON.stringify(nextFirst)).toContain("first user prompt of this session");
     storage.close();
+  });
+
+  it("keeps a current-session deferral quiet without persisting it, then reopens onboarding next session", async () => {
+    const storage = new Storage(":memory:");
+    try {
+      const first = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "onboard-turn", prompt: "start" }), storage);
+      expect(JSON.stringify(first)).toContain("immediately call list_projects");
+      await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "onboard-turn", tool_name: "mcp__ambient_project__list_projects" }), storage);
+      const delivered = "主任务继续。\n\n### " + projectBindingPromptHeader + "\n- **SMWC-1** | 真实项目\n" + projectBindingPromptInstruction;
+      expect(await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "onboard-turn", last_assistant_message: delivered }), storage)).toEqual({});
+      expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("defer-session", "onboard-turn")).toEqual({ binding_prompt_delivered: 1 });
+
+      const deferred = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "defer-turn", prompt: "本轮不绑定" }), storage);
+      expect(JSON.stringify(deferred)).toContain("current session");
+      expect(JSON.stringify(deferred)).not.toContain(projectBindingFinalDeliveryRule);
+      expect(JSON.stringify(deferred)).not.toContain(projectBindingPromptHeader);
+      expect(JSON.stringify(deferred)).not.toContain(projectBindingPromptInstruction);
+      expect(storage.getBindingPreference("/unbound/deferred")).toBeNull();
+      expect((storage.db.prepare("SELECT COUNT(*) AS count FROM workspace_binding_preferences").get() as { count: number }).count).toBe(0);
+      expect(await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "defer-turn", last_assistant_message: "本轮任务完成。" }), storage)).toEqual({});
+      expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("defer-session", "defer-turn")).toEqual({ binding_prompt_delivered: null });
+
+      const stillQuiet = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "quiet-turn", prompt: "继续当前任务" }), storage);
+      expect(JSON.stringify(stillQuiet)).toContain("do not repeat the question in this session");
+      expect(JSON.stringify(stillQuiet)).not.toContain(projectBindingPromptHeader);
+
+      const nextSession = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/deferred", session_id: "new-session", turn_id: "new-turn", prompt: "普通新会话任务" }), storage);
+      expect(JSON.stringify(nextSession)).toContain("immediately call list_projects");
+      await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: "/unbound/deferred", session_id: "new-session", turn_id: "new-turn", tool_name: "mcp__ambient_project__list_projects" }), storage);
+      expect(await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/deferred", session_id: "new-session", turn_id: "new-turn", last_assistant_message: delivered }), storage)).toEqual({});
+      expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("new-session", "new-turn")).toEqual({ binding_prompt_delivered: 1 });
+    } finally {
+      storage.close();
+    }
+  });
+
+  it("keeps a first-turn temporary refusal quiet without creating a preference", async () => {
+    const storage = new Storage(":memory:");
+    try {
+      const deferred = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/first-defer", session_id: "first-defer-session", turn_id: "first-defer-turn", prompt: "这次先不绑定" }), storage);
+      expect(JSON.stringify(deferred)).toContain("temporary later/skip/this-time refusal");
+      expect(JSON.stringify(deferred)).not.toContain(projectBindingFinalDeliveryRule);
+      expect(JSON.stringify(deferred)).not.toContain(projectBindingPromptHeader);
+      expect(JSON.stringify(deferred)).not.toContain(projectBindingPromptInstruction);
+      expect(storage.getBindingPreference("/unbound/first-defer")).toBeNull();
+      expect((storage.db.prepare("SELECT COUNT(*) AS count FROM workspace_binding_preferences").get() as { count: number }).count).toBe(0);
+      await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/first-defer", session_id: "first-defer-session", turn_id: "first-defer-turn", last_assistant_message: "任务完成。" }), storage);
+      expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("first-defer-session", "first-defer-turn")).toEqual({ binding_prompt_delivered: null });
+      const nextSession = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/first-defer", session_id: "first-defer-new", turn_id: "first-defer-new-turn", prompt: "新会话普通任务" }), storage);
+      expect(JSON.stringify(nextSession)).toContain("immediately call list_projects");
+    } finally {
+      storage.close();
+    }
+  });
+
+  it("marks binding delivery non-applicable after a same-turn successful decline and ignores HTML comments", async () => {
+    const storage = new Storage(":memory:");
+    try {
+      await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: "/unbound/audit", session_id: "audit-session", turn_id: "comment-turn", tool_name: "mcp__ambient_project__list_projects" }), storage);
+      const complete = "主任务继续。\n\n### " + projectBindingPromptHeader + "\n- **SMWC-1** | 真实项目\n" + projectBindingPromptInstruction;
+      await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/audit", session_id: "audit-session", turn_id: "comment-turn", last_assistant_message: "<!--\n" + complete + "\n-->" }), storage);
+      expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("audit-session", "comment-turn")).toEqual({ binding_prompt_delivered: 0 });
+      await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: "/unbound/audit", session_id: "audit-session", turn_id: "visible-turn", tool_name: "mcp__ambient_project__list_projects" }), storage);
+      await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/audit", session_id: "audit-session", turn_id: "visible-turn", last_assistant_message: complete }), storage);
+      expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("audit-session", "visible-turn")).toEqual({ binding_prompt_delivered: 1 });
+
+      await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: "/unbound/audit", session_id: "audit-session", turn_id: "decline-turn", tool_name: "mcp__ambient_project__list_projects" }), storage);
+      await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/audit", session_id: "audit-session", turn_id: "decline-turn", last_assistant_message: "<!--\n" + complete + "\n-->" }), storage);
+      expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("audit-session", "decline-turn")).toEqual({ binding_prompt_delivered: 0 });
+      storage.declineBinding("/unbound/audit");
+      await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: "/unbound/audit", session_id: "audit-session", turn_id: "decline-turn", tool_name: "mcp__ambient_project__decline_project_binding" }), storage);
+      await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/audit", session_id: "audit-session", turn_id: "decline-turn", last_assistant_message: "本轮不绑定。" }), storage);
+      expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("audit-session", "decline-turn")).toEqual({ binding_prompt_delivered: null });
+    } finally {
+      storage.close();
+    }
   });
 
   it("keeps Stop silent when binding delivery is missing and preserves the audit", async () => {
