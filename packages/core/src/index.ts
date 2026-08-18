@@ -66,6 +66,7 @@ export interface ProjectContext extends ProjectContextInput {
 }
 
 export interface PlaneProject { id: string; name: string; identifier?: string; workspaceSlug?: string; }
+export interface BindingProjectCandidate { name: string; identifier: string; }
 export interface PlaneStatus { id: string; name: string; color?: string; category?: string; }
 export interface PlaneItem {
   id: string;
@@ -112,32 +113,53 @@ export interface ActiveItemSnapshot { itemId: string; identifier: string; title:
 
 export type BindingOnboardingPhase = "session_start" | "first_user_prompt" | "continuing_session" | "permanently_declined";
 
+export const projectBindingListProjectsToolName = "mcp__ambient_project__list_projects";
+export const projectBindingGetBindingToolName = "mcp__ambient_project__get_binding";
+export const projectBindingOpenPanelToolName = "mcp__ambient_project__open_project_panel";
+export const projectBindingToolName = "mcp__ambient_project__bind_project";
+export const projectBindingChangeToolName = "mcp__ambient_project__change_binding";
+export const projectBindingDeclineToolName = "mcp__ambient_project__decline_project_binding";
+export const projectBindingRestoreToolName = "mcp__ambient_project__restore_project_binding";
+export const projectBindingRecordEventsToolName = "mcp__ambient_project__record_project_events";
+export const projectBindingAcknowledgeEventsToolName = "mcp__ambient_project__acknowledge_no_project_events";
+export const codexDesktopListProjectsToolName = "codex_app__list_projects";
+
 export const projectBindingPromptHeader = "项目绑定（待确认）";
 export const projectBindingPromptInstruction = "请选择一个项目，或回复‘稍后再说’。";
-export const projectBindingPermanentRefusalRule = "An explicit long-term do-not-bind/do-not-ask-again instruction takes precedence over every onboarding instruction: call decline_project_binding without calling list_projects, do not ask about binding again, and do not emit the fixed project-binding block.";
-export const projectBindingSessionDeferralRule = "An explicit temporary later/skip/this-time refusal (including this-round/not-now) is quiet only for the current session: do not call list_projects, do not ask again, and do not write a binding preference; a new session may ask once again.";
-export const projectBindingPostPromptDeferralRule = "Continuing another task without choosing is a current-session deferral only after the visible conversation has already shown an actual binding question or list_projects result. In that case, do not call list_projects or ask again this session; if no binding question has been shown, treat a normal work request as the first onboarding prompt and call list_projects.";
-export const projectBindingRestoreRule = "Only an explicit request to restore or resume binding authorizes restore_project_binding; after restoring, call list_projects and wait for an explicit project choice before calling bind_project.";
+export const projectBindingPermanentRefusalRule = `An explicit long-term do-not-bind/do-not-ask-again instruction takes precedence over every onboarding instruction: call ${projectBindingDeclineToolName} without calling ${projectBindingListProjectsToolName}, do not ask about binding again, and do not emit the fixed project-binding block.`;
+export const projectBindingSessionDeferralRule = `An explicit temporary later/skip/this-time refusal (including this-round/not-now) is quiet only for the current session: do not call ${projectBindingListProjectsToolName}, do not ask again, and do not write a binding preference; a new session may ask once again.`;
+export const projectBindingPostPromptDeferralRule = `Continuing another task without choosing is a current-session deferral only after the visible conversation has already shown an actual binding question or ${projectBindingListProjectsToolName} result. In that case, do not call ${projectBindingListProjectsToolName} or ask again this session; if no binding question has been shown, treat a normal work request as the first onboarding prompt and call ${projectBindingListProjectsToolName}.`;
+export const projectBindingRestoreRule = `Only an explicit request to restore or resume binding authorizes ${projectBindingRestoreToolName}; after restoring, call ${projectBindingListProjectsToolName} and wait for an explicit project choice before calling ${projectBindingToolName}.`;
+export const projectBindingToolSourceRule = `During Ambient Plane binding, use only ${projectBindingListProjectsToolName} as the candidate source. ${codexDesktopListProjectsToolName} may still be used for an explicit Codex Projects request, but never as Plane binding evidence. Binding candidates may only come from the real return of ${projectBindingListProjectsToolName} in this turn. Never show or accept path, projectKind, or hostId, and never use a Codex local project name as a Plane candidate. Before an explicit user choice, do not call ${projectBindingToolName}; never guess from a directory name, Codex Project, Git remote, or history.`;
 export const supersededPlanRule = "When the user explicitly overturns, abandons, or replaces a plan, include archiveAfterCompletion=true on a user-directed completed event for every affected plan item and generated step item. This completes each item before archiving it. Never delete the items.";
 export const parentChildClosureRule = "Before completing, superseding, or archiving a parent item, inspect every known child item and resolve each child explicitly. Never leave planned or in-progress children behind only because their parent changed.";
 export const projectBindingFinalDeliveryRule = [
-  "After calling list_projects, its tool output, commentary, and thought are internal context, not user delivery.",
+  `After calling ${projectBindingListProjectsToolName}, its tool output, commentary, and thought are internal context, not user delivery.`,
+  `The fixed block may contain only name+identifier pairs from that turn's real ${projectBindingListProjectsToolName} return; if the result is empty, exceptional, from another tool, or contains path/projectKind/hostId, do not deliver a binding prompt.`,
   "Before the final reply, last_assistant_message must contain this fixed block with the real returned Plane projects:",
   `### ${projectBindingPromptHeader}`,
   "- <真实返回的 Plane 项目>",
   projectBindingPromptInstruction,
   "Continue the user's main task normally.",
 ].join("\n");
-export const projectBindingConditionalFinalDeliveryRule = `Only when this turn actually calls list_projects and the cwd remains unbound with no permanent refusal or current-session deferral does the final binding-delivery rule apply:\n${projectBindingFinalDeliveryRule}`;
+export const projectBindingConditionalFinalDeliveryRule = `Only when this turn actually calls ${projectBindingListProjectsToolName} and the cwd remains unbound with no permanent refusal or current-session deferral does the final binding-delivery rule apply:\n${projectBindingFinalDeliveryRule}`;
 
-export function hasCompleteProjectBindingPrompt(message: string | null | undefined): boolean {
+function hasForbiddenBindingMetadataLabel(value: string): boolean {
+  return /(?:^|[^A-Za-z0-9_])(?:path|projectKind|hostId)(?:$|[^A-Za-z0-9_])/i.test(value);
+}
+
+export function hasCompleteProjectBindingPrompt(message: string | null | undefined, candidates?: BindingProjectCandidate[] | null): boolean {
   if (!message) return false;
   const visibleMessage = message.replace(/<!--[\s\S]*?-->/g, "");
   const headerIndex = visibleMessage.indexOf(projectBindingPromptHeader);
   if (headerIndex < 0) return false;
   const instructionIndex = visibleMessage.indexOf(projectBindingPromptInstruction, headerIndex);
   if (instructionIndex < 0) return false;
-  return /^\s*[-*+]\s+\S+/m.test(visibleMessage.slice(headerIndex, instructionIndex));
+  const items = [...visibleMessage.slice(headerIndex, instructionIndex).matchAll(/^\s*[-*+]\s+(.+?)\s*$/gm)].map((match) => match[1] ?? "");
+  if (!items.length) return false;
+  if (candidates === undefined) return true;
+  if (!candidates?.length) return false;
+  return items.every((item) => !hasForbiddenBindingMetadataLabel(item) && candidates.some((candidate) => item.includes(candidate.name) && item.includes(candidate.identifier)));
 }
 
 export function canonicalizeCwd(cwd: string): string {
@@ -191,7 +213,7 @@ export function buildAdditionalContext(args: {
     lines.push(`Current cwd: ${args.currentCwd ?? "unknown"}; binding root: ${args.context.canonicalCwd}; session: ${args.sessionId ?? "unknown"}; turn: ${args.turnId ?? "session"}`);
     lines.push(`Automatic capture: ${args.context.autoCaptureEnabled ? "enabled" : "disabled"}.`);
     lines.push(relatedItemIdContract);
-    lines.push("Before the final reply, if automatic capture is enabled, decide from this turn's request, plan, tool results, and conclusion whether meaningful project events occurred. If so, call record_project_events once with all events; otherwise call acknowledge_no_project_events once. Never send an empty batch.");
+    lines.push(`Before the final reply, if automatic capture is enabled, decide from this turn's request, plan, tool results, and conclusion whether meaningful project events occurred. If so, call ${projectBindingRecordEventsToolName} once with all events; otherwise call ${projectBindingAcknowledgeEventsToolName} once. Never send an empty batch.`);
     lines.push(supersededPlanRule);
     lines.push(parentChildClosureRule);
     lines.push("The Stop Hook only audits this turn and always allows it to end; it never blocks, injects a follow-up prompt, or asks for a second reply.");
@@ -208,25 +230,26 @@ export function buildAdditionalContext(args: {
     }
   } else {
     lines.push(`Current cwd: ${args.currentCwd ?? "unknown"}; no Plane project is bound.`);
-    lines.push("When get_binding returns null for this cwd, do not call open_project_panel; continue the binding flow and open the panel only after a real project context is returned.");
-    lines.push("While this cwd is unbound, do not call record_project_events or acknowledge_no_project_events. The Stop Hook only audits this turn and always allows it to end; it never blocks on capture or binding delivery, injects a follow-up prompt, or asks for a second reply.");
+    lines.push(`When ${projectBindingGetBindingToolName} returns null for this cwd, do not call ${projectBindingOpenPanelToolName}; continue the binding flow and open the panel only after a real project context is returned.`);
+    lines.push(`While this cwd is unbound, do not call ${projectBindingRecordEventsToolName} or ${projectBindingAcknowledgeEventsToolName}. The Stop Hook only audits this turn and always allows it to end; it never blocks on capture or binding delivery, injects a follow-up prompt, or asks for a second reply.`);
+    lines.push(projectBindingToolSourceRule);
     switch (args.onboardingPhase) {
       case "session_start":
         lines.push("This is SessionStart; it cannot interact with the user. On the next UserPromptSubmit, use the visible conversation and the current user message to choose one onboarding branch.");
         lines.push(projectBindingPermanentRefusalRule);
         lines.push(projectBindingSessionDeferralRule);
         lines.push(projectBindingRestoreRule);
-        lines.push("The next prompt is a normal first onboarding prompt unless it explicitly refuses, defers, or asks to restore; even a normal work request must call list_projects, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid.");
-        lines.push("Do not guess from a Codex Project name, directory name, Git remote, or conversation, and do not call bind_project before the user explicitly chooses a returned project.");
+        lines.push(`The next prompt is a normal first onboarding prompt unless it explicitly refuses, defers, or asks to restore; even a normal work request must call ${projectBindingListProjectsToolName}, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after ${projectBindingListProjectsToolName} actually runs while the selection flow remains valid.`);
+        lines.push(`Do not guess from a Codex Project name, directory name, Git remote, or conversation, and do not call ${projectBindingToolName} before the user explicitly chooses a returned project.`);
         break;
       case "first_user_prompt":
         lines.push("This is the first user prompt of this session. Prioritize the current user message and apply the onboarding branches in this order.");
         lines.push(projectBindingPermanentRefusalRule);
         lines.push(projectBindingSessionDeferralRule);
         lines.push(projectBindingRestoreRule);
-        lines.push("Otherwise, in this first user-visible reply immediately call list_projects, show the real returned Plane projects, and ask the user to choose one; a normal work request is not a current-session deferral. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid.");
-        lines.push("Do not guess from a Codex Project name, directory name, Git remote, or conversation, and do not call bind_project before the user explicitly chooses a returned project.");
-        lines.push("Only an explicit project choice authorizes bind_project. After a binding question is visible, a vague answer, ignoring the question, or continuing another task is not a project choice.");
+        lines.push(`Otherwise, in this first user-visible reply immediately call ${projectBindingListProjectsToolName}, show the real returned Plane projects, and ask the user to choose one; a normal work request is not a current-session deferral. The fixed final binding block is required only after ${projectBindingListProjectsToolName} actually runs while the selection flow remains valid.`);
+        lines.push(`Do not guess from a Codex Project name, directory name, Git remote, or conversation, and do not call ${projectBindingToolName} before the user explicitly chooses a returned project.`);
+        lines.push(`Only an explicit project choice authorizes ${projectBindingToolName}. After a binding question is visible, a vague answer, ignoring the question, or continuing another task is not a project choice.`);
         break;
       case "continuing_session":
         lines.push("This is a later UserPromptSubmit, but this lifecycle hint does not prove that onboarding was actually asked. Use the visible conversation and current user message, applying the explicit refusal and deferral branches before any fallback onboarding.");
@@ -234,10 +257,10 @@ export function buildAdditionalContext(args: {
         lines.push(projectBindingSessionDeferralRule);
         lines.push(projectBindingPostPromptDeferralRule);
         lines.push(projectBindingRestoreRule);
-        lines.push("If no actual onboarding question has appeared yet, now call list_projects, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid. Do not bind before an explicit choice.");
+        lines.push(`If no actual onboarding question has appeared yet, now call ${projectBindingListProjectsToolName}, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after ${projectBindingListProjectsToolName} actually runs while the selection flow remains valid. Do not bind before an explicit choice.`);
         break;
       case "permanently_declined":
-        lines.push("This cwd is unbound and has an explicit permanent do-not-ask-again preference. Keep the user's task uninterrupted. Do not proactively discover projects, ask about binding, or include the fixed project-binding block. Only if the current user message explicitly asks to restore or resume project selection, follow restore_project_binding, then list_projects, wait for an explicit project choice, and call bind_project only after that choice.");
+        lines.push(`This cwd is unbound and has an explicit permanent do-not-ask-again preference. Keep the user's task uninterrupted. Do not proactively discover projects, ask about binding, or include the fixed project-binding block. Only if the current user message explicitly asks to restore or resume project selection, follow ${projectBindingRestoreToolName}, then ${projectBindingListProjectsToolName}, wait for an explicit project choice, and call ${projectBindingToolName} only after that choice.`);
         break;
       default:
         lines.push("This cwd is unbound. Inspect the visible conversation and apply the explicit refusal, temporary deferral, and restore branches before fallback onboarding.");
@@ -245,7 +268,7 @@ export function buildAdditionalContext(args: {
         lines.push(projectBindingSessionDeferralRule);
         lines.push(projectBindingPostPromptDeferralRule);
         lines.push(projectBindingRestoreRule);
-        lines.push("If onboarding has not actually been asked, call list_projects, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after list_projects actually runs while the selection flow remains valid. Do not guess or call bind_project before an explicit choice.");
+        lines.push(`If onboarding has not actually been asked, call ${projectBindingListProjectsToolName}, show the real returned Plane projects, and ask the user to choose one. The fixed final binding block is required only after ${projectBindingListProjectsToolName} actually runs while the selection flow remains valid. Do not guess or call ${projectBindingToolName} before an explicit choice.`);
         break;
     }
   }

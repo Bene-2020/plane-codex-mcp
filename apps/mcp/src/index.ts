@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import { eventBatchSchema, isSessionToken, noProjectEventsReviewSchema, parentChildClosureRule, projectBindingConditionalFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
+import { codexDesktopListProjectsToolName, eventBatchSchema, isSessionToken, noProjectEventsReviewSchema, parentChildClosureRule, projectBindingAcknowledgeEventsToolName, projectBindingChangeToolName, projectBindingConditionalFinalDeliveryRule, projectBindingDeclineToolName, projectBindingGetBindingToolName, projectBindingListProjectsToolName, projectBindingOpenPanelToolName, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingRecordEventsToolName, projectBindingRestoreRule, projectBindingRestoreToolName, projectBindingSessionDeferralRule, projectBindingToolName, projectBindingToolSourceRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
 import { createPlaneAdapter } from "@ambient/plane";
 import type { PlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
@@ -82,10 +82,11 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
       projectBindingSessionDeferralRule,
       projectBindingPostPromptDeferralRule,
       projectBindingRestoreRule,
-      "If no actual onboarding question has appeared yet, call list_projects, show the real returned Plane projects, and ask the user to choose. Do not guess from a Codex Project name, directory name, Git remote, or conversation, and call bind_project only after an explicit choice.",
-      "When get_binding returns null for the cwd, do not call open_project_panel; call it only after get_binding, bind_project, or change_binding returns a real project context.",
+      projectBindingToolSourceRule,
+      `If no actual onboarding question has appeared yet, call ${projectBindingListProjectsToolName}, show the real returned Plane projects, and ask the user to choose. Do not guess from a Codex Project name, directory name, Git remote, or conversation, and call ${projectBindingToolName} only after an explicit choice.`,
+      `When ${projectBindingGetBindingToolName} returns null for the cwd, do not call ${projectBindingOpenPanelToolName}; call it only after ${projectBindingGetBindingToolName}, ${projectBindingToolName}, or ${projectBindingChangeToolName} returns a real project context.`,
       projectBindingConditionalFinalDeliveryRule,
-      "Before the final reply for a bound, auto-capture-enabled turn, decide whether the user's request, plan, tool results, or conclusion created a meaningful project event; if yes, record it in one non-empty batch, otherwise acknowledge that the turn has no project events.",
+      `Before the final reply for a bound, auto-capture-enabled turn, decide whether the user's request, plan, tool results, or conclusion created a meaningful project event; if yes, call ${projectBindingRecordEventsToolName} once with one non-empty batch, otherwise call ${projectBindingAcknowledgeEventsToolName} once so the turn has no project events.`,
       supersededPlanRule,
       parentChildClosureRule,
       "The Stop Hook only audits the turn and always allows it to end; it never blocks, injects a follow-up prompt, or asks for a second reply.",
@@ -112,25 +113,25 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
       _meta: { ui: { csp: { connectDomains: panelConnectDomains } } },
     }],
   }));
-  server.registerResource("project-panel-host-check", "ui://ambient-project/summary/v1.html", { description: "Legacy read-only host check; use open_project_panel for the interactive Panel.", mimeType: RESOURCE_MIME_TYPE }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: RESOURCE_MIME_TYPE, text: "<!doctype html><meta charset=\"utf-8\"><style>body{font:14px system-ui;padding:20px;color:#332b25}code{color:#9a5c35}</style><h3>Ambient project panel</h3><p>Use open_project_panel for the interactive Codex MCP App.</p><code>ui://ambient-project/panel/v1.html</code>" }] }));
+  server.registerResource("project-panel-host-check", "ui://ambient-project/summary/v1.html", { description: `Legacy read-only host check; use ${projectBindingOpenPanelToolName} for the interactive Panel.`, mimeType: RESOURCE_MIME_TYPE }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: RESOURCE_MIME_TYPE, text: `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui;padding:20px;color:#332b25}code{color:#9a5c35}</style><h3>Ambient project panel</h3><p>Use ${projectBindingOpenPanelToolName} for the interactive Codex MCP App.</p><code>ui://ambient-project/panel/v1.html</code>` }] }));
 
   server.registerTool("list_projects", {
     title: "List projects",
-    description: "List Plane projects available for an explicit project-context choice.",
+    description: `During Ambient Plane binding, call ${projectBindingListProjectsToolName} to list Plane projects available for an explicit project-context choice. ${codexDesktopListProjectsToolName} may still be used for an explicit Codex Projects request, but never as Plane binding evidence.`,
     inputSchema: z.object({}),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async () => text(await plane.listProjects()));
 
   server.registerTool("get_binding", {
     title: "Get project binding",
-    description: "Get the project context bound to an explicit cwd using the shared workspace identity resolver.",
+    description: `Call ${projectBindingGetBindingToolName} to get the project context bound to an explicit cwd using the shared workspace identity resolver.`,
     inputSchema: z.object({ cwd: z.string().min(1) }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async ({ cwd }) => text(storage.getContextByCwd(cwd)));
 
   registerAppTool(server, "open_project_panel", {
     title: "Open project panel",
-    description: "Open the Ambient project panel only for a project context returned by get_binding, bind_project, or change_binding; after get_binding returns null, do not call this tool.",
+    description: `Call ${projectBindingOpenPanelToolName} only for a project context returned by ${projectBindingGetBindingToolName}, ${projectBindingToolName}, or ${projectBindingChangeToolName}; after ${projectBindingGetBindingToolName} returns null, do not call this tool.`,
     inputSchema: {
       projectContextId: z.string().regex(/^project_[0-9]+$/).optional(),
       cwd: z.string().trim().min(1).optional(),
@@ -173,7 +174,7 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
 
   server.registerTool("bind_project", {
     title: "Bind project",
-    description: "Bind a cwd to a Plane project after the user explicitly selected it.",
+    description: `Call ${projectBindingToolName} only after the user explicitly selected a candidate returned by ${projectBindingListProjectsToolName}; never infer a Plane project from a directory, Codex Project, Git remote, history, path, projectKind, or hostId.`,
     inputSchema: bindingSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   }, async (input) => {
@@ -183,21 +184,21 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
 
   server.registerTool("change_binding", {
     title: "Change project binding",
-    description: "Change the cwd's Plane project only after the user explicitly asks.",
+    description: `Call ${projectBindingChangeToolName} only after the user explicitly asks to move the cwd's Plane project.`,
     inputSchema: bindingSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async (input) => text(storage.bindContext(bindInput(input), true)));
 
   server.registerTool("decline_project_binding", {
     title: "Decline project binding",
-    description: "Persist or reuse a do-not-ask-again preference for the effective stable workspace identity only after the user explicitly gives a long-term refusal.",
+    description: `Call ${projectBindingDeclineToolName} only after the user explicitly gives a long-term refusal; do not call ${projectBindingListProjectsToolName} in that branch.`,
     inputSchema: cwdSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async ({ cwd }) => text(storage.declineBinding(cwd)));
 
   server.registerTool("restore_project_binding", {
     title: "Restore project binding onboarding",
-    description: "Restore the current stable workspace identity's project-selection flow only after the user explicitly asks to resume; inherited path refusals use an exact local override.",
+    description: `Call ${projectBindingRestoreToolName} only after the user explicitly asks to resume; then call ${projectBindingListProjectsToolName} and wait for an explicit choice before ${projectBindingToolName}. Inherited path refusals use an exact local override.`,
     inputSchema: cwdSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async ({ cwd }) => text(storage.restoreBinding(cwd)));

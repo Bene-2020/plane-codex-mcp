@@ -1,5 +1,5 @@
 import {
-  ActiveItemSnapshot, BatchRecord, FieldName, FieldOwner, FieldOwnership, PlaneItem, ProjectContext,
+  ActiveItemSnapshot, BatchRecord, BindingProjectCandidate, FieldName, FieldOwner, FieldOwnership, PlaneItem, ProjectContext,
   NoProjectEventsReview, ProjectContextInput, ProjectionStatus, SourceEvent, SourceReference, SyncStatus, batchId, canonicalizeCwd, eventId,
 } from "@ambient/core";
 import { SqliteDatabase } from "./database.js";
@@ -183,6 +183,9 @@ export class Storage {
         hook_event_name TEXT NOT NULL,
         record_tool_called INTEGER NOT NULL DEFAULT 0,
         binding_list_tool_called INTEGER NOT NULL DEFAULT 0,
+        binding_candidates_json TEXT,
+        binding_candidates_valid INTEGER NOT NULL DEFAULT 0,
+        binding_source_invalid INTEGER NOT NULL DEFAULT 0,
         capture_decision_recorded INTEGER,
         binding_prompt_delivered INTEGER,
         hook_error TEXT,
@@ -205,6 +208,9 @@ export class Storage {
     this.ensureColumn("source_references", "remote_source_id", "TEXT");
     this.ensureColumn("plane_item_cache", "parent_item_id", "TEXT");
     this.ensureColumn("turn_audits", "binding_list_tool_called", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("turn_audits", "binding_candidates_json", "TEXT");
+    this.ensureColumn("turn_audits", "binding_candidates_valid", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("turn_audits", "binding_source_invalid", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("turn_audits", "capture_decision_recorded", "INTEGER");
     this.ensureColumn("turn_audits", "binding_prompt_delivered", "INTEGER");
     this.db.exec(`
@@ -572,20 +578,27 @@ export class Storage {
 
   setUserFields(planeItemId: string, fields: Partial<Record<FieldName, string | null>>): void { for (const [field, value] of Object.entries(fields)) this.setFieldOwnership(planeItemId, field as FieldName, "user", value ?? null); }
 
-  auditHook(input: { eventName: string; sessionId: string; turnId?: string; toolCalled?: boolean; bindingListToolCalled?: boolean; captureDecisionRecorded?: boolean | null; bindingPromptDelivered?: boolean | null; error?: string; ended?: boolean }): void {
+  auditHook(input: { eventName: string; sessionId: string; turnId?: string; toolCalled?: boolean; bindingListToolCalled?: boolean; bindingCandidates?: BindingProjectCandidate[] | null; bindingCandidateSourceValid?: boolean; bindingSourceInvalid?: boolean; captureDecisionRecorded?: boolean | null; bindingPromptDelivered?: boolean | null; error?: string; ended?: boolean }): void {
     const turnId = input.turnId ?? null;
+    const bindingCandidateSourceWasProvided = input.bindingCandidateSourceValid !== undefined;
+    const bindingCandidatesValid = bindingCandidateSourceWasProvided && input.bindingCandidateSourceValid === true && Array.isArray(input.bindingCandidates) && input.bindingCandidates.length > 0;
+    const bindingCandidatesJson = bindingCandidatesValid ? JSON.stringify(input.bindingCandidates) : null;
+    const bindingSourceInvalid = bindingCandidateSourceWasProvided && (!bindingCandidatesValid || input.bindingSourceInvalid === true) ? 1 : input.bindingSourceInvalid ? 1 : 0;
     const captureDecisionRecorded = input.captureDecisionRecorded === undefined || input.captureDecisionRecorded === null ? null : input.captureDecisionRecorded ? 1 : 0;
     const bindingPromptDelivered = input.bindingPromptDelivered === undefined || input.bindingPromptDelivered === null ? null : input.bindingPromptDelivered ? 1 : 0;
     const bindingPromptDeliveredWasProvided = input.bindingPromptDelivered !== undefined ? 1 : 0;
-    this.db.prepare(`INSERT INTO turn_audits (session_id,turn_id,hook_event_name,record_tool_called,binding_list_tool_called,capture_decision_recorded,binding_prompt_delivered,hook_error,started_at,ended_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)
+    this.db.prepare(`INSERT INTO turn_audits (session_id,turn_id,hook_event_name,record_tool_called,binding_list_tool_called,binding_candidates_json,binding_candidates_valid,binding_source_invalid,capture_decision_recorded,binding_prompt_delivered,hook_error,started_at,ended_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(session_id,turn_id,hook_event_name) DO UPDATE SET
         record_tool_called=MAX(record_tool_called,excluded.record_tool_called),
         binding_list_tool_called=MAX(binding_list_tool_called,excluded.binding_list_tool_called),
+        binding_candidates_json=CASE WHEN ? THEN excluded.binding_candidates_json ELSE binding_candidates_json END,
+        binding_candidates_valid=CASE WHEN ? THEN excluded.binding_candidates_valid ELSE binding_candidates_valid END,
+        binding_source_invalid=MAX(binding_source_invalid,excluded.binding_source_invalid),
         capture_decision_recorded=COALESCE(excluded.capture_decision_recorded,capture_decision_recorded),
         binding_prompt_delivered=CASE WHEN ? THEN excluded.binding_prompt_delivered ELSE binding_prompt_delivered END,
         hook_error=COALESCE(excluded.hook_error,hook_error),
-        ended_at=COALESCE(excluded.ended_at,ended_at)`).run(input.sessionId, turnId, input.eventName, input.toolCalled ? 1 : 0, input.eventName === "PostToolUse" && input.bindingListToolCalled ? 1 : 0, captureDecisionRecorded, bindingPromptDelivered, input.error ?? null, now(), input.ended ? now() : null, bindingPromptDeliveredWasProvided);
+        ended_at=COALESCE(excluded.ended_at,ended_at)`).run(input.sessionId, turnId, input.eventName, input.toolCalled ? 1 : 0, input.eventName === "PostToolUse" && input.bindingListToolCalled ? 1 : 0, bindingCandidatesJson, bindingCandidatesValid ? 1 : 0, bindingSourceInvalid, captureDecisionRecorded, bindingPromptDelivered, input.error ?? null, now(), input.ended ? now() : null, bindingCandidateSourceWasProvided ? 1 : 0, bindingCandidateSourceWasProvided ? 1 : 0, bindingPromptDeliveredWasProvided);
   }
 
   listAudits(sessionId?: string): unknown[] { return (sessionId ? this.db.prepare("SELECT * FROM turn_audits WHERE session_id=? ORDER BY id DESC").all(sessionId) : this.db.prepare("SELECT * FROM turn_audits ORDER BY id DESC").all()) as unknown[]; }
@@ -596,6 +609,23 @@ export class Storage {
 
   didCallListProjects(sessionId: string, turnId: string): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND binding_list_tool_called=1 LIMIT 1").get(sessionId, turnId));
+  }
+
+  getBindingCandidates(sessionId: string, turnId: string): BindingProjectCandidate[] | null {
+    const row = this.db.prepare("SELECT binding_candidates_json FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='PostToolUse' AND binding_list_tool_called=1 AND binding_candidates_valid=1 AND binding_source_invalid=0 LIMIT 1").get(sessionId, turnId) as { binding_candidates_json: string | null } | undefined;
+    if (!row?.binding_candidates_json) return null;
+    try {
+      const parsed = JSON.parse(row.binding_candidates_json) as unknown;
+      if (!Array.isArray(parsed) || parsed.length === 0) return null;
+      if (!parsed.every((candidate) => {
+        if (!candidate || typeof candidate !== "object") return false;
+        const value = candidate as Record<string, unknown>;
+        return typeof value.name === "string" && value.name.length > 0 && typeof value.identifier === "string" && value.identifier.length > 0;
+      })) return null;
+      return parsed as BindingProjectCandidate[];
+    } catch {
+      return null;
+    }
   }
 
   didRecordProjectEvents(projectContextId: string, sessionId: string, turnId: string): boolean {

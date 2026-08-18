@@ -299,7 +299,7 @@ describe("SQLite storage", () => {
     expect(storage.getContext("project_1")?.workspaceIdentity).toBe("path:/work");
     expect((storage.db.prepare("PRAGMA table_info(outbox_batches)").all() as Array<{ name: string }>).map((row) => row.name)).toEqual(expect.arrayContaining(["claim_token", "lease_until", "claim_version"]));
     expect((storage.db.prepare("PRAGMA table_info(source_references)").all() as Array<{ name: string }>).map((row) => row.name)).toEqual(expect.arrayContaining(["projection_status", "projection_attempts", "projection_error", "projected_at", "remote_source_id"]));
-    expect((storage.db.prepare("PRAGMA table_info(turn_audits)").all() as Array<{ name: string }>).map((row) => row.name)).toEqual(expect.arrayContaining(["binding_list_tool_called", "capture_decision_recorded", "binding_prompt_delivered"]));
+    expect((storage.db.prepare("PRAGMA table_info(turn_audits)").all() as Array<{ name: string }>).map((row) => row.name)).toEqual(expect.arrayContaining(["binding_list_tool_called", "binding_candidates_json", "binding_candidates_valid", "binding_source_invalid", "capture_decision_recorded", "binding_prompt_delivered"]));
     storage.close();
     const reopened = new Storage(filename);
     expect(reopened.getContextByCwd("/work")?.id).toBe("project_1");

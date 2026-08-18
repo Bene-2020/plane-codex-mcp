@@ -4,7 +4,7 @@ import { App as McpApp } from "@modelcontextprotocol/ext-apps";
 import { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
-import { parentChildClosureRule, projectBindingConditionalFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
+import { codexDesktopListProjectsToolName, parentChildClosureRule, projectBindingConditionalFinalDeliveryRule, projectBindingListProjectsToolName, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingRestoreRule, projectBindingSessionDeferralRule, projectBindingToolName, projectBindingToolSourceRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
 import { FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { createMcpServer, PANEL_BOOTSTRAP_META_KEY, PANEL_PROXY_TOOL_NAME, PANEL_RESOURCE_URI, startMcpRuntime } from "./index.js";
@@ -25,8 +25,13 @@ describe("ambient MCP tools and App bootstrap", () => {
       expect(client.getInstructions()).toContain(projectBindingPostPromptDeferralRule);
       expect(client.getInstructions()).toContain(projectBindingRestoreRule);
       expect(client.getInstructions()).toContain(projectBindingPromptInstruction);
+      expect(client.getInstructions()).toContain(projectBindingToolSourceRule);
+      expect(client.getInstructions()).toContain(projectBindingListProjectsToolName);
+      expect(client.getInstructions()).toContain(codexDesktopListProjectsToolName);
+      expect(client.getInstructions()).toContain("may still be used for an explicit Codex Projects request, but never as Plane binding evidence");
+      expect(client.getInstructions()).toContain(projectBindingToolName);
       expect(client.getInstructions()).toContain(relatedItemIdContract);
-      expect(client.getInstructions()).toContain("When get_binding returns null for the cwd, do not call open_project_panel");
+      expect(client.getInstructions()).toContain("When mcp__ambient_project__get_binding returns null for the cwd, do not call mcp__ambient_project__open_project_panel");
       expect(client.getInstructions()).toContain(supersededPlanRule);
       expect(client.getInstructions()).toContain(parentChildClosureRule);
       const { tools } = await client.listTools();
@@ -57,6 +62,10 @@ describe("ambient MCP tools and App bootstrap", () => {
       expect(JSON.stringify(recordTool?.inputSchema)).toContain(relatedItemIdContract);
       expect(JSON.stringify(recordTool?.inputSchema)).toContain("relatedItemId");
       expect(tools.find((tool) => tool.name === "open_project_panel")?._meta).toEqual({ ui: { resourceUri: PANEL_RESOURCE_URI, visibility: ["model"] }, "ui/resourceUri": PANEL_RESOURCE_URI });
+      expect(tools.find((tool) => tool.name === "list_projects")?.description).toContain(projectBindingListProjectsToolName);
+      expect(tools.find((tool) => tool.name === "list_projects")?.description).toContain(codexDesktopListProjectsToolName);
+      expect(tools.find((tool) => tool.name === "bind_project")?.description).toContain(projectBindingToolName);
+      expect(tools.find((tool) => tool.name === "bind_project")?.description).toContain(projectBindingListProjectsToolName);
     } finally {
       await client.close();
       await server.close();
@@ -71,10 +80,12 @@ describe("ambient MCP tools and App bootstrap", () => {
     expect(skill).toContain("default `relatedItemId` to the snapshot's `itemId`");
     expect(skill).toContain("server also accepts the exact user-visible `identifier`");
     expect(skill).toContain("Never guess a target from a title or fuzzy text");
-    expect(skill).toContain("do not call `list_projects`, do not ask again, and do not write a binding preference");
-    expect(skill).toContain("Only when this turn actually calls `list_projects`");
-    expect(skill).toContain("call `restore_project_binding` first, then `list_projects`");
+    expect(skill).toContain("do not call `mcp__ambient_project__list_projects`, do not ask again, and do not write a binding preference");
+    expect(skill).toContain("Only when this turn actually calls `mcp__ambient_project__list_projects`");
+    expect(skill).toContain("call `mcp__ambient_project__restore_project_binding` first, then `mcp__ambient_project__list_projects`");
     expect(skill).toContain("before that, even a normal work request is the first onboarding prompt");
+    expect(skill).toContain("`codex_app__list_projects` may still be used for an explicit Codex Projects request, but never as Plane binding evidence");
+    expect(skill).toContain("`path`, `projectKind`, or `hostId`");
   });
 
   it("keeps the service bootstrap in component metadata instead of model-visible content", async () => {

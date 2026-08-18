@@ -1,4 +1,4 @@
-import { buildAdditionalContext, hasCompleteProjectBindingPrompt, type BindingOnboardingPhase } from "@ambient/core";
+import { buildAdditionalContext, hasCompleteProjectBindingPrompt, projectBindingAcknowledgeEventsToolName, projectBindingDeclineToolName, projectBindingListProjectsToolName, projectBindingRecordEventsToolName, projectBindingRestoreToolName, type BindingOnboardingPhase, type BindingProjectCandidate } from "@ambient/core";
 import { Storage } from "@ambient/storage";
 import { mkdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -25,8 +25,59 @@ interface HookInput {
 
 function output(value: Record<string, unknown>): void { process.stdout.write(`${JSON.stringify(value)}\n`); }
 
-const recordProjectEventsToolName = "mcp__ambient_project__record_project_events";
-const listProjectsToolName = "mcp__ambient_project__list_projects";
+const recordProjectEventsToolName = projectBindingRecordEventsToolName;
+const listProjectsToolName = projectBindingListProjectsToolName;
+const acknowledgeNoProjectEventsToolName = projectBindingAcknowledgeEventsToolName;
+const declineProjectBindingToolName = projectBindingDeclineToolName;
+const restoreProjectBindingToolName = projectBindingRestoreToolName;
+const recognizedPostToolNames = new Set([recordProjectEventsToolName, listProjectsToolName, acknowledgeNoProjectEventsToolName, declineProjectBindingToolName, restoreProjectBindingToolName]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function decodeToolResponse(value: unknown): unknown | null {
+  if (typeof value === "string") {
+    try { return decodeToolResponse(JSON.parse(value) as unknown); } catch { return null; }
+  }
+  if (Array.isArray(value)) return value;
+  if (!isRecord(value)) return value;
+  if (value.isError === true || (Object.hasOwn(value, "error") && value.error !== undefined && value.error !== null)) return null;
+  if (Object.hasOwn(value, "content")) {
+    if (!Array.isArray(value.content) || value.content.length !== 1) return null;
+    const content = value.content[0];
+    if (!isRecord(content) || content.type !== "text" || typeof content.text !== "string") return null;
+    return decodeToolResponse(content.text);
+  }
+  if (Object.hasOwn(value, "result")) return decodeToolResponse(value.result);
+  if (Object.hasOwn(value, "structuredContent")) return decodeToolResponse(value.structuredContent);
+  return value;
+}
+
+function hasForbiddenBindingMetadata(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasForbiddenBindingMetadata);
+  if (!isRecord(value)) return false;
+  if (Object.keys(value).some((key) => ["path", "projectkind", "hostid"].includes(key.replaceAll("_", "").toLocaleLowerCase()))) return true;
+  return Object.values(value).some(hasForbiddenBindingMetadata);
+}
+
+function extractBindingCandidates(toolResponse: unknown): BindingProjectCandidate[] | null {
+  const decoded = decodeToolResponse(toolResponse);
+  if (decoded === null || hasForbiddenBindingMetadata(decoded) || !Array.isArray(decoded) || decoded.length === 0 || decoded.length > 200) return null;
+  const seen = new Set<string>();
+  const candidates: BindingProjectCandidate[] = [];
+  for (const value of decoded) {
+    if (!isRecord(value) || typeof value.name !== "string" || typeof value.identifier !== "string") return null;
+    const name = value.name.trim();
+    const identifier = value.identifier.trim();
+    if (!name || !identifier || name.length > 240 || identifier.length > 100) return null;
+    const key = `${identifier}\u0000${name}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    candidates.push({ name, identifier });
+  }
+  return candidates;
+}
 
 function createHookStorage(): Storage {
   const pluginData = process.env.PLUGIN_DATA ?? process.env.CLAUDE_PLUGIN_DATA;
@@ -47,7 +98,21 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
     storage ??= createHookStorage();
     if (eventName === "PostToolUse") {
       const toolName = input.tool_name ?? "";
-      storage.auditHook({ eventName, sessionId, turnId: input.turn_id, toolCalled: toolName === recordProjectEventsToolName, bindingListToolCalled: toolName === listProjectsToolName });
+      if (!recognizedPostToolNames.has(toolName)) return {};
+      const isCanonicalListProjects = toolName === listProjectsToolName;
+      const bindingCandidates = isCanonicalListProjects ? extractBindingCandidates(input.tool_response) : null;
+      storage.auditHook({
+        eventName,
+        sessionId,
+        turnId: input.turn_id,
+        toolCalled: toolName === recordProjectEventsToolName,
+        bindingListToolCalled: isCanonicalListProjects,
+        ...(isCanonicalListProjects ? {
+          bindingCandidates,
+          bindingCandidateSourceValid: Boolean(bindingCandidates),
+          bindingSourceInvalid: !bindingCandidates,
+        } : {}),
+      });
       return {};
     }
     if (eventName === "Stop") {
@@ -56,9 +121,13 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
         ? storage.didRecordProjectEvents(context.id, sessionId, input.turn_id) || storage.didAcknowledgeNoProjectEvents(context.id, sessionId, input.turn_id)
         : null;
       const didCallListProjects = Boolean(input.turn_id && storage.didCallListProjects(sessionId, input.turn_id));
+      const bindingCandidates = input.turn_id ? storage.getBindingCandidates(sessionId, input.turn_id) : null;
       const bindingPreference = !context && input.cwd ? storage.getBindingPreference(input.cwd) : null;
-      const bindingPromptDelivered = !context && input.cwd && input.turn_id && didCallListProjects && !bindingPreference
-        ? hasCompleteProjectBindingPrompt(input.last_assistant_message)
+      const bindingOnboardingActive = !context && input.cwd && input.turn_id && !bindingPreference;
+      const hasBindingPromptShape = bindingOnboardingActive ? hasCompleteProjectBindingPrompt(input.last_assistant_message) : false;
+      const bindingPromptAttempted = bindingOnboardingActive && (didCallListProjects || hasBindingPromptShape);
+      const bindingPromptDelivered = bindingPromptAttempted
+        ? didCallListProjects && Boolean(bindingCandidates) && hasCompleteProjectBindingPrompt(input.last_assistant_message, bindingCandidates)
         : null;
       storage.auditHook({ eventName, sessionId, turnId: input.turn_id, ended: true, captureDecisionRecorded, bindingPromptDelivered });
       return {};

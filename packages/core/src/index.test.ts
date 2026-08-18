@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingPromptHeader, projectBindingRestoreRule, projectBindingSessionDeferralRule, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
+import { buildAdditionalContext, canonicalizeCwd, codexDesktopListProjectsToolName, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingListProjectsToolName, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingPromptHeader, projectBindingRestoreRule, projectBindingSessionDeferralRule, projectBindingToolName, projectBindingToolSourceRule, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
 
 describe("core project contracts", () => {
   it("normalizes cwd without changing its identity", () => {
@@ -34,7 +34,7 @@ describe("core project contracts", () => {
     expect(context).toContain(relatedItemIdContract);
     expect(context).toContain(supersededPlanRule);
     expect(context).toContain(parentChildClosureRule);
-    expect(context).toContain("acknowledge_no_project_events");
+    expect(context).toContain("mcp__ambient_project__acknowledge_no_project_events");
     expect(context).toContain("Stop Hook only audits this turn and always allows it to end");
     expect(context).toContain("Current cwd: /work/src; binding root: /work");
     expect(context).not.toContain("description");
@@ -54,41 +54,41 @@ describe("core project contracts", () => {
   it("uses distinct unbound onboarding templates and never guesses a project", () => {
     const sessionStart = buildAdditionalContext({ eventName: "SessionStart", sessionId: "session_1", currentCwd: "/unbound/work", onboardingPhase: "session_start" });
     expect(sessionStart).toContain("SessionStart; it cannot interact");
-    expect(sessionStart).toContain("even a normal work request must call list_projects");
+    expect(sessionStart).toContain(`even a normal work request must call ${projectBindingListProjectsToolName}`);
     expect(sessionStart).toContain("Current cwd: /unbound/work");
-    expect(sessionStart).toContain("When get_binding returns null for this cwd, do not call open_project_panel");
-    expect(sessionStart).toContain("do not call bind_project before the user explicitly chooses");
+    expect(sessionStart).toContain("When mcp__ambient_project__get_binding returns null for this cwd, do not call mcp__ambient_project__open_project_panel");
+    expect(sessionStart).toContain("do not call mcp__ambient_project__bind_project before the user explicitly chooses");
     expect(sessionStart).not.toContain("If the user wants project capture");
 
     const firstPrompt = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_1", turnId: "turn_1", currentCwd: "/unbound/work", onboardingPhase: "first_user_prompt" });
     expect(firstPrompt).toContain("This is the first user prompt of this session");
-    expect(firstPrompt).toContain("immediately call list_projects");
+    expect(firstPrompt).toContain(`immediately call ${projectBindingListProjectsToolName}`);
     expect(firstPrompt).toContain("takes precedence over every onboarding instruction");
     expect(firstPrompt).toContain("temporary later/skip/this-time refusal");
-    expect(firstPrompt).toContain("Only an explicit request to restore or resume binding authorizes restore_project_binding");
-    expect(firstPrompt).toContain("Only an explicit project choice authorizes bind_project");
+    expect(firstPrompt).toContain("Only an explicit request to restore or resume binding authorizes mcp__ambient_project__restore_project_binding");
+    expect(firstPrompt).toContain(`Only an explicit project choice authorizes ${projectBindingToolName}`);
     expect(firstPrompt).toContain(projectBindingPermanentRefusalRule);
     expect(firstPrompt).toContain(projectBindingSessionDeferralRule);
     expect(firstPrompt).toContain(projectBindingRestoreRule);
     expect(firstPrompt).not.toContain(projectBindingPostPromptDeferralRule);
     expect(firstPrompt).toContain("a normal work request is not a current-session deferral");
-    expect(firstPrompt).toContain("fixed final binding block is required only after list_projects actually runs");
+    expect(firstPrompt).toContain(`fixed final binding block is required only after ${projectBindingListProjectsToolName} actually runs`);
     expect(firstPrompt).not.toContain("last_assistant_message");
     expect(firstPrompt).not.toContain(projectBindingFinalDeliveryRule);
     expect(firstPrompt).toContain("Stop Hook only audits this turn and always allows it to end");
 
     const continuing = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_1", turnId: "turn_2", currentCwd: "/unbound/work", onboardingPhase: "continuing_session" });
     expect(continuing).toContain("does not prove that onboarding was actually asked");
-    expect(continuing).toContain("If no actual onboarding question has appeared yet, now call list_projects");
+    expect(continuing).toContain(`If no actual onboarding question has appeared yet, now call ${projectBindingListProjectsToolName}`);
     expect(continuing).toContain("takes precedence over every onboarding instruction");
     expect(continuing).toContain(projectBindingPostPromptDeferralRule);
-    expect(continuing).toContain("Only an explicit request to restore or resume binding authorizes restore_project_binding");
+    expect(continuing).toContain("Only an explicit request to restore or resume binding authorizes mcp__ambient_project__restore_project_binding");
     expect(continuing).not.toContain("This is the first user prompt");
 
     const declined = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_2", turnId: "turn_1", currentCwd: "/unbound/work", onboardingPhase: "permanently_declined" });
     expect(declined).toContain("explicit permanent do-not-ask-again preference");
-    expect(declined).toContain("restore_project_binding");
-    expect(declined).not.toContain("immediately call list_projects");
+    expect(declined).toContain("mcp__ambient_project__restore_project_binding");
+    expect(declined).not.toContain(`immediately call ${projectBindingListProjectsToolName}`);
     expect(declined).not.toContain(projectBindingFinalDeliveryRule);
     expect(declined).not.toContain(projectBindingPromptHeader);
     expect(declined).not.toContain(projectBindingPromptInstruction);
@@ -102,5 +102,25 @@ describe("core project contracts", () => {
     expect(hasCompleteProjectBindingPrompt("工作继续完成了。\n<!-- " + complete + " -->")).toBe(false);
     expect(projectBindingFinalDeliveryRule).toContain("tool output, commentary, and thought are internal context");
     expect(projectBindingFinalDeliveryRule).toContain(projectBindingPromptInstruction);
+  });
+
+  it("locks binding rules to the canonical Ambient host tool and rejects local project metadata", () => {
+    const context = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "s", turnId: "t", currentCwd: "/unbound/work", onboardingPhase: "first_user_prompt" });
+    for (const rule of [context, projectBindingPermanentRefusalRule, projectBindingSessionDeferralRule, projectBindingPostPromptDeferralRule, projectBindingFinalDeliveryRule, projectBindingToolSourceRule]) {
+      expect(rule).toContain(projectBindingListProjectsToolName);
+      expect(rule).not.toContain("call list_projects");
+    }
+    expect(context).toContain(codexDesktopListProjectsToolName);
+    expect(context).toContain("may still be used for an explicit Codex Projects request, but never as Plane binding evidence");
+    expect(context).toContain("path, projectKind, or hostId");
+  });
+
+  it("matches binding block projects to the saved name and identifier source", () => {
+    const candidates = [{ name: "Demo Project", identifier: "DEMO" }];
+    const complete = "工作继续完成了。\n\n### " + projectBindingPromptHeader + "\n- **DEMO** | Demo Project\n" + projectBindingPromptInstruction;
+    expect(hasCompleteProjectBindingPrompt(complete, candidates)).toBe(true);
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- **LOCAL** | Local Project\n" + projectBindingPromptInstruction, candidates)).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- **DEMO** | Demo Project | path: /tmp/project\n" + projectBindingPromptInstruction, candidates)).toBe(false);
+    expect(hasCompleteProjectBindingPrompt("### " + projectBindingPromptHeader + "\n- **DEMO** | Demo Project\n" + projectBindingPromptInstruction, [])).toBe(false);
   });
 });

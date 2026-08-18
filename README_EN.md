@@ -137,6 +137,8 @@ Completely quit and restart Codex, then create a new task. An already running MC
 
 If you do not want to choose yet, reply "later"; the current task will not ask again. If you explicitly ask a directory never to prompt again, the plugin stores that preference only locally. You can ask to restore binding later.
 
+Ambient Plane binding uses only the real return from the host tool `mcp__ambient_project__list_projects` in the current turn. `codex_app__list_projects` remains available for explicit Codex Projects requests, but it must never be used as Plane binding evidence. Binding prompts accept only Ambient-returned `name` + `identifier` pairs and never display or accept `path`, `projectKind`, `hostId`, or a local project name.
+
 ## Data, permissions, and privacy
 
 Ambient Project Layer has the following data boundaries:
@@ -183,7 +185,7 @@ These commands do not remove work items already synchronized to Plane. If you no
 
 First check whether the installed version's five Hooks are trusted. If they are untrusted or marked `modified`, trust them again and create a new task. A `SessionStart` missed earlier is not replayed in an existing task.
 
-### `list_projects` returns an authentication error or no projects
+### `mcp__ambient_project__list_projects` returns an authentication error or no projects
 
 Check `PLANE_MODE=sdk`, the Base URL, Workspace slug, API Key, and the Token's permissions for the target Workspace. Completely restart Codex after changing the configuration.
 

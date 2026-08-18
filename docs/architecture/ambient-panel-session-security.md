@@ -6,7 +6,7 @@ Plane 是用户可见项目数据的最终真相源和完整项目管理界面�
 
 ```text
 Codex model
-   │  open_project_panel
+   │  mcp__ambient_project__open_project_panel
    ▼
 MCP server ── tools/call result._meta["ambient-project/bootstrap"]
    │          (component-visible metadata only)
@@ -39,7 +39,7 @@ MCP process: Fastify BFF + Outbox worker ◄── X-Ambient-Session-Token ─�
 
 ## 宿主验收边界
 
-MCP Apps 标准规定了对话内/宿主内组件资源和 `App` bridge，但没有公开的永久项目级 Codex chrome/侧边栏注册接口。需要在目标 Codex Desktop 实机验证 `open_project_panel` 的资源渲染、`ui/notifications/tool-result` 的 `_meta` 传递和重新打开行为；未通过时使用 4318 页面，不把非公开注入或 CDP 作为替代。
+MCP Apps 标准规定了对话内/宿主内组件资源和 `App` bridge，但没有公开的永久项目级 Codex chrome/侧边栏注册接口。需要在目标 Codex Desktop 实机验证 `mcp__ambient_project__open_project_panel` 的资源渲染、`ui/notifications/tool-result` 的 `_meta` 传递和重新打开行为；未通过时使用 4318 页面，不把非公开注入或 CDP 作为替代。
 
 宿主即使支持 Fullscreen，也不把它作为产品入口或验收要求。4318 只渲染同一轻量 UI 以便开发和降级，不演进为独立管理端。
 

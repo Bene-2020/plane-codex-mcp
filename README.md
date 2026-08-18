@@ -137,6 +137,8 @@ codex mcp get ambient-project
 
 如果暂时不想选择，可以回复“稍后再说”；本次 task 不会重复询问。如果明确要求某个目录以后不再询问，插件会只在本地保存这一偏好，之后也可以要求恢复绑定。
 
+Ambient Plane 绑定只使用宿主工具 `mcp__ambient_project__list_projects` 的本轮真实返回；用户明确请求 Codex Projects 时，`codex_app__list_projects` 仍可正常使用，但不能作为 Plane 绑定证据。绑定提示只接受 Ambient 返回中的 `name` + `identifier`，不会展示或接受 `path`、`projectKind`、`hostId` 或本地项目名。
+
 ## 数据、权限与隐私
 
 Ambient Project Layer 的数据边界如下：
@@ -183,7 +185,7 @@ codex mcp remove ambient-project
 
 先检查五个 Hook 是否已被当前版本信任。若显示未信任或 `modified`，重新信任并新建 task；已错过的 `SessionStart` 不会在旧 task 中补跑。
 
-### `list_projects` 返回认证错误或没有项目
+### `mcp__ambient_project__list_projects` 返回认证错误或没有项目
 
 检查 `PLANE_MODE=sdk`、Base URL、Workspace slug、API Key 以及 Token 对目标 Workspace 的权限。修改配置后必须完全重启 Codex。
 
