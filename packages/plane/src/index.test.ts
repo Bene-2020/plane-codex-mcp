@@ -244,6 +244,50 @@ describe("Plane projection", () => {
 
     expect(plane.getActivities(item.id)).toHaveLength(1);
     expect((await plane.listItems(context))).toHaveLength(1);
+    expect(storage.getSourceReference("event_2_0")?.planeItemId).toBe(item.id);
+    storage.close();
+  });
+
+  it("self-heals a historical identifier source reference to the Plane UUID", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [bug()] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+    const item = (await plane.listItems(context))[0]!;
+    const event = { ...bug(), relatedItemId: item.identifier };
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [event] });
+    const batch = storage.listPendingBatches()[0]!;
+    storage.addSourceReference({ batchId: batch.id, eventId: "event_2_0", remoteSourceId: remoteSourceId(context.id, "s", "t2", 0), sessionId: "s", turnId: "t2", eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: "now" });
+    storage.db.prepare("UPDATE source_references SET plane_item_id=? WHERE event_id=?").run(item.identifier, "event_2_0");
+
+    await coordinator.syncBatch(batch);
+
+    expect(storage.getSourceReference("event_2_0")?.planeItemId).toBe(item.id);
+    expect(plane.getActivities(item.id)).toHaveLength(1);
+    storage.close();
+  });
+
+  it("prefers an exact Plane UUID over an identifier regardless of item order", async () => {
+    const { adapter, items } = sdkHarness([
+      { id: "state-captured", name: "Backlog", group: "backlog" },
+      { id: "state-done", name: "Done", group: "completed" },
+    ]);
+    items.push(
+      { id: "identifier-match", sequence_id: 42, project: "demo-project", name: "Identifier match", state: "state-captured", updated_at: "2026-08-13T00:00:00.000Z" },
+      { id: "42", sequence_id: 7, project: "demo-project", name: "UUID match", state: "state-captured", updated_at: "2026-08-13T00:00:00.000Z" },
+    );
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://api.plane.so", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const coordinator = new EventCoordinator(storage, adapter);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "uuid-priority", events: [{ type: "completed", title: "完成工作项", summary: "完成工作项", relatedItemId: "42", userDirected: false, sourceExcerpt: "完成工作项" }] });
+
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(items.find((item) => item.id === "42")?.state).toBe("state-captured");
+    expect(items.find((item) => item.id === "identifier-match")?.state).toBe("state-captured");
+    expect(storage.getSourceReference("event_1_0")?.planeItemId).toBe("42");
     storage.close();
   });
 
@@ -340,9 +384,41 @@ describe("Plane projection", () => {
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
     const plane = new FakePlaneAdapter(); plane.fail = true;
     const coordinator = new EventCoordinator(storage, plane);
-    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [bug()] });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [{ ...bug(), relatedItemId: "DEMO-999" }] });
     await expect(coordinator.syncBatch(storage.listPendingBatches()[0]!)).rejects.toThrow("unavailable");
     expect(storage.listPendingBatches()).toHaveLength(1);
+    expect(storage.getSourceReference("event_1_0")?.planeItemId).toBeNull();
+    storage.close();
+  });
+
+  it("retries with the canonical UUID after resolving an identifier", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [bug()] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+    const item = (await plane.listItems(context))[0]!;
+    const originalListItems = plane.listItems.bind(plane);
+    let listCalls = 0;
+    plane.listItems = async (candidateContext) => {
+      listCalls += 1;
+      const items = await originalListItems(candidateContext);
+      return listCalls >= 3 ? items.map((candidate) => ({ ...candidate, identifier: "RENAMED-1" })) : items;
+    };
+    const event = { type: "progress" as const, title: "继续修复", summary: "继续修复", userDirected: false, relatedItemId: item.identifier, sourceExcerpt: "继续修复" };
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [event] });
+    plane.injectFailure({ operation: "addActivity", sourceEventId: remoteSourceId(context.id, "s", "t2", 0) });
+
+    await expect(coordinator.syncBatch(storage.listPendingBatches()[0]!)).rejects.toThrow("injected addActivity failure");
+    expect(storage.getSourceReference("event_2_0")?.planeItemId).toBe(item.id);
+    expect(plane.getActivities(item.id)).toHaveLength(0);
+
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(plane.getActivities(item.id)).toHaveLength(1);
+    expect(storage.getSourceReference("event_2_0")?.planeItemId).toBe(item.id);
+    expect(storage.listPendingBatches()).toHaveLength(0);
     storage.close();
   });
 

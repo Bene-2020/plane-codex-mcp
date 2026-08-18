@@ -51,6 +51,10 @@ interface BindingPreferenceRow {
   updated_at: string;
 }
 
+type NewSourceReference = Omit<SourceReference, "id" | "createdAt" | "projectionStatus" | "projectionAttempts" | "projectionError" | "projectedAt" | "planeItemId"> & {
+  planeItemId?: null;
+};
+
 export interface BindingPreference {
   id: number;
   workspaceIdentity: string;
@@ -487,10 +491,10 @@ export class Storage {
 
   markBatchRetrying(batchIdValue: string, error: string, claimToken?: string): boolean { return this.setBatchStatus(batchIdValue, "retrying", error, claimToken); }
 
-  addSourceReference(input: Omit<SourceReference, "id" | "createdAt" | "projectionStatus" | "projectionAttempts" | "projectionError" | "projectedAt">): SourceReference {
+  addSourceReference(input: NewSourceReference): SourceReference {
     this.db.prepare(`INSERT INTO source_references (batch_id,event_id,remote_source_id,plane_item_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at)
       SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM source_references WHERE event_id=?)`)
-      .run(input.batchId, input.eventId, input.remoteSourceId, input.planeItemId, input.sessionId, input.turnId, input.eventType, input.summary, input.sourceExcerpt, input.observedAt, now(), input.eventId);
+      .run(input.batchId, input.eventId, input.remoteSourceId, null, input.sessionId, input.turnId, input.eventType, input.summary, input.sourceExcerpt, input.observedAt, now(), input.eventId);
     const reference = this.getSourceReference(input.eventId);
     if (!reference) throw new Error(`Source reference not found for ${input.eventId}`);
     if (!reference.remoteSourceId) throw new Error(`Source reference ${input.eventId} has not been migrated; run pnpm migrate:source-ids`);

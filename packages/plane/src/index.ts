@@ -330,7 +330,7 @@ export class EventCoordinator {
     for (const [index, event] of batch.events.entries()) {
       const currentEventId = eventId(batch.rowId, index);
       const currentRemoteSourceId = remoteSourceId(batch.projectContextId, batch.sessionId, batch.turnId, index);
-      const reference = this.storage.addSourceReference({ batchId: batch.id, eventId: currentEventId, remoteSourceId: currentRemoteSourceId, planeItemId: event.relatedItemId ?? null, sessionId: batch.sessionId, turnId: batch.turnId, eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: event.observedAt ?? new Date().toISOString() });
+      const reference = this.storage.addSourceReference({ batchId: batch.id, eventId: currentEventId, remoteSourceId: currentRemoteSourceId, sessionId: batch.sessionId, turnId: batch.turnId, eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: event.observedAt ?? new Date().toISOString() });
       if (reference.projectionStatus !== "completed") pendingEvents.push({ event, eventId: currentEventId, remoteSourceId: currentRemoteSourceId });
     }
     if (!pendingEvents.length) {
@@ -365,7 +365,7 @@ export class EventCoordinator {
 
   private async projectEvent(context: ProjectContext, batch: BatchRecord, currentEventId: string, currentRemoteSourceId: string, event: SourceEvent, items: PlaneItem[], claimToken?: string, assertClaim?: () => void): Promise<string | null> {
     assertClaim?.();
-    const existing = this.resolveItem(currentEventId, currentRemoteSourceId, event, items);
+    const existing = this.resolveItem(currentEventId, currentRemoteSourceId, event, items, claimToken);
     if (event.type === "progress" || event.type === "decision") {
       if (existing) {
         assertClaim?.();
@@ -469,11 +469,17 @@ export class EventCoordinator {
     return created;
   }
 
-  private resolveItem(currentEventId: string, currentRemoteSourceId: string, event: SourceEvent, planeItems: PlaneItem[]): PlaneItem | null {
+  private resolveItem(currentEventId: string, currentRemoteSourceId: string, event: SourceEvent, planeItems: PlaneItem[], claimToken?: string): PlaneItem | null {
     const reference = this.storage.getSourceReference(currentEventId);
     const relatedItemId = reference?.planeItemId ?? event.relatedItemId;
     // relatedItemId is an exact Plane UUID or user-visible identifier; titles are never used as references.
-    if (relatedItemId) return planeItems.find((item) => item.id === relatedItemId || item.identifier === relatedItemId) ?? this.storage.getCachedItem(relatedItemId);
+    if (relatedItemId) {
+      const resolved = planeItems.find((item) => item.id === relatedItemId)
+        ?? planeItems.find((item) => item.identifier === relatedItemId)
+        ?? this.storage.getCachedItem(relatedItemId);
+      if (resolved && reference?.planeItemId !== resolved.id) this.storage.updateSourcePlaneItem(currentEventId, resolved.id, claimToken);
+      return resolved;
+    }
     if (event.type === "plan") return planeItems.find((item) => hasSourceMarker(item.description, currentRemoteSourceId)) ?? null;
     return null;
   }
