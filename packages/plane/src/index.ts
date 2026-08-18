@@ -59,6 +59,23 @@ function bypassPlainHttpsProxyForPlane(baseUrl: string): void {
   process.env.no_proxy = [...entries, host].join(",");
 }
 
+const offsetPageSize = 100;
+type OffsetPage<T> = { results: T[]; next_page_results?: boolean; total_count?: number; total_results?: number };
+
+async function listOffsetPages<T>(loadPage: (params: { limit: number; offset?: number }) => Promise<OffsetPage<T>>): Promise<T[]> {
+  const results: T[] = [];
+  let offset = 0;
+  while (true) {
+    const page = await loadPage(offset === 0 ? { limit: offsetPageSize } : { limit: offsetPageSize, offset });
+    results.push(...page.results);
+    const total = page.total_results ?? page.total_count;
+    const hasNext = page.next_page_results ?? (typeof total === "number" ? offset + page.results.length < total : page.results.length === offsetPageSize);
+    if (!hasNext) return results;
+    if (page.results.length === 0) throw new Error("Plane pagination returned next_page_results without results");
+    offset += page.results.length;
+  }
+}
+
 const planeTypeNames: Record<RecordKind, string> = {
   task: "Task",
   bug: "Bug",
@@ -82,8 +99,8 @@ export class PlaneSdkAdapter implements PlaneAdapter {
   constructor(private readonly baseUrl: string, apiKey: string, private readonly defaultWorkspace: string, private readonly client = new PlaneClient({ baseUrl, apiKey })) {}
 
   async listProjects(): Promise<PlaneProject[]> {
-    const payload = await this.client.projects.list(this.defaultWorkspace, { limit: 100 });
-    return payload.results.map((project) => ({ id: project.id, name: project.name, identifier: project.identifier, workspaceSlug: this.defaultWorkspace }));
+    const projects = await listOffsetPages((params) => this.client.projects.list(this.defaultWorkspace, params));
+    return projects.map((project) => ({ id: project.id, name: project.name, identifier: project.identifier, workspaceSlug: this.defaultWorkspace }));
   }
 
   async listItems(context: ProjectContext): Promise<PlaneItem[]> {
@@ -168,15 +185,15 @@ export class PlaneSdkAdapter implements PlaneAdapter {
   }
 
   private async findActivityBySourceEventId(context: ProjectContext, itemId: string, marker: string): Promise<PlaneActivity | null> {
-    const payload = await this.client.workItems.comments.list(context.workspaceSlug, context.planeProjectId, itemId, { limit: 100 });
-    const comment = payload.results.find((item) => item.comment_html?.includes(marker));
+    const comments = await listOffsetPages((params) => this.client.workItems.comments.list(context.workspaceSlug, context.planeProjectId, itemId, params));
+    const comment = comments.find((item) => item.comment_html?.includes(marker));
     return comment ? { id: comment.id, itemId, body: comment.comment_html?.replace(`\n\n${marker}`, "") ?? "", createdAt: String(comment.created_at ?? new Date().toISOString()), sourceEventId: marker.slice("[ambient:".length, -1) } : null;
   }
 
   private async loadStates(context: ProjectContext): Promise<PlaneSdkState[]> {
-    const payload = await this.client.states.list(context.workspaceSlug, context.planeProjectId, { limit: 100 });
-    for (const state of payload.results) this.stateNames.set(this.stateKey(context, state.id), state.name);
-    return payload.results;
+    const states = await listOffsetPages((params) => this.client.states.list(context.workspaceSlug, context.planeProjectId, params));
+    for (const state of states) this.stateNames.set(this.stateKey(context, state.id), state.name);
+    return states;
   }
 
   private async resolveStateId(context: ProjectContext, lifecycle: LifecycleState): Promise<string> {
