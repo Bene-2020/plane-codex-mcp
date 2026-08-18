@@ -11,7 +11,7 @@
 
 Ambient Project Layer 是一个 Codex 插件。它从当前工作回合中捕获真正有项目价值的事件，先可靠写入本地 SQLite Outbox，再异步同步到 Plane。你可以继续在 Plane 中做完整的项目管理，也可以在 Codex 内通过轻量 Panel 查看最近工作项并修改状态。
 
-它解决的是一个很具体的问题：开发工作已经在 Codex 中发生，但任务、决定和风险往往要靠人再次整理到项目管理工具中。Ambient Project Layer 把这段重复劳动压缩成一个安静、可审查的后台流程。
+开发工作已经在 Codex 中发生，但任务、决定和风险往往要靠人再次整理到项目管理工具中。Ambient Project Layer 把这段重复劳动压缩成一个安静、可审查的后台流程。
 
 ## 产品界面
 
@@ -19,7 +19,7 @@ Ambient Project Layer 是一个 Codex 插件。它从当前工作回合中捕获
 
 Panel 默认展示最多 5 个相关工作项，支持按 Backlog、Todo、In Progress 和 Done 筛选，并可通过状态菜单或拖拽更新状态。完整创建、编辑、归档和项目管理仍在 Plane 中完成。
 
-Panel 的 UI 直接沿用 Plane 开源产品的视觉风格，包括配色、状态标签、卡片层级和交互方式，让用户在 Codex 与 Plane 之间获得一致的使用体验。该界面由本项目实现，并非 Plane 官方组件，也不表示 Plane 对本项目提供官方背书。
+Panel 的 UI 直接沿用 Plane 开源产品的视觉风格，包括配色、状态标签、卡片层级和交互方式，让用户在 Codex 与 Plane 之间获得一致的使用体验。该界面由本项目实现，并非 Plane 官方组件。
 
 ## 主要能力
 
