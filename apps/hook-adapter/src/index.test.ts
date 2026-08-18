@@ -19,8 +19,9 @@ describe("hook adapter", () => {
         },
       });
       const additionalContext = (result.hookSpecificOutput as { additionalContext: string }).additionalContext;
-      expect(additionalContext).toContain("P-1 | Parent | planned | parent");
-      expect(additionalContext).toContain("P-2 | Child | planned | child of #P-1");
+      expect(additionalContext).toContain("Active Plane items (identifier | itemId | title | status | relationship):");
+      expect(additionalContext).toContain("P-1 | parent | Parent | planned | parent");
+      expect(additionalContext).toContain("P-2 | child | Child | planned | child of #P-1");
     }
     storage.close();
   });

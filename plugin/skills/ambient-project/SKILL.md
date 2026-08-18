@@ -37,7 +37,7 @@ If automatic capture is enabled, call exactly one tool before the final response
 
 The final-reply rule above is a pre-delivery instruction for the current Codex. `Stop` computes the in-memory `binding_prompt_delivered` result when applicable, never stores the message or generates a second assistant reply; if the rule was missed, the Hook records `0` and still returns an empty response. Bound auto-capture turns similarly record `capture_decision_recorded` as `0` or `1`; non-applicable cases stay `NULL`.
 
-Prefer `relatedItemId` from the injected active-item snapshot when a relationship is unambiguous. If it is not unambiguous, create a conservative new event or ask the user only for an explicit instruction whose target cannot be uniquely resolved.
+The injected active Plane item snapshot uses `identifier | itemId | title | status | relationship`; `identifier` is user-visible and `itemId` is the real Plane work-item UUID. Keep the MCP field name `relatedItemId`. When a relationship is unambiguous, default `relatedItemId` to the snapshot's `itemId`; the server also accepts the exact user-visible `identifier` for compatibility. Never guess a target from a title or fuzzy text. If the relationship is not unambiguous, create a conservative new event or ask the user only for an explicit instruction whose target cannot be uniquely resolved.
 
 Progress and related decisions should attach to an existing item. A plan may include explicit executable steps. An explicit completion may update a uniquely identified item. Do not delete items, reassign people, move projects, or overwrite fields the user has edited.
 

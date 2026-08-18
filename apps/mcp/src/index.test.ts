@@ -3,7 +3,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { App as McpApp } from "@modelcontextprotocol/ext-apps";
 import { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { describe, expect, it } from "vitest";
-import { parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPromptInstruction, supersededPlanRule } from "@ambient/core";
+import { readFile } from "node:fs/promises";
+import { parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPromptInstruction, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
 import { FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { createMcpServer, PANEL_BOOTSTRAP_META_KEY, PANEL_PROXY_TOOL_NAME, PANEL_RESOURCE_URI, startMcpRuntime } from "./index.js";
@@ -20,6 +21,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     try {
       expect(client.getInstructions()).toContain(projectBindingFinalDeliveryRule);
       expect(client.getInstructions()).toContain(projectBindingPromptInstruction);
+      expect(client.getInstructions()).toContain(relatedItemIdContract);
       expect(client.getInstructions()).toContain("When get_binding returns null for the cwd, do not call open_project_panel");
       expect(client.getInstructions()).toContain(supersededPlanRule);
       expect(client.getInstructions()).toContain(parentChildClosureRule);
@@ -46,12 +48,25 @@ describe("ambient MCP tools and App bootstrap", () => {
         record_project_events: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         acknowledge_no_project_events: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       });
+      const recordTool = tools.find((tool) => tool.name === "record_project_events");
+      expect(recordTool?.description).toContain(relatedItemIdContract);
+      expect(JSON.stringify(recordTool?.inputSchema)).toContain(relatedItemIdContract);
+      expect(JSON.stringify(recordTool?.inputSchema)).toContain("relatedItemId");
       expect(tools.find((tool) => tool.name === "open_project_panel")?._meta).toEqual({ ui: { resourceUri: PANEL_RESOURCE_URI, visibility: ["model"] }, "ui/resourceUri": PANEL_RESOURCE_URI });
     } finally {
       await client.close();
       await server.close();
       storage.close();
     }
+  });
+
+  it("keeps the packaged Skill aligned with the relatedItemId reference contract", async () => {
+    const skill = await readFile(new URL("../../../plugin/skills/ambient-project/SKILL.md", import.meta.url), "utf8");
+    expect(skill).toContain("identifier | itemId | title | status | relationship");
+    expect(skill).toContain("Keep the MCP field name `relatedItemId`");
+    expect(skill).toContain("default `relatedItemId` to the snapshot's `itemId`");
+    expect(skill).toContain("server also accepts the exact user-visible `identifier`");
+    expect(skill).toContain("Never guess a target from a title or fuzzy text");
   });
 
   it("keeps the service bootstrap in component metadata instead of model-visible content", async () => {

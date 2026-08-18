@@ -68,7 +68,7 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
     }
     if (eventName === "SessionStart" || eventName === "UserPromptSubmit") {
       const context = input.cwd ? storage.getContextByCwd(input.cwd) : null;
-      const activeItems = context ? storage.listCachedItems(context.id).map((item) => ({ id: item.id, identifier: item.identifier, title: item.title, status: item.status ?? "captured", parentId: item.parentId, kind: item.kind, updatedAt: item.updatedAt })) : [];
+      const activeItems = context ? storage.listCachedItems(context.id).map((item) => ({ itemId: item.id, identifier: item.identifier, title: item.title, status: item.status ?? "captured", parentId: item.parentId, kind: item.kind, updatedAt: item.updatedAt })) : [];
       const bindingPreference = !context && input.cwd ? storage.getBindingPreference(input.cwd) : null;
       // This is only a lifecycle hint for choosing the SessionStart/first/later template;
       // the injected later-session branch must inspect visible dialogue rather than infer that onboarding happened.

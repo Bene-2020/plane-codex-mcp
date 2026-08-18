@@ -231,6 +231,22 @@ describe("Plane projection", () => {
     storage.close();
   });
 
+  it("accepts the exact user-visible identifier as relatedItemId", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const coordinator = new EventCoordinator(storage, plane);
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t1", events: [bug()] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+    const item = (await plane.listItems(context))[0]!;
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t2", events: [{ ...bug(), summary: "通过用户可见编号关联", relatedItemId: item.identifier }] });
+    await coordinator.syncBatch(storage.listPendingBatches()[0]!);
+
+    expect(plane.getActivities(item.id)).toHaveLength(1);
+    expect((await plane.listItems(context))).toHaveLength(1);
+    storage.close();
+  });
+
   it("does not collide when separate databases both allocate event_1_0", async () => {
     const plane = new FakePlaneAdapter();
     const first = new Storage(":memory:");

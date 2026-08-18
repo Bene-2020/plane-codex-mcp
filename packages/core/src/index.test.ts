@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPromptInstruction, projectBindingPromptHeader, remoteSourceId, supersededPlanRule } from "./index.js";
+import { buildAdditionalContext, canonicalizeCwd, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingPromptInstruction, projectBindingPromptHeader, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
 
 describe("core project contracts", () => {
   it("normalizes cwd without changing its identity", () => {
@@ -27,9 +27,11 @@ describe("core project contracts", () => {
   });
 
   it("keeps injected context compact and omits source content", () => {
-    const context = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_1", turnId: "turn_1", currentCwd: "/work/src", context: { id: "project_1", canonicalCwd: "/work", cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" }, activeItems: [{ id: "p1", identifier: "DEMO-1", title: "Release", status: "planned" }, { id: "c1", identifier: "DEMO-2", title: "Fix login", status: "captured", parentId: "p1" }] });
-    expect(context).toContain("DEMO-1 | Release | planned | parent");
-    expect(context).toContain("DEMO-2 | Fix login | captured | child of #DEMO-1");
+    const context = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_1", turnId: "turn_1", currentCwd: "/work/src", context: { id: "project_1", canonicalCwd: "/work", cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" }, activeItems: [{ itemId: "uuid-parent", identifier: "DEMO-1", title: "Release", status: "planned" }, { itemId: "uuid-child", identifier: "DEMO-2", title: "Fix login", status: "captured", parentId: "uuid-parent" }] });
+    expect(context).toContain("Active Plane items (identifier | itemId | title | status | relationship):");
+    expect(context).toContain("DEMO-1 | uuid-parent | Release | planned | parent");
+    expect(context).toContain("DEMO-2 | uuid-child | Fix login | captured | child of #DEMO-1");
+    expect(context).toContain(relatedItemIdContract);
     expect(context).toContain(supersededPlanRule);
     expect(context).toContain(parentChildClosureRule);
     expect(context).toContain("acknowledge_no_project_events");
@@ -41,12 +43,12 @@ describe("core project contracts", () => {
 
   it("resolves a rendered child's parent identifier from the full active set", () => {
     const activeItems = [
-      { id: "child", identifier: "P-2", title: "Child", status: "planned", parentId: "parent" },
-      ...Array.from({ length: 29 }, (_, index) => ({ id: `item-${index}`, identifier: `P-${index + 3}`, title: `Item ${index}`, status: "captured" })),
-      { id: "parent", identifier: "P-1", title: "Parent", status: "planned" },
+      { itemId: "child", identifier: "P-2", title: "Child", status: "planned", parentId: "parent" },
+      ...Array.from({ length: 29 }, (_, index) => ({ itemId: `item-${index}`, identifier: `P-${index + 3}`, title: `Item ${index}`, status: "captured" })),
+      { itemId: "parent", identifier: "P-1", title: "Parent", status: "planned" },
     ];
     const context = buildAdditionalContext({ eventName: "SessionStart", context: { id: "project_1", canonicalCwd: "/work", cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" }, activeItems });
-    expect(context).toContain("P-2 | Child | planned | child of #P-1");
+    expect(context).toContain("P-2 | child | Child | planned | child of #P-1");
   });
 
   it("uses distinct unbound onboarding templates and never guesses a project", () => {

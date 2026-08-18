@@ -10,11 +10,13 @@ export type LifecycleState = (typeof lifecycleStates)[number];
 export const syncStates = ["pending", "synced", "corrected", "failed", "retrying"] as const;
 export type SyncStatus = (typeof syncStates)[number];
 
+export const relatedItemIdContract = "relatedItemId accepts an exact Plane work-item UUID or user-visible identifier; prefer the snapshot itemId and never infer a target from a title or fuzzy text.";
+
 export const sourceEventSchema = z.object({
   type: z.enum(eventTypes),
   title: z.string().trim().min(1).max(240),
   summary: z.string().trim().min(1).max(5000),
-  relatedItemId: z.string().trim().min(1).max(200).nullable().optional(),
+  relatedItemId: z.string().trim().min(1).max(200).nullable().optional().describe(relatedItemIdContract),
   userDirected: z.boolean().default(false),
   sourceExcerpt: z.string().trim().min(1).max(1000),
   observedAt: z.string().datetime().optional(),
@@ -106,7 +108,7 @@ export type FieldName = "title" | "description" | "kind" | "status" | "dueDate" 
 export type FieldOwner = "system" | "user";
 export interface FieldOwnership { planeItemId: string; field: FieldName; owner: FieldOwner; systemValue: string | null; updatedAt: string; }
 
-export interface ActiveItemSnapshot { id: string; identifier: string; title: string; status: string; parentId?: string; kind?: string; updatedAt?: string; }
+export interface ActiveItemSnapshot { itemId: string; identifier: string; title: string; status: string; parentId?: string; kind?: string; updatedAt?: string; }
 
 export type BindingOnboardingPhase = "session_start" | "first_user_prompt" | "continuing_session" | "permanently_declined";
 
@@ -182,6 +184,7 @@ export function buildAdditionalContext(args: {
     lines.push(`Project context: ${args.context.id} (${args.context.planeProjectName ?? args.context.planeProjectId})`);
     lines.push(`Current cwd: ${args.currentCwd ?? "unknown"}; binding root: ${args.context.canonicalCwd}; session: ${args.sessionId ?? "unknown"}; turn: ${args.turnId ?? "session"}`);
     lines.push(`Automatic capture: ${args.context.autoCaptureEnabled ? "enabled" : "disabled"}.`);
+    lines.push(relatedItemIdContract);
     lines.push("Before the final reply, if automatic capture is enabled, decide from this turn's request, plan, tool results, and conclusion whether meaningful project events occurred. If so, call record_project_events once with all events; otherwise call acknowledge_no_project_events once. Never send an empty batch.");
     lines.push(supersededPlanRule);
     lines.push(parentChildClosureRule);
@@ -189,12 +192,12 @@ export function buildAdditionalContext(args: {
     const allItems = args.activeItems ?? [];
     const items = allItems.slice(0, 30);
     if (items.length) {
-      const identifiers = new Map(allItems.map((item) => [item.id, item.identifier]));
+      const identifiers = new Map(allItems.map((item) => [item.itemId, item.identifier]));
       const parentIds = new Set(allItems.flatMap((item) => item.parentId ? [item.parentId] : []));
-      lines.push("Active Plane items (identifier | title | status | relationship):");
+      lines.push("Active Plane items (identifier | itemId | title | status | relationship):");
       for (const item of items) {
-        const relationship = item.parentId ? `child of #${identifiers.get(item.parentId) ?? item.parentId}` : parentIds.has(item.id) ? "parent" : "standalone";
-        lines.push(`- ${item.identifier} | ${item.title} | ${item.status} | ${relationship}`);
+        const relationship = item.parentId ? `child of #${identifiers.get(item.parentId) ?? item.parentId}` : parentIds.has(item.itemId) ? "parent" : "standalone";
+        lines.push(`- ${item.identifier} | ${item.itemId} | ${item.title} | ${item.status} | ${relationship}`);
       }
     }
   } else {

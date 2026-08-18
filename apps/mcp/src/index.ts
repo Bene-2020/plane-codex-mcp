@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import { eventBatchSchema, isSessionToken, noProjectEventsReviewSchema, parentChildClosureRule, projectBindingFinalDeliveryRule, supersededPlanRule } from "@ambient/core";
+import { eventBatchSchema, isSessionToken, noProjectEventsReviewSchema, parentChildClosureRule, projectBindingFinalDeliveryRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
 import { createPlaneAdapter } from "@ambient/plane";
 import type { PlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
@@ -77,7 +77,7 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
     name: "ambient-project",
     version: "0.1.0",
   }, {
-    instructions: `Maintain project context quietly. For an unbound cwd, follow the onboarding phase injected by SessionStart/UserPromptSubmit and the visible conversation: if no actual onboarding question has appeared yet, immediately call list_projects, show the real returned Plane projects, and ask the user to choose; if the current user message explicitly says do not bind or do not ask again, call decline_project_binding without list_projects; if it only says later, skip, or continues another task, defer for this session without a preference or repeated question; if it explicitly asks to restore or bind, call restore_project_binding if needed, then list projects. When get_binding returns null for the cwd, do not call open_project_panel; call it only after get_binding, bind_project, or change_binding returns a real project context. Do not guess from a Codex Project name, directory name, Git remote, or conversation, and call bind_project only after an explicit choice. If list_projects is called, ${projectBindingFinalDeliveryRule} Before the final reply for a bound, auto-capture-enabled turn, decide whether the user's request, plan, tool results, or conclusion created a meaningful project event; if yes, record it in one non-empty batch, otherwise acknowledge that the turn has no project events. ${supersededPlanRule} ${parentChildClosureRule} The Stop Hook only audits the turn and always allows it to end; it never blocks, injects a follow-up prompt, or asks for a second reply. Do not expose Plane CRUD, delete items, reassign people, save user wording, or use a second semantic model.`,
+    instructions: `Maintain project context quietly. ${relatedItemIdContract} For an unbound cwd, follow the onboarding phase injected by SessionStart/UserPromptSubmit and the visible conversation: if no actual onboarding question has appeared yet, immediately call list_projects, show the real returned Plane projects, and ask the user to choose; if the current user message explicitly says do not bind or do not ask again, call decline_project_binding without list_projects; if it only says later, skip, or continues another task, defer for this session without a preference or repeated question; if it explicitly asks to restore or bind, call restore_project_binding if needed, then list projects. When get_binding returns null for the cwd, do not call open_project_panel; call it only after get_binding, bind_project, or change_binding returns a real project context. Do not guess from a Codex Project name, directory name, Git remote, or conversation, and call bind_project only after an explicit choice. If list_projects is called, ${projectBindingFinalDeliveryRule} Before the final reply for a bound, auto-capture-enabled turn, decide whether the user's request, plan, tool results, or conclusion created a meaningful project event; if yes, record it in one non-empty batch, otherwise acknowledge that the turn has no project events. ${supersededPlanRule} ${parentChildClosureRule} The Stop Hook only audits the turn and always allows it to end; it never blocks, injects a follow-up prompt, or asks for a second reply. Do not expose Plane CRUD, delete items, reassign people, save user wording, or use a second semantic model.`,
   });
   const panelConnectDomains = panelSession ? [new URL(panelSession.serviceBaseUrl).origin] : [];
 
@@ -185,7 +185,7 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
 
   server.registerTool("record_project_events", {
     title: "Record project events",
-    description: "Reliably accept one non-empty batch of meaningful project events for the current work turn. Plane synchronization is asynchronous.",
+    description: `Reliably accept one non-empty batch of meaningful project events for the current work turn. ${relatedItemIdContract} Plane synchronization is asynchronous.`,
     inputSchema: eventBatchSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (input) => {

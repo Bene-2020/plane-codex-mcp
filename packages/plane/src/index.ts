@@ -471,8 +471,9 @@ export class EventCoordinator {
 
   private resolveItem(currentEventId: string, currentRemoteSourceId: string, event: SourceEvent, planeItems: PlaneItem[]): PlaneItem | null {
     const reference = this.storage.getSourceReference(currentEventId);
-    if (reference?.planeItemId) return planeItems.find((item) => item.id === reference.planeItemId) ?? this.storage.getCachedItem(reference.planeItemId);
-    if (event.relatedItemId) return planeItems.find((item) => item.id === event.relatedItemId || item.identifier === event.relatedItemId) ?? this.storage.getCachedItem(event.relatedItemId);
+    const relatedItemId = reference?.planeItemId ?? event.relatedItemId;
+    // relatedItemId is an exact Plane UUID or user-visible identifier; titles are never used as references.
+    if (relatedItemId) return planeItems.find((item) => item.id === relatedItemId || item.identifier === relatedItemId) ?? this.storage.getCachedItem(relatedItemId);
     if (event.type === "plan") return planeItems.find((item) => hasSourceMarker(item.description, currentRemoteSourceId)) ?? null;
     return null;
   }
