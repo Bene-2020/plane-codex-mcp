@@ -1,32 +1,83 @@
 import { describe, expect, it } from "vitest";
 import { handleHook } from "./index.js";
 import { Storage } from "@ambient/storage";
-import { projectBindingFinalDeliveryRule, projectBindingPostPromptDeferralRule, projectBindingPromptHeader, projectBindingPromptInstruction } from "@ambient/core";
+import { projectBindingFinalDeliveryRule, projectBindingPromptHeader, projectBindingPromptInstruction } from "@ambient/core";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const validListResponse = { content: [{ type: "text", text: JSON.stringify([{ id: "plane-project", name: "真实项目", identifier: "SMWC-1" }]) }] };
 
 describe("hook adapter", () => {
-  it("uses hookSpecificOutput.additionalContext for session context", async () => {
+  it("uses full context on SessionStart and a light turn envelope on bound UserPromptSubmit", async () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", planeProjectName: "Demo" });
     storage.cacheItem(context.id, { id: "parent", identifier: "P-1", title: "Parent", status: "planned" }, true);
     storage.cacheItem(context.id, { id: "child", identifier: "P-2", title: "Child", status: "planned", parentId: "parent" }, true);
-    for (const eventName of ["SessionStart", "UserPromptSubmit"]) {
-      const result = await handleHook(JSON.stringify({ hook_event_name: eventName, cwd: "/work", session_id: "s", turn_id: "t", source: "startup", prompt: "continue" }), storage);
-      expect(result).toEqual({
-        hookSpecificOutput: {
-          hookEventName: eventName,
-          additionalContext: expect.any(String),
-        },
-      });
-      const additionalContext = (result.hookSpecificOutput as { additionalContext: string }).additionalContext;
-      expect(additionalContext).toContain("Active Plane items (identifier | itemId | title | status | relationship):");
-      expect(additionalContext).toContain("P-1 | parent | Parent | planned | parent");
-      expect(additionalContext).toContain("P-2 | child | Child | planned | child of #P-1");
+    try {
+      const sessionStart = await handleHook(JSON.stringify({ hook_event_name: "SessionStart", cwd: "/work", session_id: "s", source: "startup" }), storage);
+      expect(sessionStart).toEqual({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: expect.any(String) } });
+      const fullContext = (sessionStart.hookSpecificOutput as { additionalContext: string }).additionalContext;
+      expect(fullContext).toContain("Active Plane items (identifier | itemId | title | status | relationship):");
+      expect(fullContext).toContain("P-1 | parent | Parent | planned | parent");
+      expect(fullContext).toContain("P-2 | child | Child | planned | child of #P-1");
+
+      const prompt = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/work", session_id: "s", turn_id: "t", prompt: "continue" }), storage);
+      expect(prompt).toEqual({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: expect.any(String) } });
+      const lightContext = (prompt.hookSpecificOutput as { additionalContext: string }).additionalContext;
+      expect(lightContext).toContain("projectContextId=project_1; sessionId=s; turnId=t");
+      expect(lightContext).toContain("mcp__ambient_project__record_project_events");
+      expect(lightContext).toContain("mcp__ambient_project__acknowledge_no_project_events");
+      expect(lightContext).not.toContain("Active Plane items");
+      expect(lightContext.length).toBeLessThan(fullContext.length / 2);
+
+      storage.cacheItem(context.id, { id: "new-item", identifier: "P-3", title: "New item", status: "captured" }, true);
+      const changedPrompt = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/work", session_id: "s", turn_id: "t-2", prompt: "continue" }), storage);
+      const changedContext = (changedPrompt.hookSpecificOutput as { additionalContext: string }).additionalContext;
+      expect(changedContext).toContain("Active Plane item changes since the last delivered snapshot");
+      expect(changedContext).toContain("added | P-3 | new-item | New item | captured");
+    } finally {
+      storage.close();
     }
-    storage.close();
+  });
+
+  it("does not inject a UserPromptSubmit context when bound automatic capture is disabled", async () => {
+    const storage = new Storage(":memory:");
+    try {
+      const context = storage.bindContext({ cwd: "/disabled", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", autoCaptureEnabled: false });
+      await handleHook(JSON.stringify({ hook_event_name: "SessionStart", cwd: context.cwd, session_id: "disabled-session" }), storage);
+      expect(await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: context.cwd, session_id: "disabled-session", turn_id: "disabled-turn" }), storage)).toEqual({});
+      expect(storage.db.prepare("SELECT hook_event_name FROM turn_audits WHERE session_id=? AND turn_id=?").get("disabled-session", "disabled-turn")).toEqual({ hook_event_name: "UserPromptSubmit" });
+    } finally {
+      storage.close();
+    }
+  });
+
+  it("reuses the original turn id when compact SessionStart omits turn_id", async () => {
+    const storage = new Storage(":memory:");
+    try {
+      const context = storage.bindContext({ cwd: "/compact", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+      await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: context.cwd, session_id: "compact-session", turn_id: "original-turn" }), storage);
+      await handleHook(JSON.stringify({ hook_event_name: "PostToolUse", cwd: context.cwd, session_id: "compact-session", turn_id: "later-tool-turn", tool_name: "mcp__ambient_project__record_project_events" }), storage);
+      const compact = await handleHook(JSON.stringify({ hook_event_name: "SessionStart", cwd: context.cwd, session_id: "compact-session", source: "compact" }), storage);
+      const additionalContext = (compact.hookSpecificOutput as { additionalContext: string }).additionalContext;
+      expect(additionalContext).toContain("session: compact-session; turn: original-turn");
+      expect(storage.getLatestTurnId("compact-session")).toBe("original-turn");
+    } finally {
+      storage.close();
+    }
+  });
+
+  it("clears delivered active-item snapshots at SessionEnd", async () => {
+    const storage = new Storage(":memory:");
+    try {
+      const context = storage.bindContext({ cwd: "/session-end", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+      await handleHook(JSON.stringify({ hook_event_name: "SessionStart", cwd: context.cwd, session_id: "ending-session", source: "startup" }), storage);
+      expect(storage.getSessionActiveItemSnapshot(context.id, "ending-session")).toEqual([]);
+      expect(await handleHook(JSON.stringify({ hook_event_name: "SessionEnd", cwd: context.cwd, session_id: "ending-session" }), storage)).toEqual({});
+      expect(storage.getSessionActiveItemSnapshot(context.id, "ending-session")).toBeNull();
+    } finally {
+      storage.close();
+    }
   });
 
   it("audits the canonical MCP tool name from PostToolUse", async () => {
@@ -112,9 +163,7 @@ describe("hook adapter", () => {
     expect(JSON.stringify(first)).toContain("temporary later/skip/this-time refusal");
 
     const deferred = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/work/src", session_id: "session-1", turn_id: "turn-2" }), storage);
-    expect(JSON.stringify(deferred)).toContain("does not prove that onboarding was actually asked");
-    expect(JSON.stringify(deferred)).toContain("If no actual onboarding question has appeared yet, now call mcp__ambient_project__list_projects");
-    expect(JSON.stringify(deferred)).toContain("only after the visible conversation has already shown an actual binding question");
+    expect(deferred).toEqual({});
     expect((storage.db.prepare("SELECT COUNT(*) AS count FROM workspace_binding_preferences").get() as { count: number }).count).toBe(0);
     const resumed = await handleHook(JSON.stringify({ hook_event_name: "SessionStart", cwd: "/unbound/work/src", session_id: "session-1" }), storage);
     expect(JSON.stringify(resumed)).toContain("does not prove that onboarding was actually asked");
@@ -137,18 +186,14 @@ describe("hook adapter", () => {
       expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("defer-session", "onboard-turn")).toEqual({ binding_prompt_delivered: 1 });
 
       const deferred = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "defer-turn", prompt: "本轮不绑定" }), storage);
-      expect(JSON.stringify(deferred)).toContain("current session");
-      expect(JSON.stringify(deferred)).not.toContain(projectBindingFinalDeliveryRule);
-      expect(JSON.stringify(deferred)).not.toContain(projectBindingPromptHeader);
-      expect(JSON.stringify(deferred)).not.toContain(projectBindingPromptInstruction);
+      expect(deferred).toEqual({});
       expect(storage.getBindingPreference("/unbound/deferred")).toBeNull();
       expect((storage.db.prepare("SELECT COUNT(*) AS count FROM workspace_binding_preferences").get() as { count: number }).count).toBe(0);
       expect(await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "defer-turn", last_assistant_message: "本轮任务完成。" }), storage)).toEqual({});
       expect(storage.db.prepare("SELECT binding_prompt_delivered FROM turn_audits WHERE session_id=? AND turn_id=? AND hook_event_name='Stop'").get("defer-session", "defer-turn")).toEqual({ binding_prompt_delivered: null });
 
       const stillQuiet = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/deferred", session_id: "defer-session", turn_id: "quiet-turn", prompt: "继续当前任务" }), storage);
-      expect(JSON.stringify(stillQuiet)).toContain("do not call mcp__ambient_project__list_projects or ask again this session");
-      expect(JSON.stringify(stillQuiet)).not.toContain(projectBindingPromptHeader);
+      expect(stillQuiet).toEqual({});
 
       const nextSession = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/deferred", session_id: "new-session", turn_id: "new-turn", prompt: "普通新会话任务" }), storage);
       expect(JSON.stringify(nextSession)).toContain("immediately call mcp__ambient_project__list_projects");
@@ -170,9 +215,7 @@ describe("hook adapter", () => {
       await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/continued", session_id: "continued-session", turn_id: "first-turn", last_assistant_message: delivered }), storage);
 
       const continued = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/continued", session_id: "continued-session", turn_id: "continued-turn", prompt: "继续修复普通任务" }), storage);
-      expect(JSON.stringify(continued)).toContain(projectBindingPostPromptDeferralRule);
-      expect(JSON.stringify(continued)).toContain("do not call mcp__ambient_project__list_projects or ask again this session");
-      expect(JSON.stringify(continued)).not.toContain(projectBindingFinalDeliveryRule);
+      expect(continued).toEqual({});
       expect(storage.getBindingPreference("/unbound/continued")).toBeNull();
     } finally {
       storage.close();
@@ -269,13 +312,13 @@ describe("hook adapter", () => {
     expect(JSON.stringify(sessionStart)).toContain("explicit permanent do-not-ask-again preference");
     expect(JSON.stringify(sessionStart)).not.toContain("first UserPromptSubmit");
     const prompt = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/work", session_id: "session-2", turn_id: "turn-1" }), storage);
-    expect(JSON.stringify(prompt)).toContain("mcp__ambient_project__restore_project_binding");
+    expect(prompt).toEqual({});
     expect(await handleHook(JSON.stringify({ hook_event_name: "Stop", cwd: "/unbound/work", session_id: "session-2", turn_id: "turn-1", stop_hook_active: false }), storage)).toEqual({});
 
     storage.bindContext({ cwd: "/unbound/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     expect(storage.getBindingPreference("/unbound/work")).toBeNull();
     const boundPrompt = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: "/unbound/work", session_id: "session-3", turn_id: "turn-1" }), storage);
-    expect(JSON.stringify(boundPrompt)).toContain("binding root: /unbound/work");
+    expect(JSON.stringify(boundPrompt)).toContain("projectContextId=project_1; sessionId=session-3; turnId=turn-1");
     storage.close();
   });
 

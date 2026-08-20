@@ -193,6 +193,13 @@ export class Storage {
         ended_at TEXT,
         UNIQUE(session_id, turn_id, hook_event_name)
       );
+      CREATE TABLE IF NOT EXISTS session_active_item_snapshots (
+        project_context_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(project_context_id, session_id)
+      );
     `);
 
     this.ensureColumn("project_contexts", "workspace_identity", "TEXT");
@@ -224,6 +231,7 @@ export class Storage {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_source_remote ON source_references(remote_source_id);
       CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
       CREATE INDEX IF NOT EXISTS idx_cache_context ON plane_item_cache(project_context_id, archived, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_turn_audits_session_turn ON turn_audits(session_id, id DESC);
     `);
     this.migrateWorkspaceIdentities();
   }
@@ -558,6 +566,38 @@ export class Storage {
   listCachedItems(contextId: string): Array<PlaneItem & { isSystemCreated: boolean }> {
     const rows = this.db.prepare("SELECT * FROM plane_item_cache WHERE project_context_id=? AND archived=0 ORDER BY updated_at DESC").all(contextId) as CacheRow[];
     return rows.map((row) => ({ id: row.plane_item_id, identifier: row.identifier, title: row.title, description: row.description ?? undefined, parentId: row.parent_item_id ?? undefined, kind: (row.kind as PlaneItem["kind"]) ?? undefined, status: (row.status as PlaneItem["status"]) ?? undefined, dueDate: row.due_date, url: row.url ?? undefined, isSystemCreated: Boolean(row.is_system_created), archived: Boolean(row.archived), updatedAt: row.updated_at }));
+  }
+
+  getSessionActiveItemSnapshot(projectContextId: string, sessionId: string): ActiveItemSnapshot[] | null {
+    const row = this.db.prepare("SELECT snapshot_json FROM session_active_item_snapshots WHERE project_context_id=? AND session_id=?").get(projectContextId, sessionId) as { snapshot_json: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.snapshot_json) as unknown;
+      if (!Array.isArray(parsed)) return null;
+      if (!parsed.every((item) => {
+        if (!item || typeof item !== "object") return false;
+        const value = item as Record<string, unknown>;
+        return typeof value.itemId === "string" && typeof value.identifier === "string" && typeof value.title === "string" && typeof value.status === "string";
+      })) return null;
+      return parsed as ActiveItemSnapshot[];
+    } catch {
+      return null;
+    }
+  }
+
+  saveSessionActiveItemSnapshot(projectContextId: string, sessionId: string, items: ActiveItemSnapshot[]): void {
+    this.db.prepare(`INSERT INTO session_active_item_snapshots (project_context_id, session_id, snapshot_json, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(project_context_id, session_id) DO UPDATE SET snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`).run(projectContextId, sessionId, JSON.stringify(items), now());
+  }
+
+  clearSessionActiveItemSnapshots(sessionId: string): void {
+    this.db.prepare("DELETE FROM session_active_item_snapshots WHERE session_id=?").run(sessionId);
+  }
+
+  getLatestTurnId(sessionId: string): string | null {
+    const row = this.db.prepare("SELECT turn_id FROM turn_audits WHERE session_id=? AND hook_event_name='UserPromptSubmit' AND turn_id IS NOT NULL ORDER BY id DESC LIMIT 1").get(sessionId) as { turn_id: string } | undefined;
+    return row?.turn_id ?? null;
   }
 
   listAllCachedItems(contextId: string): Array<PlaneItem & { isSystemCreated: boolean }> {

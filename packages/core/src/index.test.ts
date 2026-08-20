@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAdditionalContext, canonicalizeCwd, codexDesktopListProjectsToolName, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingListProjectsToolName, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingPromptHeader, projectBindingRestoreRule, projectBindingSessionDeferralRule, projectBindingToolName, projectBindingToolSourceRule, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
+import { buildAdditionalContext, buildTurnAdditionalContext, canonicalizeCwd, codexDesktopListProjectsToolName, diffActiveItemSnapshots, eventBatchSchema, hasCompleteProjectBindingPrompt, normalizeTitle, parentChildClosureRule, projectBindingFinalDeliveryRule, projectBindingListProjectsToolName, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingPromptHeader, projectBindingRestoreRule, projectBindingSessionDeferralRule, projectBindingToolName, projectBindingToolSourceRule, relatedItemIdContract, remoteSourceId, supersededPlanRule } from "./index.js";
 
 describe("core project contracts", () => {
   it("normalizes cwd without changing its identity", () => {
@@ -27,7 +27,7 @@ describe("core project contracts", () => {
   });
 
   it("keeps injected context compact and omits source content", () => {
-    const context = buildAdditionalContext({ eventName: "UserPromptSubmit", sessionId: "session_1", turnId: "turn_1", currentCwd: "/work/src", context: { id: "project_1", canonicalCwd: "/work", cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" }, activeItems: [{ itemId: "uuid-parent", identifier: "DEMO-1", title: "Release", status: "planned" }, { itemId: "uuid-child", identifier: "DEMO-2", title: "Fix login", status: "captured", parentId: "uuid-parent" }] });
+    const context = buildAdditionalContext({ eventName: "SessionStart", sessionId: "session_1", turnId: "turn_1", currentCwd: "/work/src", context: { id: "project_1", canonicalCwd: "/work", cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" }, activeItems: [{ itemId: "uuid-parent", identifier: "DEMO-1", title: "Release", status: "planned" }, { itemId: "uuid-child", identifier: "DEMO-2", title: "Fix login", status: "captured", parentId: "uuid-parent" }] });
     expect(context).toContain("Active Plane items (identifier | itemId | title | status | relationship):");
     expect(context).toContain("DEMO-1 | uuid-parent | Release | planned | parent");
     expect(context).toContain("DEMO-2 | uuid-child | Fix login | captured | child of #DEMO-1");
@@ -39,6 +39,38 @@ describe("core project contracts", () => {
     expect(context).toContain("Current cwd: /work/src; binding root: /work");
     expect(context).not.toContain("description");
     expect(context.length).toBeLessThan(9000);
+  });
+
+  it("builds a three-ID turn envelope and only includes active-item deltas", () => {
+    const project = { id: "project_1", canonicalCwd: "/work", cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" };
+    const current = [{ itemId: "item-1", identifier: "DEMO-1", title: "Release", status: "planned" }];
+    const light = buildTurnAdditionalContext({ sessionId: "session_1", turnId: "turn_1", context: project });
+    expect(light).toBe("Ambient project turn context.\nprojectContextId=project_1; sessionId=session_1; turnId=turn_1.\nBefore the final reply, if automatic capture is enabled, call mcp__ambient_project__record_project_events once with one non-empty batch when this turn created meaningful project events; otherwise call mcp__ambient_project__acknowledge_no_project_events once.");
+    expect(light.length).toBe(352);
+    expect(Buffer.byteLength(light)).toBe(352);
+    expect(light).not.toContain("Active Plane items");
+
+    const withDelta = buildTurnAdditionalContext({ sessionId: "session_1", turnId: "turn_2", context: project, activeItems: [{ ...current[0]!, parentId: "parent-1" }], activeItemChanges: [{ kind: "updated", item: { ...current[0]!, title: "Release v2", parentId: "parent-1" } }] });
+    expect(withDelta).toContain("updated | DEMO-1 | item-1 | Release v2 | planned");
+    expect(withDelta).toContain("parentId=parent-1 | relationship=child of parent-1");
+    expect(withDelta.length).toBeLessThan(700);
+    expect(diffActiveItemSnapshots(null, current)).toEqual([]);
+    expect(diffActiveItemSnapshots(current, [{ ...current[0]!, title: "Release v2" }, { itemId: "item-2", identifier: "DEMO-2", title: "Fix login", status: "captured" }])).toEqual([
+      { kind: "updated", item: { ...current[0]!, title: "Release v2" } },
+      { kind: "added", item: { itemId: "item-2", identifier: "DEMO-2", title: "Fix login", status: "captured" } },
+    ]);
+    expect(diffActiveItemSnapshots(current, [])).toEqual([{ kind: "removed", item: current[0] }]);
+    expect(diffActiveItemSnapshots(current, [{ ...current[0]!, updatedAt: "2026-08-21T00:00:00.000Z" }])).toEqual([]);
+
+    const manyChanges = Array.from({ length: 80 }, (_, index) => ({
+      kind: "added" as const,
+      item: { itemId: `item-${index}`, identifier: `DEMO-${index}`, title: `Item ${index} ${"x".repeat(220)}`, status: "captured", parentId: index % 2 === 0 ? "parent-1" : undefined },
+    }));
+    const bounded = buildTurnAdditionalContext({ sessionId: "session_1", turnId: "turn_3", context: project, activeItems: manyChanges.map((change) => change.item), activeItemChanges: manyChanges });
+    expect(bounded.length).toBeLessThanOrEqual(6000);
+    expect(bounded).toContain("showing ");
+    expect(bounded).toContain("of 80");
+    expect((bounded.match(/^- /gm) ?? []).length).toBeLessThanOrEqual(30);
   });
 
   it("resolves a rendered child's parent identifier from the full active set", () => {

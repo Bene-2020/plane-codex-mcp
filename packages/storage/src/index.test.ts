@@ -253,6 +253,25 @@ describe("SQLite storage", () => {
     storage.close();
   });
 
+  it("persists a per-session active-item snapshot, clears it by session, and recovers only root prompt turns", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const secondContext = storage.bindContext({ cwd: "/other", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "other" });
+    const snapshot = [{ itemId: "item-1", identifier: "P-1", title: "Parent", status: "planned", updatedAt: "2026-08-20T00:00:00.000Z" }];
+    expect(storage.getSessionActiveItemSnapshot(context.id, "session-1")).toBeNull();
+    storage.saveSessionActiveItemSnapshot(context.id, "session-1", snapshot);
+    storage.saveSessionActiveItemSnapshot(secondContext.id, "session-1", snapshot);
+    expect(storage.getSessionActiveItemSnapshot(context.id, "session-1")).toEqual(snapshot);
+    storage.auditHook({ eventName: "UserPromptSubmit", sessionId: "session-1", turnId: "turn-1" });
+    storage.auditHook({ eventName: "PostToolUse", sessionId: "session-1", turnId: "turn-2" });
+    storage.auditHook({ eventName: "Stop", sessionId: "session-1", turnId: "turn-3", ended: true });
+    expect(storage.getLatestTurnId("session-1")).toBe("turn-1");
+    storage.clearSessionActiveItemSnapshots("session-1");
+    expect(storage.getSessionActiveItemSnapshot(context.id, "session-1")).toBeNull();
+    expect(storage.getSessionActiveItemSnapshot(secondContext.id, "session-1")).toBeNull();
+    storage.close();
+  });
+
   it("atomically claims a batch and rejects stale lease completion", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ambient-outbox-"));
     const filename = join(directory, "outbox.sqlite");

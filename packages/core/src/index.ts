@@ -110,6 +110,8 @@ export type FieldOwner = "system" | "user";
 export interface FieldOwnership { planeItemId: string; field: FieldName; owner: FieldOwner; systemValue: string | null; updatedAt: string; }
 
 export interface ActiveItemSnapshot { itemId: string; identifier: string; title: string; status: string; parentId?: string; kind?: string; updatedAt?: string; }
+export type ActiveItemChangeKind = "added" | "updated" | "removed";
+export interface ActiveItemChange { kind: ActiveItemChangeKind; item: ActiveItemSnapshot; }
 
 export type BindingOnboardingPhase = "session_start" | "first_user_prompt" | "continuing_session" | "permanently_declined";
 
@@ -295,6 +297,75 @@ export function buildAdditionalContext(args: {
     }
   }
   return lines.join("\n").slice(0, 6000);
+}
+
+function comparableActiveItem(item: ActiveItemSnapshot): string {
+  return JSON.stringify({
+    identifier: item.identifier,
+    title: item.title,
+    status: item.status,
+    parentId: item.parentId ?? null,
+  });
+}
+
+/**
+ * Compare the current cache with the last snapshot delivered to this Codex
+ * session. A null previous snapshot means that SessionStart has not delivered
+ * a baseline yet, so the next UserPromptSubmit remains a plain turn envelope.
+ */
+export function diffActiveItemSnapshots(previous: ActiveItemSnapshot[] | null, current: ActiveItemSnapshot[]): ActiveItemChange[] {
+  if (previous === null) return [];
+  const previousById = new Map(previous.map((item) => [item.itemId, item]));
+  const currentById = new Map(current.map((item) => [item.itemId, item]));
+  const changes: ActiveItemChange[] = [];
+  for (const item of current) {
+    const oldItem = previousById.get(item.itemId);
+    if (!oldItem) changes.push({ kind: "added", item });
+    else if (comparableActiveItem(oldItem) !== comparableActiveItem(item)) changes.push({ kind: "updated", item });
+  }
+  for (const item of previous) {
+    if (!currentById.has(item.itemId)) changes.push({ kind: "removed", item });
+  }
+  return changes;
+}
+
+/**
+ * The per-turn envelope deliberately contains only the three local protocol
+ * IDs and the record-or-ack obligation. Stable binding and lifecycle rules
+ * live in the MCP server instructions and are not repeated on every prompt.
+ */
+export function buildTurnAdditionalContext(args: {
+  sessionId: string;
+  turnId?: string;
+  context: ProjectContext;
+  activeItemChanges?: ActiveItemChange[];
+  activeItems?: ActiveItemSnapshot[];
+}): string {
+  const lines = [
+    "Ambient project turn context.",
+    `projectContextId=${args.context.id}; sessionId=${args.sessionId}; turnId=${args.turnId ?? "unknown"}.`,
+    `Before the final reply, if automatic capture is enabled, call ${projectBindingRecordEventsToolName} once with one non-empty batch when this turn created meaningful project events; otherwise call ${projectBindingAcknowledgeEventsToolName} once.`,
+  ];
+  if (args.activeItemChanges?.length) {
+    const changes = args.activeItemChanges;
+    const activeItems = args.activeItems ?? [];
+    const parentIds = new Set(activeItems.flatMap((item) => item.parentId ? [item.parentId] : []));
+    const relationship = (item: ActiveItemSnapshot): string => item.parentId ? `child of ${item.parentId}` : parentIds.has(item.itemId) ? "parent" : "standalone";
+    const changeLine = (change: ActiveItemChange): string => {
+      const item = change.item;
+      return `- ${change.kind} | ${item.identifier} | ${item.itemId} | ${item.title} | ${item.status} | parentId=${item.parentId ?? "none"} | relationship=${relationship(item)}`;
+    };
+    const total = changes.length;
+    const renderChanges = (shown: number): string => [
+      ...lines,
+      `Active Plane item changes since the last delivered snapshot (showing ${shown} of ${total}; change | identifier | itemId | title | status | parentId | relationship):`,
+      ...changes.slice(0, shown).map(changeLine),
+    ].join("\n");
+    let shown = Math.min(30, total);
+    while (shown > 0 && renderChanges(shown).length > 6000) shown -= 1;
+    return renderChanges(shown);
+  }
+  return lines.join("\n");
 }
 
 export interface BatchRecord {

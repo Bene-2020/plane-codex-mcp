@@ -1,4 +1,4 @@
-import { buildAdditionalContext, hasCompleteProjectBindingPrompt, projectBindingAcknowledgeEventsToolName, projectBindingDeclineToolName, projectBindingListProjectsToolName, projectBindingRecordEventsToolName, projectBindingRestoreToolName, type BindingOnboardingPhase, type BindingProjectCandidate } from "@ambient/core";
+import { buildAdditionalContext, buildTurnAdditionalContext, diffActiveItemSnapshots, hasCompleteProjectBindingPrompt, projectBindingAcknowledgeEventsToolName, projectBindingDeclineToolName, projectBindingListProjectsToolName, projectBindingRecordEventsToolName, projectBindingRestoreToolName, type ActiveItemSnapshot, type BindingOnboardingPhase, type BindingProjectCandidate } from "@ambient/core";
 import { Storage } from "@ambient/storage";
 import { mkdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -134,14 +134,16 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
     }
     if (eventName === "SessionEnd") {
       storage.auditHook({ eventName, sessionId, ended: true });
+      storage.clearSessionActiveItemSnapshots(sessionId);
       return {};
     }
     if (eventName === "SessionStart" || eventName === "UserPromptSubmit") {
       const context = input.cwd ? storage.getContextByCwd(input.cwd) : null;
-      const activeItems = context ? storage.listCachedItems(context.id).map((item) => ({ itemId: item.id, identifier: item.identifier, title: item.title, status: item.status ?? "captured", parentId: item.parentId, kind: item.kind, updatedAt: item.updatedAt })) : [];
+      const activeItems: ActiveItemSnapshot[] = context ? storage.listCachedItems(context.id).map((item) => ({ itemId: item.id, identifier: item.identifier, title: item.title, status: item.status ?? "captured", parentId: item.parentId, kind: item.kind, updatedAt: item.updatedAt })) : [];
       const bindingPreference = !context && input.cwd ? storage.getBindingPreference(input.cwd) : null;
-      // This is only a lifecycle hint for choosing the SessionStart/first/later template;
-      // the injected later-session branch must inspect visible dialogue rather than infer that onboarding happened.
+      // This is only a lifecycle hint for choosing the SessionStart/first
+      // onboarding template. Later unbound prompts stay silent; the visible
+      // conversation and MCP instructions retain the branch semantics.
       const sessionHasUserPrompt = storage.hasHookAudit(sessionId, "UserPromptSubmit");
       const firstUserPrompt = eventName === "UserPromptSubmit" && !sessionHasUserPrompt;
       const onboardingPhase: BindingOnboardingPhase | undefined = context
@@ -153,11 +155,39 @@ export async function handleHook(raw: string, providedStorage?: Storage): Promis
             : firstUserPrompt
               ? "first_user_prompt"
               : "continuing_session";
-      storage.auditHook({ eventName, sessionId, turnId: input.turn_id });
+      const turnId = eventName === "SessionStart"
+        ? input.turn_id ?? (input.source === "compact" ? storage.getLatestTurnId(sessionId) ?? undefined : undefined)
+        : input.turn_id;
+      storage.auditHook({ eventName, sessionId, turnId });
+      if (eventName === "SessionStart") {
+        if (context) storage.saveSessionActiveItemSnapshot(context.id, sessionId, activeItems);
+        return {
+          hookSpecificOutput: {
+            hookEventName: eventName,
+            additionalContext: buildAdditionalContext({ eventName, sessionId, turnId, context, currentCwd: input.cwd, onboardingPhase, activeItems }),
+          },
+        };
+      }
+      if (context) {
+        if (!context.autoCaptureEnabled) return {};
+        const previousSnapshot = storage.getSessionActiveItemSnapshot(context.id, sessionId);
+        const activeItemChanges = diffActiveItemSnapshots(previousSnapshot, activeItems);
+        storage.saveSessionActiveItemSnapshot(context.id, sessionId, activeItems);
+        return {
+          hookSpecificOutput: {
+            hookEventName: eventName,
+            additionalContext: buildTurnAdditionalContext({ sessionId, turnId, context, activeItemChanges, activeItems }),
+          },
+        };
+      }
+      // A normal unbound session only needs the first prompt's onboarding
+      // context. The visible conversation and MCP instructions retain the
+      // refusal/deferral/restore semantics for subsequent turns.
+      if (!firstUserPrompt || bindingPreference) return {};
       return {
         hookSpecificOutput: {
           hookEventName: eventName,
-          additionalContext: buildAdditionalContext({ eventName, sessionId, turnId: input.turn_id, context, currentCwd: input.cwd, onboardingPhase, activeItems }),
+          additionalContext: buildAdditionalContext({ eventName, sessionId, turnId, context, currentCwd: input.cwd, onboardingPhase, activeItems }),
         },
       };
     }

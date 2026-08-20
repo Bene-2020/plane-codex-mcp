@@ -286,9 +286,11 @@ describe("real project event projection", () => {
       fixture.seedItem({ id: originalItemId, identifier: "42", title: "Existing login work item" });
       for (const item of await plane.listItems(context)) storage.cacheItem(context.id, item, false);
 
-      const hookResult = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: context.cwd, session_id: "e2e-session", turn_id: "completion-turn", prompt: "完成 DEMO-42" }), storage);
-      const additionalContext = (hookResult.hookSpecificOutput as { additionalContext: string }).additionalContext;
+      const sessionStart = await handleHook(JSON.stringify({ hook_event_name: "SessionStart", cwd: context.cwd, session_id: "e2e-session", source: "startup" }), storage);
+      const additionalContext = (sessionStart.hookSpecificOutput as { additionalContext: string }).additionalContext;
       expect(additionalContext).toContain(`42 | ${originalItemId} | Existing login work item | in_progress`);
+      const hookResult = await handleHook(JSON.stringify({ hook_event_name: "UserPromptSubmit", cwd: context.cwd, session_id: "e2e-session", turn_id: "completion-turn", prompt: "完成 DEMO-42" }), storage);
+      expect((hookResult.hookSpecificOutput as { additionalContext: string }).additionalContext).toContain("projectContextId=project_1; sessionId=e2e-session; turnId=completion-turn");
 
       service = createService({ storage, plane, sessionToken: "b".repeat(43) });
       const createdMcp = createMcpServer({ storage, plane });
