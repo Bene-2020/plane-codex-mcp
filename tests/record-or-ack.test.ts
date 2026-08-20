@@ -14,7 +14,7 @@ describe("record-or-ack integration", () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter() });
-    const client = new Client({ name: "ambient-record-or-ack-test", version: "0.1.1" });
+    const client = new Client({ name: "ambient-record-or-ack-test", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
     await server.connect(serverTransport);
@@ -43,7 +43,7 @@ describe("record-or-ack integration", () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter() });
-    const client = new Client({ name: "ambient-record-or-ack-order-test", version: "0.1.1" });
+    const client = new Client({ name: "ambient-record-or-ack-order-test", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
     await server.connect(serverTransport);

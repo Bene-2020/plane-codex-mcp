@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-20
+
+### Changed
+
+- 保留 SessionStart 的完整项目快照，同时将日常 UserPromptSubmit 缩减为轻量的项目、会话和回合标识及单次记录提醒。
+- 仅在当前会话的活动工作项发生新增、更新或移除时注入有上限的增量变化，减少重复上下文消耗。
+
+### Fixed
+
+- 在 compact 后只从最近一次 UserPromptSubmit 审计恢复根回合标识，避免 PostToolUse、Stop 或子代理回合覆盖记录归属。
+- 忽略仅有更新时间变化的活动工作项快照，并在 SessionEnd 清理会话快照。
+
 ## [0.1.1] - 2026-08-18
 
 ### Fixed
@@ -28,6 +40,7 @@
 - 提供五种 Codex Hook 的会话上下文注入与最小审计。
 - 隔离 Plane API Key、Panel 临时会话令牌和本地项目数据。
 
-[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.0

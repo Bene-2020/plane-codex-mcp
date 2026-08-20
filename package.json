@@ -1,6 +1,6 @@
 {
   "name": "ambient-project-layer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Capture meaningful Codex work and synchronize it with Plane.",
   "private": true,
   "license": "MIT",

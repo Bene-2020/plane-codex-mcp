@@ -1,6 +1,6 @@
 {
   "name": "@ambient/mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server and inline app bridge for Ambient Project Layer.",
   "private": true,
   "license": "MIT",

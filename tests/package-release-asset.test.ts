@@ -23,7 +23,7 @@ describe("release asset packaging", () => {
     await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
     await mkdir(join(pluginRoot, "runtime", "bin"), { recursive: true });
     await Promise.all([
-      writeFile(join(pluginRoot, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "ambient-project-layer", version: "0.1.1" })),
+      writeFile(join(pluginRoot, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "ambient-project-layer", version: "0.1.2" })),
       writeFile(join(pluginRoot, "runtime", "runtime.json"), JSON.stringify({ target: "darwin-arm64", platform: "darwin", arch: "arm64" })),
       writeFile(join(pluginRoot, "runtime", "bin", "node"), "test sidecar"),
       writeFile(join(pluginRoot, "LICENSE"), "test license"),
@@ -57,6 +57,6 @@ describe("release asset packaging", () => {
       name: "ambient",
       plugins: [{ name: "ambient-project-layer", source: { source: "local", path: "./plugins/ambient-project-layer" } }],
     });
-    expect(packagedPlugin.version).toBe("0.1.1");
+    expect(packagedPlugin.version).toBe("0.1.2");
   });
 });

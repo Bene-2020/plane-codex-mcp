@@ -7,7 +7,7 @@ Let Codex quietly organize project progress while you work and synchronize tasks
 [Plane](https://plane.so/open-source) is an open-source project management platform licensed under AGPL-3.0. You can self-host its Community Edition for free or use its free cloud plan. The self-hosted Community Edition has no user limit, while the Cloud Free plan currently supports up to 12 users, making Plane a strong fit for individual developers, one-person companies, and small teams. See the [official Plane pricing page](https://plane.so/pricing) for current limits.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.1.1-4f6bed.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.2-4f6bed.svg)](CHANGELOG.md)
 
 Ambient Project Layer is a Codex plugin. It captures project-relevant events from the current work turn, writes them reliably to a local SQLite Outbox, and then synchronizes them asynchronously to Plane. You can continue using Plane for full project management while viewing recent work items and changing their status through a lightweight Panel inside Codex.
 
@@ -58,7 +58,7 @@ The Plane documentation explains [where to create an API Key and how to use it](
 
 ### 2. Install the package for your platform
 
-Download an asset named like `ambient-project-layer-v0.1.1-<target>.zip` and extract it to a stable directory. The instructions below refer to its absolute path as `<RELEASE_DIR>`. This directory should directly contain `.agents/plugins/marketplace.json`.
+Download an asset named like `ambient-project-layer-v0.1.2-<target>.zip` and extract it to a stable directory. The instructions below refer to its absolute path as `<RELEASE_DIR>`. This directory should directly contain `.agents/plugins/marketplace.json`.
 
 ```bash
 codex plugin marketplace add "<RELEASE_DIR>"

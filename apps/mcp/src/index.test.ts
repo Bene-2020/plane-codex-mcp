@@ -13,7 +13,7 @@ describe("ambient MCP tools and App bootstrap", () => {
   it("advertises the project tools and App bootstrap with current behavior annotations", async () => {
     const storage = new Storage(":memory:");
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter() });
-    const client = new Client({ name: "ambient-test-client", version: "0.1.1" });
+    const client = new Client({ name: "ambient-test-client", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
     await server.connect(serverTransport);
@@ -94,7 +94,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter(), panelSession: { serviceBaseUrl: "http://127.0.0.1:4317", sessionToken: "a".repeat(43) } });
-    const client = new Client({ name: "ambient-bootstrap-test-client", version: "0.1.1" });
+    const client = new Client({ name: "ambient-bootstrap-test-client", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
     await server.connect(serverTransport);
@@ -120,7 +120,7 @@ describe("ambient MCP tools and App bootstrap", () => {
   it("keeps the App resource association on an unbound tool error without bootstrap metadata", async () => {
     const storage = new Storage(":memory:");
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter(), panelSession: { serviceBaseUrl: "http://127.0.0.1:4317", sessionToken: "a".repeat(43) } });
-    const client = new Client({ name: "ambient-unbound-panel-client", version: "0.1.1" });
+    const client = new Client({ name: "ambient-unbound-panel-client", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
     await server.connect(serverTransport);
@@ -145,7 +145,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "first" });
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter() });
-    const client = new Client({ name: "ambient-binding-conflict-client", version: "0.1.1" });
+    const client = new Client({ name: "ambient-binding-conflict-client", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     await client.connect(clientTransport);
@@ -172,7 +172,7 @@ describe("ambient MCP tools and App bootstrap", () => {
   it("persists and restores an explicit binding refusal without creating a project context", async () => {
     const storage = new Storage(":memory:");
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter() });
-    const client = new Client({ name: "ambient-binding-preference-client", version: "0.1.1" });
+    const client = new Client({ name: "ambient-binding-preference-client", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     await client.connect(clientTransport);
@@ -201,11 +201,11 @@ describe("ambient MCP tools and App bootstrap", () => {
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     const sessionToken = "a".repeat(43);
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter(), panelSession: { serviceBaseUrl: "http://127.0.0.1:4317", sessionToken } });
-    const client = new Client({ name: "panel-host-protocol-test", version: "0.1.1" });
+    const client = new Client({ name: "panel-host-protocol-test", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const [appTransport, bridgeTransport] = InMemoryTransport.createLinkedPair();
-    const app = new McpApp({ name: "Ambient Project Panel", version: "0.1.1" }, {}, { autoResize: false });
-    const bridge = new AppBridge(client, { name: "Codex Desktop protocol test", version: "0.1.1" }, { serverTools: {} });
+    const app = new McpApp({ name: "Ambient Project Panel", version: "0.1.2" }, {}, { autoResize: false });
+    const bridge = new AppBridge(client, { name: "Codex Desktop protocol test", version: "0.1.2" }, { serverTools: {} });
     let receivedBootstrap: unknown = null;
     app.ontoolresult = (result) => { receivedBootstrap = result._meta?.[PANEL_BOOTSTRAP_META_KEY]; };
 
@@ -237,7 +237,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const runtime = await startMcpRuntime({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter(), transport: serverTransport });
     const context = runtime.service.storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
-      const client = new Client({ name: "ambient-panel-proxy-test", version: "0.1.1" });
+      const client = new Client({ name: "ambient-panel-proxy-test", version: "0.1.2" });
     await client.connect(clientTransport);
     try {
       const tools = await client.listTools();
@@ -263,7 +263,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter() });
-      const client = new Client({ name: "ambient-missing-session-client", version: "0.1.1" });
+      const client = new Client({ name: "ambient-missing-session-client", version: "0.1.2" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
     await server.connect(serverTransport);
@@ -287,7 +287,7 @@ describe("ambient MCP tools and App bootstrap", () => {
     delete process.env.AMBIENT_SERVICE_BASE_URL;
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const runtime = await startMcpRuntime({ storage: new Storage(":memory:"), plane: new FakePlaneAdapter(), transport: serverTransport });
-    const client = new Client({ name: "ambient-runtime-client", version: "0.1.1" });
+    const client = new Client({ name: "ambient-runtime-client", version: "0.1.2" });
     const context = runtime.service.storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     try {
       await client.connect(clientTransport);

@@ -95,7 +95,7 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
   };
   const server = new McpServer({
     name: "ambient-project",
-    version: "0.1.1",
+    version: "0.1.2",
   }, {
     ...bindingInstructions,
   });

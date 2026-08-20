@@ -1,6 +1,6 @@
 {
   "name": "@ambient/service",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local service and Plane synchronization worker for Ambient Project Layer.",
   "private": true,
   "license": "MIT",

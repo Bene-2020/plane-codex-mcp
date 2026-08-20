@@ -1,6 +1,6 @@
 {
   "name": "@ambient/plane",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Plane integration for Ambient Project Layer.",
   "private": true,
   "license": "MIT",

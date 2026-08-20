@@ -13,7 +13,7 @@ describe("plugin runtime paths", () => {
     const packageMetadata = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as Record<string, unknown>;
     const manifest = JSON.parse(await readFile(`${pluginRoot}/.codex-plugin/plugin.json`, "utf8")) as Record<string, unknown>;
     expect(manifest).not.toHaveProperty("hooks");
-    expect(packageMetadata.version).toBe("0.1.1");
+    expect(packageMetadata.version).toBe("0.1.2");
     expect(manifest).toMatchObject({ name: "ambient-project-layer", version: packageMetadata.version, author: { name: "Wenyan Wei" }, interface: { displayName: "Ambient Project Layer", developerName: "Wenyan Wei" } });
 
     const sourceHooks = JSON.parse(await readFile(`${pluginRoot}/hooks/hooks.json`, "utf8")) as { hooks: Record<string, HookGroup[]> };

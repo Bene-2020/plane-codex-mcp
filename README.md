@@ -7,7 +7,7 @@
 [Plane](https://plane.so/open-source) 是一款采用 AGPL-3.0 许可证的开源项目管理平台，既可以免费自行部署 Community Edition，也提供免费的云端方案。其自托管 Community Edition 不限制用户数，云端 Free 方案目前支持最多 12 名用户，因此非常适合个人开发者、一人公司（OPC）和小团队使用；具体额度以 [Plane 官方定价页](https://plane.so/pricing) 为准。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.1.1-4f6bed.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.2-4f6bed.svg)](CHANGELOG.md)
 
 Ambient Project Layer 是一个 Codex 插件。它从当前工作回合中捕获真正有项目价值的事件，先可靠写入本地 SQLite Outbox，再异步同步到 Plane。你可以继续在 Plane 中做完整的项目管理，也可以在 Codex 内通过轻量 Panel 查看最近工作项并修改状态。
 
@@ -58,7 +58,7 @@ Plane 官方文档说明了 [API Key 的创建位置与使用方式](https://dev
 
 ### 2. 安装对应平台的插件包
 
-下载形如 `ambient-project-layer-v0.1.1-<target>.zip` 的资产，解压到不会随意移动的目录。下文用 `<RELEASE_DIR>` 表示解压后的绝对路径；该目录应直接包含 `.agents/plugins/marketplace.json`。
+下载形如 `ambient-project-layer-v0.1.2-<target>.zip` 的资产，解压到不会随意移动的目录。下文用 `<RELEASE_DIR>` 表示解压后的绝对路径；该目录应直接包含 `.agents/plugins/marketplace.json`。
 
 ```bash
 codex plugin marketplace add "<RELEASE_DIR>"
