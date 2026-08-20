@@ -226,26 +226,30 @@ describe("local service and outbox worker", () => {
   });
 
   it("renews a short lease while a remote operation is awaiting and prevents a second claim", async () => {
+    vi.useFakeTimers();
     const directory = mkdtempSync(join(tmpdir(), "ambient-heartbeat-"));
     const filename = join(directory, "outbox.sqlite");
-    const storageA = new Storage(filename, { leaseMs: 20 });
+    const storageA = new Storage(filename, { leaseMs: 300 });
     const context = storageA.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
     storageA.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t", events: [{ type: "task", title: "续租中的远端写入", summary: "续租中的远端写入", userDirected: false, sourceExcerpt: "续租中的远端写入" }] });
-    const storageB = new Storage(filename, { leaseMs: 20 });
+    const storageB = new Storage(filename, { leaseMs: 300 });
     const plane = new FakePlaneAdapter();
-    plane.delayMs = 70;
+    plane.delayMs = 700;
     plane.delayOperation = "createItem";
     const renewBatchLease = storageA.renewBatchLease.bind(storageA);
     const renew = vi.spyOn(storageA, "renewBatchLease").mockImplementation((batchId, claimToken) => renewBatchLease(batchId, claimToken, 1_000));
     const workerA = new OutboxWorker(storageA, new EventCoordinator(storageA, plane));
     const workerB = new OutboxWorker(storageB, new EventCoordinator(storageB, plane));
     const firstRun = workerA.processOnce();
-    await vi.waitFor(() => expect(renew).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(100);
+    expect(renew).toHaveBeenCalled();
     expect(await workerB.processOnce()).toBe(0);
+    await vi.advanceTimersByTimeAsync(600);
     expect(await firstRun).toBe(1);
     expect(plane.calls.filter((call) => call.startsWith("create:")).length).toBe(1);
     expect((await plane.listItems(context))).toHaveLength(1);
     storageA.close(); storageB.close(); rmSync(directory, { recursive: true, force: true });
+    vi.useRealTimers();
   });
 
   it("fails the batch and stops before the next event when heartbeat loses the claim", async () => {

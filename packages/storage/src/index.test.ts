@@ -275,14 +275,14 @@ describe("SQLite storage", () => {
   it("atomically claims a batch and rejects stale lease completion", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ambient-outbox-"));
     const filename = join(directory, "outbox.sqlite");
-    const first = new Storage(filename, { leaseMs: 5 });
+    const first = new Storage(filename, { leaseMs: 1_000 });
     const context = first.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     first.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "t", events: [event] });
     first.addSourceReference({ batchId: "batch_1", eventId: "event_1_0", remoteSourceId: "project_1:s:t:0", planeItemId: null, sessionId: "s", turnId: "t", eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: "now" });
-    const second = new Storage(filename, { leaseMs: 5 });
+    const second = new Storage(filename, { leaseMs: 1_000 });
     const firstClaim = first.claimPendingBatches()[0]!;
     expect(second.claimPendingBatches()).toHaveLength(0);
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    first.db.prepare("UPDATE outbox_batches SET lease_until='1970-01-01T00:00:00.000Z' WHERE id=1").run();
     const secondClaim = second.claimPendingBatches(1, 1_000)[0]!;
     expect(secondClaim.claimToken).not.toBe(firstClaim.claimToken);
     expect(first.renewBatchLease(secondClaim.id, firstClaim.claimToken!)).toBe(false);
