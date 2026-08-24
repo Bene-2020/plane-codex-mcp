@@ -348,6 +348,33 @@ describe("SQLite storage", () => {
     storage.close();
   });
 
+  it("enforces the worker transition matrix and requires completed source references before sync", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const failed = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "matrix-failed", events: [event] });
+    const failedClaim = storage.claimPendingBatches()[0]!;
+    expect(storage.setBatchStatus(failed.batchId, "failed", "original failure", failedClaim.claimToken)).toBe(true);
+    expect(storage.setBatchStatus(failed.batchId, "synced")).toBe(false);
+    expect(storage.setBatchStatus(failed.batchId, "corrected")).toBe(false);
+    expect(storage.setBatchStatus(failed.batchId, "failed", "replacement failure")).toBe(false);
+    expect(storage.db.prepare("SELECT status,last_error FROM outbox_batches WHERE id=1").get()).toEqual({ status: "failed", last_error: "original failure" });
+
+    const incomplete = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "matrix-incomplete", events: [event] });
+    expect(storage.setBatchStatus(incomplete.batchId, "synced")).toBe(false);
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=2").get()).toEqual({ status: "pending" });
+    expect(storage.setBatchStatus(incomplete.batchId, "failed", "incomplete")).toBe(true);
+
+    const complete = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "matrix-complete", events: [event] });
+    storage.addSourceReference({ batchId: complete.batchId, eventId: "event_3_0", remoteSourceId: "project_1:s:matrix-complete:0", sessionId: "s", turnId: "matrix-complete", eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: "now" });
+    const completeClaim = storage.claimPendingBatches()[0]!;
+    expect(completeClaim.id).toBe(complete.batchId);
+    storage.markEventAttempt("event_3_0", completeClaim.claimToken);
+    storage.markEventCompleted("event_3_0", "plane-item", completeClaim.claimToken);
+    expect(storage.setBatchStatus(complete.batchId, "synced", undefined, completeClaim.claimToken)).toBe(true);
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=3").get()).toEqual({ status: "synced" });
+    storage.close();
+  });
+
   it("migrates an old outbox schema without losing batch or source data", () => {
     const directory = mkdtempSync(join(tmpdir(), "ambient-migration-"));
     const filename = join(directory, "outbox.sqlite");

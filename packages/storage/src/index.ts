@@ -584,16 +584,23 @@ export class Storage {
   setBatchStatus(batchIdValue: string, status: SyncStatus, error?: string, claimToken?: string): boolean {
     const id = this.parseBatchRowId(batchIdValue);
     const timestamp = this.timestamp();
-    const completed = status === "synced" || status === "corrected";
-    const row = this.db.prepare("SELECT status, attempts FROM outbox_batches WHERE id=?").get(id) as { status: SyncStatus; attempts: number } | undefined;
+    const row = this.db.prepare("SELECT status, attempts, events_json FROM outbox_batches WHERE id=?").get(id) as { status: SyncStatus; attempts: number; events_json: string } | undefined;
     if (!row) return false;
+    if (row.status !== "pending" && row.status !== "retrying") return false;
+    if (status !== "synced" && status !== "failed" && status !== "retrying") return false;
     if (status === "retrying") return this.markBatchRetrying(batchIdValue, error ?? "retry requested", claimToken);
+    if (status === "synced") {
+      let eventCount = 0;
+      try { eventCount = (JSON.parse(row.events_json) as unknown[]).length; } catch { return false; }
+      if (!this.areBatchEventsComplete(batchIdValue, eventCount)) return false;
+    }
+    const completed = status === "synced";
     const ownership = claimToken
       ? "claim_token=? AND lease_until > ?"
       : "(claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)";
     const result = this.db.prepare(`UPDATE outbox_batches
       SET status=?, attempts=COALESCE(attempts,0)+${claimToken ? 0 : 1}, last_error=COALESCE(?, last_error), synced_at=?, next_attempt_at=?, claim_token=NULL, lease_until=NULL
-      WHERE id=? AND status NOT IN ('synced','corrected') AND ${ownership}`)
+      WHERE id=? AND status IN ('pending','retrying') AND ${ownership}`)
       .run(...(claimToken ? [status, error ?? null, completed ? timestamp : null, completed ? null : timestamp, id, claimToken, timestamp] : [status, error ?? null, completed ? timestamp : null, completed ? null : timestamp, id, timestamp]));
     if (result.changes !== 1) return false;
     this.recordBatchHistory(batchIdValue, row.status, status, row.attempts ?? 0, error ?? null, null, "worker");
