@@ -42,25 +42,25 @@ export class OutboxWorker {
     while (processed < drainBudget) {
       const batch = this.storage.claimPendingBatches(1)[0];
       if (!batch) return processed;
-    const claimToken = batch.claimToken!;
-    let claimLost = false;
-    const heartbeat = setInterval(() => {
-      if (claimLost) return;
+      const claimToken = batch.claimToken!;
+      let claimLost = false;
+      const heartbeat = setInterval(() => {
+        if (claimLost) return;
+        try {
+          if (!this.storage.renewBatchLease(batch.id, claimToken)) claimLost = true;
+        } catch {
+          claimLost = true;
+        }
+      }, Math.max(1, Math.floor(this.storage.getLeaseMs() / 3)));
+      const assertClaim = (): void => { if (claimLost) throw new Error("Outbox batch claim lost"); };
+      let succeeded = false;
       try {
-        if (!this.storage.renewBatchLease(batch.id, claimToken)) claimLost = true;
-      } catch {
-        claimLost = true;
-      }
-    }, Math.max(1, Math.floor(this.storage.getLeaseMs() / 3)));
-    const assertClaim = (): void => { if (claimLost) throw new Error("Outbox batch claim lost"); };
-    let succeeded = false;
-    try {
-      await this.coordinator.syncBatch(batch, claimToken, assertClaim);
-      succeeded = true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (classifyOutboxError(error) === "retryable") this.storage.markBatchRetrying(batch.id, message, claimToken);
-      else this.storage.setBatchStatus(batch.id, "failed", message, claimToken);
+        await this.coordinator.syncBatch(batch, claimToken, assertClaim);
+        succeeded = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (classifyOutboxError(error) === "retryable") this.storage.markBatchRetrying(batch.id, message, claimToken);
+        else this.storage.setBatchStatus(batch.id, "failed", message, claimToken);
       } finally {
         clearInterval(heartbeat);
       }

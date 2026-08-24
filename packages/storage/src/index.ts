@@ -33,6 +33,7 @@ export interface BatchHistoryRecord {
   error: string | null;
   error_kind: string | null;
   actor: string;
+  synced_at: string | null;
   created_at: string;
 }
 export interface SourceReferenceHistoryRecord {
@@ -41,6 +42,8 @@ export interface SourceReferenceHistoryRecord {
   status: ProjectionStatus;
   attempt: number;
   error: string | null;
+  error_kind: string | null;
+  synced_at: string | null;
   created_at: string;
 }
 interface CacheRow { plane_item_id: string; identifier: string; title: string; description: string | null; parent_item_id: string | null; kind: string | null; status: string | null; due_date: string | null; project_context_id: string; url: string | null; is_system_created: number; updated_at: string; archived: number; }
@@ -246,6 +249,7 @@ export class Storage {
         error TEXT,
         error_kind TEXT,
         actor TEXT NOT NULL DEFAULT 'worker',
+        synced_at TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS source_reference_history (
@@ -254,6 +258,8 @@ export class Storage {
         status TEXT NOT NULL,
         attempt INTEGER NOT NULL,
         error TEXT,
+        error_kind TEXT,
+        synced_at TEXT,
         created_at TEXT NOT NULL
       );
       `);
@@ -276,6 +282,9 @@ export class Storage {
       this.ensureColumn("turn_audits", "binding_source_invalid", "INTEGER NOT NULL DEFAULT 0");
       this.ensureColumn("turn_audits", "capture_decision_recorded", "INTEGER");
       this.ensureColumn("turn_audits", "binding_prompt_delivered", "INTEGER");
+      this.ensureColumn("outbox_batch_history", "synced_at", "TEXT");
+      this.ensureColumn("source_reference_history", "error_kind", "TEXT");
+      this.ensureColumn("source_reference_history", "synced_at", "TEXT");
       this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_context_workspace_identity ON project_contexts(workspace_identity);
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
@@ -290,12 +299,13 @@ export class Storage {
       CREATE INDEX IF NOT EXISTS idx_turn_audits_session_turn ON turn_audits(session_id, id DESC);
       `);
       this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version) VALUES (2)").run();
+      this.migrateLegacyHistorySnapshots();
       this.migrateWorkspaceIdentities();
     });
     migration.immediate();
   }
 
-  private ensureColumn(table: "project_contexts" | "outbox_batches" | "source_references" | "plane_item_cache" | "turn_audits", column: string, definition: string): void {
+  private ensureColumn(table: "project_contexts" | "outbox_batches" | "source_references" | "plane_item_cache" | "turn_audits" | "outbox_batch_history" | "source_reference_history", column: string, definition: string): void {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
@@ -306,8 +316,19 @@ export class Storage {
     return Math.round(exponential * (0.5 + Math.min(1, Math.max(0, this.random()))));
   }
   private recordBatchHistory(batchIdValue: string, from: SyncStatus, to: SyncStatus, attempts: number, error: string | null, errorKind: string | null, actor = "worker"): void {
-    this.db.prepare("INSERT INTO outbox_batch_history (batch_id,from_status,to_status,attempts,error,error_kind,actor,created_at) VALUES (?,?,?,?,?,?,?,?)")
-      .run(batchIdValue, from, to, attempts, error ?? null, errorKind ?? null, actor, this.timestamp());
+    this.db.prepare("INSERT INTO outbox_batch_history (batch_id,from_status,to_status,attempts,error,error_kind,actor,synced_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(batchIdValue, from, to, attempts, error ?? null, errorKind ?? null, actor, null, this.timestamp());
+  }
+
+  private migrateLegacyHistorySnapshots(): void {
+    if (this.db.prepare("SELECT 1 FROM schema_migrations WHERE version=3").get()) return;
+    const batches = this.db.prepare("SELECT 'batch_' || id AS batch_id,status,attempts,last_error,synced_at,accepted_at FROM outbox_batches WHERE status IN ('synced','corrected','failed') ORDER BY id").all() as Array<{ batch_id: string; status: SyncStatus; attempts: number; last_error: string | null; synced_at: string | null; accepted_at: string }>;
+    const insertBatch = this.db.prepare("INSERT INTO outbox_batch_history (batch_id,from_status,to_status,attempts,error,error_kind,actor,synced_at,created_at) SELECT ?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM outbox_batch_history WHERE batch_id=? AND actor='migration' AND error_kind='legacy_snapshot')");
+    for (const batch of batches) insertBatch.run(batch.batch_id, batch.status, batch.status, batch.attempts ?? 0, batch.last_error, "legacy_snapshot", "migration", batch.synced_at, batch.accepted_at, batch.batch_id);
+    const sources = this.db.prepare("SELECT event_id,projection_status,projection_attempts,projection_error,projected_at,created_at FROM source_references ORDER BY id").all() as Array<{ event_id: string; projection_status: ProjectionStatus; projection_attempts: number; projection_error: string | null; projected_at: string | null; created_at: string }>;
+    const insertSource = this.db.prepare("INSERT INTO source_reference_history (event_id,status,attempt,error,error_kind,synced_at,created_at) SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM source_reference_history WHERE event_id=? AND created_at=? AND error_kind='legacy_snapshot')");
+    for (const source of sources) insertSource.run(source.event_id, source.projection_status ?? "pending", source.projection_attempts ?? 0, source.projection_error, "legacy_snapshot", source.projected_at, source.created_at, source.event_id, source.created_at);
+    this.db.prepare("INSERT INTO schema_migrations (version) VALUES (3)").run();
   }
 
   private migrateWorkspaceIdentities(): void {
@@ -509,7 +530,7 @@ export class Storage {
   }
 
   listPendingBatches(limit = 20): BatchRecord[] {
-    const timestamp = now();
+    const timestamp = this.timestamp();
     const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error, next_attempt_at, synced_at, claim_version, claim_token, lease_until
       FROM outbox_batches
       WHERE status IN ('pending','retrying')
@@ -522,7 +543,7 @@ export class Storage {
   getLeaseMs(): number { return this.leaseMs; }
 
   claimPendingBatches(limit = 1, leaseMs = this.leaseMs): BatchRecord[] {
-    const timestamp = now();
+    const timestamp = this.timestamp();
     const transaction = this.db.transaction(() => {
       const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error, next_attempt_at, synced_at, claim_version, claim_token, lease_until
         FROM outbox_batches
@@ -551,8 +572,8 @@ export class Storage {
 
   renewBatchLease(batchIdValue: string, claimToken: string, leaseMs = this.leaseMs): boolean {
     const id = this.parseBatchRowId(batchIdValue);
-    const timestamp = now();
-    const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
+    const timestamp = this.timestamp();
+    const leaseUntil = new Date(this.clock().getTime() + leaseMs).toISOString();
     const result = this.db.prepare(`UPDATE outbox_batches
       SET lease_until=?
       WHERE id=? AND claim_token=? AND lease_until > ? AND status NOT IN ('synced','corrected')`)
@@ -882,7 +903,7 @@ export class Storage {
     const source = this.db.prepare("SELECT batch_id FROM source_references WHERE event_id=?").get(eventIdValue) as { batch_id: string } | undefined;
     if (!source) throw new Error(`Source reference not found for ${eventIdValue}`);
     const batchRowId = this.parseBatchRowId(source.batch_id);
-    const timestamp = now();
+    const timestamp = this.timestamp();
     const ownership = claimToken
       ? "claim_token=? AND lease_until > ?"
       : "(claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)";

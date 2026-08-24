@@ -1,6 +1,6 @@
 {
   "name": "@ambient/core",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Shared project event types and capture rules for Ambient Project Layer.",
   "private": true,
   "license": "MIT",
