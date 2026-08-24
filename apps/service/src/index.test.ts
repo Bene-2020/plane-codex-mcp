@@ -289,13 +289,23 @@ describe("local service and outbox worker", () => {
     expect(storage.listBatchHistory(queued.batchId).at(-1)).toMatchObject({ to_status: "corrected", error: "运维确认无法恢复", error_kind: "corrected", actor: "operator" });
     expect(storage.getSourceReference("event_1_0")?.projectionError).toContain("UNRESOLVED_RELATED_ITEM");
 
-    const deadLettered = storage.enqueueBatch({ projectContextId: first.id, sessionId: "s", turnId: "dead-letter", events: [{ type: "task", title: "死信", summary: "死信", userDirected: false, sourceExcerpt: "死信" }] });
+    const deadLettered = storage.enqueueBatch({ projectContextId: first.id, sessionId: "s", turnId: "dead-letter", events: [{ type: "completed", title: "死信", summary: "死信", relatedItemId: "DEMO-404", userDirected: false, sourceExcerpt: "死信" }] });
+    await service.worker.processOnce();
+    const originalBatchError = (storage.db.prepare("SELECT last_error FROM outbox_batches WHERE id=2").get() as { last_error: string }).last_error;
+    const originalSourceError = storage.getSourceReference("event_2_0")?.projectionError;
+    const activeBatch = storage.enqueueBatch({ projectContextId: first.id, sessionId: "s", turnId: "dead-letter-active", events: [{ type: "task", title: "活动批次", summary: "活动批次", userDirected: false, sourceExcerpt: "活动批次" }] });
     const active = storage.claimPendingBatches()[0]!;
-    const activeResponse = await service.app.inject({ method: "POST", url: `/api/projects/${first.id}/dead-letter/${deadLettered.batchId}`, headers: sessionHeaders(service), payload: { reason: "不应抢占" } });
+    const activeResponse = await service.app.inject({ method: "POST", url: `/api/projects/${first.id}/dead-letter/${activeBatch.batchId}`, headers: sessionHeaders(service), payload: { reason: "不应抢占" } });
     expect(activeResponse.statusCode).toBe(400);
     expect(activeResponse.json().error).toContain("currently claimed");
-    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=2").get()).toEqual({ status: "pending" });
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=3").get()).toEqual({ status: "pending" });
     storage.setBatchStatus(active.id, "failed", "terminal", active.claimToken);
+    const deadLetterResponse = await service.app.inject({ method: "POST", url: `/api/projects/${first.id}/dead-letter/${deadLettered.batchId}`, headers: sessionHeaders(service), payload: { reason: "确认进入死信" } });
+    expect(deadLetterResponse.statusCode).toBe(200);
+    expect(storage.db.prepare("SELECT status,last_error FROM outbox_batches WHERE id=2").get()).toEqual({ status: "failed", last_error: originalBatchError });
+    expect(storage.getSourceReference("event_2_0")?.projectionError).toBe(originalSourceError);
+    expect(storage.listBatchHistory(deadLettered.batchId).at(-1)).toMatchObject({ to_status: "failed", error: "确认进入死信", error_kind: "dead_letter", actor: "operator" });
+    expect(storage.claimPendingBatches().map((batch) => batch.id)).not.toContain(deadLettered.batchId);
     await service.app.close();
   });
 

@@ -605,13 +605,14 @@ export class Storage {
     const timestamp = this.timestamp();
     const row = this.db.prepare("SELECT status, attempts FROM outbox_batches WHERE id=?").get(id) as { status: SyncStatus; attempts: number } | undefined;
     if (!row) return false;
+    if (row.status !== "pending" && row.status !== "retrying") return false;
     const ownership = claimToken ? "claim_token=? AND lease_until > ?" : "(claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)";
     const terminal = (row.attempts ?? 0) >= this.maxAttempts;
     const status: SyncStatus = terminal ? "failed" : "retrying";
     const next = terminal ? null : new Date(this.clock().getTime() + this.retryDelayMs(row.attempts ?? 1)).toISOString();
     const result = this.db.prepare(`UPDATE outbox_batches
       SET status=?, last_error=?, synced_at=NULL, next_attempt_at=?, claim_token=NULL, lease_until=NULL
-      WHERE id=? AND status NOT IN ('synced','corrected') AND ${ownership}`)
+      WHERE id=? AND status IN ('pending','retrying') AND ${ownership}`)
       .run(...(claimToken ? [status, error, next, id, claimToken, timestamp] : [status, error, next, id, timestamp]));
     if (result.changes !== 1) return false;
     this.recordBatchHistory(batchIdValue, row.status, status, row.attempts ?? 0, error, terminal ? "max_attempts" : "retryable", "worker");

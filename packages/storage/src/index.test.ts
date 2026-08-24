@@ -339,6 +339,9 @@ describe("SQLite storage", () => {
     const claim = storage.claimPendingBatches()[0]!;
     storage.setBatchStatus(queued.batchId, "failed", "permanent error", claim.claimToken);
     expect(storage.claimPendingBatches()).toHaveLength(0);
+    expect(storage.markBatchRetrying(queued.batchId, "must not revive failed")).toBe(false);
+    expect(storage.setBatchStatus(queued.batchId, "retrying", "must not revive failed")).toBe(false);
+    expect((storage.db.prepare("SELECT status,last_error FROM outbox_batches WHERE id=1").get() as { status: string; last_error: string }).status).toBe("failed");
     storage.retryBatch(queued.batchId, context.id);
     expect(storage.claimPendingBatches()[0]).toMatchObject({ id: queued.batchId, status: "retrying", lastError: "permanent error" });
     expect(storage.listBatchHistory(queued.batchId).map((row) => row.to_status)).toEqual(["pending", "failed", "retrying"]);
