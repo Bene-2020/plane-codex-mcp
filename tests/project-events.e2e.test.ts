@@ -315,14 +315,16 @@ describe("real project event projection", () => {
       fixture.failNextUpdateAfterWrite();
       expect(await service.worker.processOnce()).toBe(1);
       expect(fixture.getItem(originalItemId)?.state).toBe("state-done");
-      expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get()).toEqual({ status: "failed" });
+      expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get()).toEqual({ status: "retrying" });
       expect(storage.getSourceReference("event_1_0")).toMatchObject({ projectionStatus: "failed", projectionAttempts: 1, planeItemId: originalItemId });
       expect(storage.getSourceReference("event_1_1")).toMatchObject({ projectionStatus: "pending", projectionAttempts: 0, planeItemId: null });
       expect(fixture.getComments(originalItemId)).toHaveLength(0);
       expect(fixture.mutationCalls()).toHaveLength(1);
 
+      storage.db.prepare("UPDATE outbox_batches SET next_attempt_at='1970-01-01T00:00:00.000Z' WHERE id=1").run();
       const retry = await service.app.inject({ method: "POST", url: `/api/projects/${context.id}/retry/${accepted.batchId}`, headers: { "X-Ambient-Session-Token": service.sessionToken } });
-      expect(retry.statusCode).toBe(200);
+      expect(retry.statusCode).toBe(400);
+      expect(retry.json().error).toContain("Only failed batches can be retried");
       expect(await service.worker.processOnce()).toBe(1);
       expect(await service.worker.processOnce()).toBe(0);
 

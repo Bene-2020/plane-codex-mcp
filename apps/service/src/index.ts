@@ -1,12 +1,26 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { ProjectContext, RecordKind, LifecycleState, PlaneItem } from "@ambient/core";
-import { createPlaneAdapter, EventCoordinator, PlaneAdapter, UpdateItemInput } from "@ambient/plane";
+import { createPlaneAdapter, EventCoordinator, PlaneAdapter, UnresolvedRelatedItemError, UpdateItemInput } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { createSessionToken, matchesSessionToken, SESSION_TOKEN_HEADER } from "./session.js";
 
 export const CODEX_DESKTOP_CORS_ORIGIN = /^codex-sandbox:\/\/(?:[A-Za-z0-9-]+\.)?web-sandbox\.oaiusercontent\.com$/;
 export const DEFAULT_CORS_ORIGINS = ["https://web-sandbox.oaiusercontent.com", "http://127.0.0.1:4318", "http://localhost:4318", "null", CODEX_DESKTOP_CORS_ORIGIN] as const;
+
+export type OutboxErrorDisposition = "retryable" | "terminal";
+export function classifyOutboxError(error: unknown): OutboxErrorDisposition {
+  if (error instanceof UnresolvedRelatedItemError || (error instanceof Error && error.name === "UnresolvedRelatedItemError")) return "terminal";
+  const value = error as { code?: unknown; status?: unknown; statusCode?: unknown; response?: { status?: unknown } };
+  const status = Number(value.response?.status ?? value.status ?? value.statusCode);
+  if (status === 408 || status === 425 || status === 429 || status >= 500 && status <= 599) return "retryable";
+  if (status === 400 || status === 401 || status === 403 || status === 404 || status === 422) return "terminal";
+  const code = typeof value.code === "string" ? value.code.toUpperCase() : "";
+  if (["ETIMEDOUT", "ECONNRESET", "EPIPE", "EAI_AGAIN", "ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT"].includes(code)) return "retryable";
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  if (/\b(timeout|timed out|temporarily unavailable|network|socket hang up|connection reset)\b/.test(message)) return "retryable";
+  return "terminal";
+}
 
 export class OutboxWorker {
   private timer: NodeJS.Timeout | undefined;
@@ -23,8 +37,11 @@ export class OutboxWorker {
     return shared;
   }
   private async runOnce(): Promise<number> {
-    const batch = this.storage.claimPendingBatches(1)[0];
-    if (!batch) return 0;
+    let processed = 0;
+    const drainBudget = 10;
+    while (processed < drainBudget) {
+      const batch = this.storage.claimPendingBatches(1)[0];
+      if (!batch) return processed;
     const claimToken = batch.claimToken!;
     let claimLost = false;
     const heartbeat = setInterval(() => {
@@ -36,14 +53,23 @@ export class OutboxWorker {
       }
     }, Math.max(1, Math.floor(this.storage.getLeaseMs() / 3)));
     const assertClaim = (): void => { if (claimLost) throw new Error("Outbox batch claim lost"); };
+    let succeeded = false;
     try {
       await this.coordinator.syncBatch(batch, claimToken, assertClaim);
+      succeeded = true;
     } catch (error) {
-      this.storage.setBatchStatus(batch.id, "failed", error instanceof Error ? error.message : String(error), claimToken);
-    } finally {
-      clearInterval(heartbeat);
+      const message = error instanceof Error ? error.message : String(error);
+      if (classifyOutboxError(error) === "retryable") this.storage.markBatchRetrying(batch.id, message, claimToken);
+      else this.storage.setBatchStatus(batch.id, "failed", message, claimToken);
+      } finally {
+        clearInterval(heartbeat);
+      }
+      processed += 1;
+      // A successful batch completes this scheduling cycle; failures drain onward
+      // so a terminal poison batch cannot monopolize the queue.
+      if (succeeded) return processed;
     }
-    return 1;
+    return processed;
   }
   start(): void {
     if (this.timer) return;
@@ -125,6 +151,8 @@ export function createService(args: ServiceOptions = {}) {
   });
   app.get<{ Params: { id: string } }>("/api/projects/:id/failures", async (request, reply) => { try { return storage.listFailedBatches(getContext(request.params.id).id); } catch (error) { return reply.code(404).send(jsonError(error)); } });
   app.post<{ Params: { id: string; batchId: string } }>("/api/projects/:id/retry/:batchId", async (request, reply) => { try { getContext(request.params.id); storage.retryBatch(request.params.batchId, request.params.id); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
+  app.post<{ Params: { id: string; batchId: string }; Body: { reason?: string } }>("/api/projects/:id/correct/:batchId", async (request, reply) => { try { getContext(request.params.id); storage.correctBatch(request.params.batchId, request.body?.reason ?? "Corrected by operator", request.params.id); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
+  app.post<{ Params: { id: string; batchId: string }; Body: { reason?: string } }>("/api/projects/:id/dead-letter/:batchId", async (request, reply) => { try { getContext(request.params.id); storage.deadLetterBatch(request.params.batchId, request.body?.reason ?? "Moved to dead letter by operator", request.params.id); return { ok: true }; } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.patch<{ Params: { id: string }; Body: { enabled: boolean } }>("/api/projects/:id/auto-capture", async (request, reply) => { try { return storage.setAutoCapture(request.params.id, request.body.enabled); } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.patch<{ Params: { itemId: string }; Body: UpdateItemInput }>("/api/items/:itemId", async (request, reply) => { try { return await coordinator.editItem(contextForItem(request.params.itemId), request.params.itemId, request.body); } catch (error) { return reply.code(400).send(jsonError(error)); } });
   app.patch<{ Params: { itemId: string }; Body: { status?: unknown } }>("/api/items/:itemId/status", async (request, reply) => {

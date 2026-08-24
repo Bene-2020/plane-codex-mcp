@@ -298,6 +298,48 @@ describe("SQLite storage", () => {
     first.close(); second.close(); rmSync(directory, { recursive: true, force: true });
   });
 
+  it("does not let a terminal failed batch starve a newer pending batch", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const poisoned = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "poisoned", events: [event] });
+    const healthy = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "healthy", events: [event] });
+    const claim = storage.claimPendingBatches()[0]!;
+    expect(claim.id).toBe(poisoned.batchId);
+    expect(storage.setBatchStatus(claim.id, "failed", "UNRESOLVED_RELATED_ITEM", claim.claimToken)).toBe(true);
+    expect(storage.claimPendingBatches().map((batch) => batch.id)).toEqual([healthy.batchId]);
+    storage.close();
+  });
+
+  it("uses deterministic exponential backoff and stops at the retry limit", () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { maxAttempts: 2, retryBaseMs: 1_000, retryMaxMs: 10_000, clock: () => current, random: () => 0 });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "retry", events: [event] });
+    const first = storage.claimPendingBatches()[0]!;
+    expect(storage.markBatchRetrying(queued.batchId, "timeout", first.claimToken)).toBe(true);
+    expect(storage.db.prepare("SELECT status, next_attempt_at FROM outbox_batches WHERE id=1").get()).toEqual({ status: "retrying", next_attempt_at: "2026-01-01T00:00:00.500Z" });
+    current = new Date("2026-01-01T00:00:01.000Z");
+    const second = storage.claimPendingBatches()[0]!;
+    expect(storage.markBatchRetrying(queued.batchId, "timeout again", second.claimToken)).toBe(true);
+    expect(storage.db.prepare("SELECT status, next_attempt_at FROM outbox_batches WHERE id=1").get()).toEqual({ status: "failed", next_attempt_at: null });
+    expect(storage.claimPendingBatches()).toHaveLength(0);
+    expect(storage.listBatchHistory(queued.batchId).map((row) => row.error)).toEqual([null, "timeout", "timeout again"]);
+    storage.close();
+  });
+
+  it("manual retry is the only transition from failed and preserves audit history", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "manual-retry", events: [event] });
+    const claim = storage.claimPendingBatches()[0]!;
+    storage.setBatchStatus(queued.batchId, "failed", "permanent error", claim.claimToken);
+    expect(storage.claimPendingBatches()).toHaveLength(0);
+    storage.retryBatch(queued.batchId, context.id);
+    expect(storage.claimPendingBatches()[0]).toMatchObject({ id: queued.batchId, status: "retrying", lastError: "permanent error" });
+    expect(storage.listBatchHistory(queued.batchId).map((row) => row.to_status)).toEqual(["pending", "failed", "retrying"]);
+    storage.close();
+  });
+
   it("migrates an old outbox schema without losing batch or source data", () => {
     const directory = mkdtempSync(join(tmpdir(), "ambient-migration-"));
     const filename = join(directory, "outbox.sqlite");

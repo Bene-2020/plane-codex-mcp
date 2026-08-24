@@ -24,6 +24,25 @@ interface BatchRow {
   claim_token: string | null;
   lease_until: string | null;
 }
+export interface BatchHistoryRecord {
+  id: number;
+  batch_id: string;
+  from_status: SyncStatus;
+  to_status: SyncStatus;
+  attempts: number;
+  error: string | null;
+  error_kind: string | null;
+  actor: string;
+  created_at: string;
+}
+export interface SourceReferenceHistoryRecord {
+  id: number;
+  event_id: string;
+  status: ProjectionStatus;
+  attempt: number;
+  error: string | null;
+  created_at: string;
+}
 interface CacheRow { plane_item_id: string; identifier: string; title: string; description: string | null; parent_item_id: string | null; kind: string | null; status: string | null; due_date: string | null; project_context_id: string; url: string | null; is_system_created: number; updated_at: string; archived: number; }
 interface SourceRow {
   id: number;
@@ -63,7 +82,14 @@ export interface BindingPreference {
   updatedAt: string;
 }
 
-export interface StorageOptions { leaseMs?: number; }
+export interface StorageOptions {
+  leaseMs?: number;
+  maxAttempts?: number;
+  retryBaseMs?: number;
+  retryMaxMs?: number;
+  clock?: () => Date;
+  random?: () => number;
+}
 
 function now(): string { return new Date().toISOString(); }
 
@@ -78,9 +104,19 @@ export class ProjectBindingConflictError extends Error {
 export class Storage {
   readonly db: SqliteDatabase;
   private readonly leaseMs: number;
+  private readonly maxAttempts: number;
+  private readonly retryBaseMs: number;
+  private readonly retryMaxMs: number;
+  private readonly clock: () => Date;
+  private readonly random: () => number;
 
   constructor(filename = process.env.AMBIENT_DB_PATH ?? "./ambient-project.sqlite", options: StorageOptions = {}) {
     this.leaseMs = options.leaseMs ?? 30_000;
+    this.maxAttempts = Math.max(1, options.maxAttempts ?? 5);
+    this.retryBaseMs = Math.max(1, options.retryBaseMs ?? 5_000);
+    this.retryMaxMs = Math.max(this.retryBaseMs, options.retryMaxMs ?? 5 * 60_000);
+    this.clock = options.clock ?? (() => new Date());
+    this.random = options.random ?? Math.random;
     this.db = new SqliteDatabase(filename);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
@@ -89,7 +125,8 @@ export class Storage {
   }
 
   private migrate(): void {
-    this.db.exec(`
+    const migration = this.db.transaction(() => {
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS project_contexts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -200,27 +237,46 @@ export class Storage {
         updated_at TEXT NOT NULL,
         PRIMARY KEY(project_context_id, session_id)
       );
-    `);
+      CREATE TABLE IF NOT EXISTS outbox_batch_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id TEXT NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        error_kind TEXT,
+        actor TEXT NOT NULL DEFAULT 'worker',
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS source_reference_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL
+      );
+      `);
 
-    this.ensureColumn("project_contexts", "workspace_identity", "TEXT");
-    this.ensureColumn("outbox_batches", "next_attempt_at", "TEXT");
-    this.ensureColumn("outbox_batches", "synced_at", "TEXT");
-    this.ensureColumn("outbox_batches", "claim_version", "INTEGER NOT NULL DEFAULT 0");
-    this.ensureColumn("outbox_batches", "claim_token", "TEXT");
-    this.ensureColumn("outbox_batches", "lease_until", "TEXT");
-    this.ensureColumn("source_references", "projection_status", "TEXT NOT NULL DEFAULT 'pending'");
-    this.ensureColumn("source_references", "projection_attempts", "INTEGER NOT NULL DEFAULT 0");
-    this.ensureColumn("source_references", "projection_error", "TEXT");
-    this.ensureColumn("source_references", "projected_at", "TEXT");
-    this.ensureColumn("source_references", "remote_source_id", "TEXT");
-    this.ensureColumn("plane_item_cache", "parent_item_id", "TEXT");
-    this.ensureColumn("turn_audits", "binding_list_tool_called", "INTEGER NOT NULL DEFAULT 0");
-    this.ensureColumn("turn_audits", "binding_candidates_json", "TEXT");
-    this.ensureColumn("turn_audits", "binding_candidates_valid", "INTEGER NOT NULL DEFAULT 0");
-    this.ensureColumn("turn_audits", "binding_source_invalid", "INTEGER NOT NULL DEFAULT 0");
-    this.ensureColumn("turn_audits", "capture_decision_recorded", "INTEGER");
-    this.ensureColumn("turn_audits", "binding_prompt_delivered", "INTEGER");
-    this.db.exec(`
+      this.ensureColumn("project_contexts", "workspace_identity", "TEXT");
+      this.ensureColumn("outbox_batches", "next_attempt_at", "TEXT");
+      this.ensureColumn("outbox_batches", "synced_at", "TEXT");
+      this.ensureColumn("outbox_batches", "claim_version", "INTEGER NOT NULL DEFAULT 0");
+      this.ensureColumn("outbox_batches", "claim_token", "TEXT");
+      this.ensureColumn("outbox_batches", "lease_until", "TEXT");
+      this.ensureColumn("source_references", "projection_status", "TEXT NOT NULL DEFAULT 'pending'");
+      this.ensureColumn("source_references", "projection_attempts", "INTEGER NOT NULL DEFAULT 0");
+      this.ensureColumn("source_references", "projection_error", "TEXT");
+      this.ensureColumn("source_references", "projected_at", "TEXT");
+      this.ensureColumn("source_references", "remote_source_id", "TEXT");
+      this.ensureColumn("plane_item_cache", "parent_item_id", "TEXT");
+      this.ensureColumn("turn_audits", "binding_list_tool_called", "INTEGER NOT NULL DEFAULT 0");
+      this.ensureColumn("turn_audits", "binding_candidates_json", "TEXT");
+      this.ensureColumn("turn_audits", "binding_candidates_valid", "INTEGER NOT NULL DEFAULT 0");
+      this.ensureColumn("turn_audits", "binding_source_invalid", "INTEGER NOT NULL DEFAULT 0");
+      this.ensureColumn("turn_audits", "capture_decision_recorded", "INTEGER");
+      this.ensureColumn("turn_audits", "binding_prompt_delivered", "INTEGER");
+      this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_context_workspace_identity ON project_contexts(workspace_identity);
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS idx_outbox_claim ON outbox_batches(status, next_attempt_at, lease_until);
@@ -232,13 +288,26 @@ export class Storage {
       CREATE INDEX IF NOT EXISTS idx_source_projection ON source_references(projection_status, batch_id);
       CREATE INDEX IF NOT EXISTS idx_cache_context ON plane_item_cache(project_context_id, archived, updated_at);
       CREATE INDEX IF NOT EXISTS idx_turn_audits_session_turn ON turn_audits(session_id, id DESC);
-    `);
-    this.migrateWorkspaceIdentities();
+      `);
+      this.db.prepare("INSERT OR IGNORE INTO schema_migrations (version) VALUES (2)").run();
+      this.migrateWorkspaceIdentities();
+    });
+    migration.immediate();
   }
 
   private ensureColumn(table: "project_contexts" | "outbox_batches" | "source_references" | "plane_item_cache" | "turn_audits", column: string, definition: string): void {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  private timestamp(): string { return this.clock().toISOString(); }
+  private retryDelayMs(attempt: number): number {
+    const exponential = Math.min(this.retryMaxMs, this.retryBaseMs * (2 ** Math.max(0, attempt - 1)));
+    return Math.round(exponential * (0.5 + Math.min(1, Math.max(0, this.random()))));
+  }
+  private recordBatchHistory(batchIdValue: string, from: SyncStatus, to: SyncStatus, attempts: number, error: string | null, errorKind: string | null, actor = "worker"): void {
+    this.db.prepare("INSERT INTO outbox_batch_history (batch_id,from_status,to_status,attempts,error,error_kind,actor,created_at) VALUES (?,?,?,?,?,?,?,?)")
+      .run(batchIdValue, from, to, attempts, error ?? null, errorKind ?? null, actor, this.timestamp());
   }
 
   private migrateWorkspaceIdentities(): void {
@@ -414,7 +483,9 @@ export class Storage {
       try {
         const result = insert.run(batch.projectContextId, batch.sessionId, batch.turnId, JSON.stringify(batch.events), now());
         this.db.prepare("DELETE FROM no_project_event_reviews WHERE project_context_id=? AND session_id=? AND turn_id=?").run(batch.projectContextId, batch.sessionId, batch.turnId);
-        return { batchId: batchId(Number(result.lastInsertRowid)), duplicate: false };
+        const id = batchId(Number(result.lastInsertRowid));
+        this.recordBatchHistory(id, "pending", "pending", 0, null, null, "enqueue");
+        return { batchId: id, duplicate: false };
       } catch (error) {
         if (error instanceof Error && error.message.includes("outbox_batches.project_context_id")) {
           const row = this.db.prepare("SELECT id FROM outbox_batches WHERE project_context_id=? AND session_id=? AND turn_id=?").get(batch.projectContextId, batch.sessionId, batch.turnId) as { id: number };
@@ -441,7 +512,7 @@ export class Storage {
     const timestamp = now();
     const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error, next_attempt_at, synced_at, claim_version, claim_token, lease_until
       FROM outbox_batches
-      WHERE status IN ('pending','retrying','failed')
+      WHERE status IN ('pending','retrying')
         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)
       ORDER BY id LIMIT ?`).all(timestamp, timestamp, limit) as BatchRow[];
@@ -455,19 +526,19 @@ export class Storage {
     const transaction = this.db.transaction(() => {
       const rows = this.db.prepare(`SELECT id, project_context_id, session_id, turn_id, events_json, status, attempts, last_error, next_attempt_at, synced_at, claim_version, claim_token, lease_until
         FROM outbox_batches
-        WHERE status IN ('pending','retrying','failed')
+        WHERE status IN ('pending','retrying')
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
           AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)
         ORDER BY id LIMIT ?`).all(timestamp, timestamp, limit) as BatchRow[];
       const update = this.db.prepare(`UPDATE outbox_batches
         SET claim_version=?, claim_token=?, lease_until=?, attempts=COALESCE(attempts,0)+1
-        WHERE id=? AND status IN ('pending','retrying','failed')
+        WHERE id=? AND status IN ('pending','retrying')
           AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)`);
       const claimed: BatchRecord[] = [];
       for (const row of rows) {
         const version = (row.claim_version ?? 0) + 1;
         const token = `claim_${row.id}_${version}`;
-        const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
+        const leaseUntil = new Date(this.clock().getTime() + leaseMs).toISOString();
         const result = update.run(version, token, leaseUntil, row.id, timestamp);
         if (result.changes === 1) {
           claimed.push(this.batchFromRow({ ...row, claim_version: version, claim_token: token, lease_until: leaseUntil, attempts: (row.attempts ?? 0) + 1 }, token));
@@ -491,19 +562,40 @@ export class Storage {
 
   setBatchStatus(batchIdValue: string, status: SyncStatus, error?: string, claimToken?: string): boolean {
     const id = this.parseBatchRowId(batchIdValue);
-    const timestamp = now();
+    const timestamp = this.timestamp();
     const completed = status === "synced" || status === "corrected";
+    const row = this.db.prepare("SELECT status, attempts FROM outbox_batches WHERE id=?").get(id) as { status: SyncStatus; attempts: number } | undefined;
+    if (!row) return false;
+    if (status === "retrying") return this.markBatchRetrying(batchIdValue, error ?? "retry requested", claimToken);
     const ownership = claimToken
       ? "claim_token=? AND lease_until > ?"
       : "(claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)";
     const result = this.db.prepare(`UPDATE outbox_batches
-      SET status=?, attempts=COALESCE(attempts,0)+${claimToken ? 0 : 1}, last_error=?, synced_at=?, next_attempt_at=?, claim_token=NULL, lease_until=NULL
+      SET status=?, attempts=COALESCE(attempts,0)+${claimToken ? 0 : 1}, last_error=COALESCE(?, last_error), synced_at=?, next_attempt_at=?, claim_token=NULL, lease_until=NULL
       WHERE id=? AND status NOT IN ('synced','corrected') AND ${ownership}`)
       .run(...(claimToken ? [status, error ?? null, completed ? timestamp : null, completed ? null : timestamp, id, claimToken, timestamp] : [status, error ?? null, completed ? timestamp : null, completed ? null : timestamp, id, timestamp]));
-    return result.changes === 1;
+    if (result.changes !== 1) return false;
+    this.recordBatchHistory(batchIdValue, row.status, status, row.attempts ?? 0, error ?? null, null, "worker");
+    return true;
   }
 
-  markBatchRetrying(batchIdValue: string, error: string, claimToken?: string): boolean { return this.setBatchStatus(batchIdValue, "retrying", error, claimToken); }
+  markBatchRetrying(batchIdValue: string, error: string, claimToken?: string): boolean {
+    const id = this.parseBatchRowId(batchIdValue);
+    const timestamp = this.timestamp();
+    const row = this.db.prepare("SELECT status, attempts FROM outbox_batches WHERE id=?").get(id) as { status: SyncStatus; attempts: number } | undefined;
+    if (!row) return false;
+    const ownership = claimToken ? "claim_token=? AND lease_until > ?" : "(claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)";
+    const terminal = (row.attempts ?? 0) >= this.maxAttempts;
+    const status: SyncStatus = terminal ? "failed" : "retrying";
+    const next = terminal ? null : new Date(this.clock().getTime() + this.retryDelayMs(row.attempts ?? 1)).toISOString();
+    const result = this.db.prepare(`UPDATE outbox_batches
+      SET status=?, last_error=?, synced_at=NULL, next_attempt_at=?, claim_token=NULL, lease_until=NULL
+      WHERE id=? AND status NOT IN ('synced','corrected') AND ${ownership}`)
+      .run(...(claimToken ? [status, error, next, id, claimToken, timestamp] : [status, error, next, id, timestamp]));
+    if (result.changes !== 1) return false;
+    this.recordBatchHistory(batchIdValue, row.status, status, row.attempts ?? 0, error, terminal ? "max_attempts" : "retryable", "worker");
+    return true;
+  }
 
   addSourceReference(input: NewSourceReference): SourceReference {
     this.db.prepare(`INSERT INTO source_references (batch_id,event_id,remote_source_id,plane_item_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at)
@@ -526,7 +618,9 @@ export class Storage {
   }
 
   markEventAttempt(eventIdValue: string, claimToken?: string): void {
-    if (!this.updateSourceOwned(eventIdValue, claimToken, "projection_status='pending', projection_attempts=COALESCE(projection_attempts,0)+1, projection_error=NULL", [])) throw new Error("Outbox batch claim lost");
+    if (!this.updateSourceOwned(eventIdValue, claimToken, "projection_status='pending', projection_attempts=COALESCE(projection_attempts,0)+1", [])) throw new Error("Outbox batch claim lost");
+    const row = this.db.prepare("SELECT projection_attempts FROM source_references WHERE event_id=?").get(eventIdValue) as { projection_attempts: number };
+    this.db.prepare("INSERT INTO source_reference_history (event_id,status,attempt,error,created_at) VALUES (?, 'pending', ?, NULL, ?)").run(eventIdValue, row.projection_attempts, this.timestamp());
   }
 
   markEventCompleted(eventIdValue: string, planeItemId: string | null, claimToken?: string): void {
@@ -534,7 +628,12 @@ export class Storage {
   }
 
   markEventFailed(eventIdValue: string, error: string, claimToken?: string): boolean {
-    return this.updateSourceOwned(eventIdValue, claimToken, "projection_status='failed', projection_error=?", [error]);
+    const updated = this.updateSourceOwned(eventIdValue, claimToken, "projection_status='failed', projection_error=?", [error]);
+    if (updated) {
+      const row = this.db.prepare("SELECT projection_attempts FROM source_references WHERE event_id=?").get(eventIdValue) as { projection_attempts: number };
+      this.db.prepare("INSERT INTO source_reference_history (event_id,status,attempt,error,created_at) VALUES (?, 'failed', ?, ?, ?)").run(eventIdValue, row.projection_attempts, error, this.timestamp());
+    }
+    return updated;
   }
 
   areBatchEventsComplete(batchIdValue: string, eventCount: number): boolean {
@@ -685,22 +784,55 @@ export class Storage {
     return Boolean(row);
   }
   listFailedBatches(contextId: string): unknown[] {
-    return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status NOT IN ('synced','corrected') ORDER BY id DESC").all(contextId) as unknown[];
+    return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status='failed' ORDER BY id DESC").all(contextId) as unknown[];
   }
 
   retryBatch(id: string, projectContextId?: string): void {
     const rowId = this.parseBatchRowId(id);
-    const timestamp = now();
+    const timestamp = this.timestamp();
     const row = this.db.prepare("SELECT project_context_id, status, claim_token, lease_until FROM outbox_batches WHERE id=?").get(rowId) as { project_context_id: string; status: SyncStatus; claim_token: string | null; lease_until: string | null } | undefined;
     if (!row) throw new Error("Outbox batch not found");
     if (projectContextId && row.project_context_id !== projectContextId) throw new Error("Outbox batch does not belong to this project context");
-    if (row.status === "synced" || row.status === "corrected") throw new Error("Only unsynced batches can be retried");
+    if (row.claim_token && row.lease_until && row.lease_until > timestamp) throw new Error("Outbox batch is currently claimed");
+    if (row.status !== "failed") throw new Error("Only failed batches can be retried");
     const result = this.db.prepare(`UPDATE outbox_batches
-      SET status='retrying', next_attempt_at=?, last_error=NULL
-      WHERE id=? AND status NOT IN ('synced','corrected')
+      SET status='retrying', attempts=0, next_attempt_at=?, claim_token=NULL, lease_until=NULL
+      WHERE id=? AND status='failed'
         AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)`)
       .run(timestamp, rowId, timestamp);
     if (result.changes !== 1) throw new Error(row.claim_token && row.lease_until && row.lease_until > timestamp ? "Outbox batch is currently claimed" : "Only unsynced batches can be retried");
+    this.recordBatchHistory(id, row.status, "retrying", 0, null, "manual_retry", "operator");
+  }
+
+  correctBatch(id: string, reason: string, projectContextId?: string): void {
+    this.transitionManagedBatch(id, "corrected", reason, projectContextId, "operator");
+  }
+
+  deadLetterBatch(id: string, reason: string, projectContextId?: string): void {
+    this.transitionManagedBatch(id, "failed", reason, projectContextId, "operator");
+  }
+
+  private transitionManagedBatch(id: string, status: "corrected" | "failed", reason: string, projectContextId?: string, actor = "operator"): void {
+    if (!reason.trim()) throw new Error("A management reason is required");
+    const rowId = this.parseBatchRowId(id);
+    const row = this.db.prepare("SELECT project_context_id,status,attempts,claim_token,lease_until FROM outbox_batches WHERE id=?").get(rowId) as { project_context_id: string; status: SyncStatus; attempts: number; claim_token: string | null; lease_until: string | null } | undefined;
+    if (!row) throw new Error("Outbox batch not found");
+    if (projectContextId && row.project_context_id !== projectContextId) throw new Error("Outbox batch does not belong to this project context");
+    if (row.status === "synced" || row.status === "corrected") throw new Error("Only unresolved batches can be managed");
+    const timestamp = this.timestamp();
+    const result = this.db.prepare("UPDATE outbox_batches SET status=?, last_error=COALESCE(last_error,?), next_attempt_at=NULL, claim_token=NULL, lease_until=NULL WHERE id=? AND status NOT IN ('synced','corrected') AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)")
+      .run(status, reason, rowId, timestamp);
+    if (result.changes !== 1) throw new Error("Outbox batch is currently claimed");
+    this.recordBatchHistory(id, row.status, status, row.attempts ?? 0, reason, status === "failed" ? "dead_letter" : "corrected", actor);
+  }
+
+  listBatchHistory(id: string): BatchHistoryRecord[] {
+    this.parseBatchRowId(id);
+    return this.db.prepare("SELECT * FROM outbox_batch_history WHERE batch_id=? ORDER BY id").all(id) as BatchHistoryRecord[];
+  }
+
+  listSourceReferenceHistory(eventIdValue: string): SourceReferenceHistoryRecord[] {
+    return this.db.prepare("SELECT * FROM source_reference_history WHERE event_id=? ORDER BY id").all(eventIdValue) as SourceReferenceHistoryRecord[];
   }
 
   private parseBatchRowId(value: string): number {

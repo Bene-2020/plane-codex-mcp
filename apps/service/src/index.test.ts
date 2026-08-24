@@ -4,11 +4,18 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { EventCoordinator, FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
-import { OutboxWorker, countProjectItems, createService } from "./index.js";
+import { OutboxWorker, classifyOutboxError, countProjectItems, createService } from "./index.js";
 
 const sessionHeaders = (service: ReturnType<typeof createService>) => ({ "X-Ambient-Session-Token": service.sessionToken });
 
 describe("local service and outbox worker", () => {
+  it("classifies only explicit transient failures as retryable", () => {
+    expect(classifyOutboxError(Object.assign(new Error("gateway"), { statusCode: 503 }))).toBe("retryable");
+    expect(classifyOutboxError(Object.assign(new Error("rate limited"), { response: { status: 429 } }))).toBe("retryable");
+    expect(classifyOutboxError(Object.assign(new Error("bad input"), { statusCode: 400 }))).toBe("terminal");
+    expect(classifyOutboxError(new Error("UNRESOLVED_RELATED_ITEM: missing"))).toBe("terminal");
+    expect(classifyOutboxError(new Error("unexpected failure"))).toBe("terminal");
+  });
   it("counts every non-archived item mapped to the four Inline states", () => {
     expect(countProjectItems([
       { id: "1", identifier: "1", title: "Backlog", projectId: "p", status: "captured", updatedAt: "now" },
@@ -223,6 +230,19 @@ describe("local service and outbox worker", () => {
     expect(await worker.processOnce()).toBe(1);
     expect(storage.listPendingBatches()).toHaveLength(0);
     storage.close();
+  });
+
+  it("drains past a terminal poison batch so a later healthy batch syncs in the same cycle", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "poison", events: [{ type: "completed", title: "不存在", summary: "不存在", relatedItemId: "DEMO-999", userDirected: false, sourceExcerpt: "不存在" }] });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "healthy", events: [{ type: "task", title: "正常批次", summary: "正常批次", userDirected: false, sourceExcerpt: "正常批次" }] });
+    const plane = new FakePlaneAdapter();
+    const service = createService({ storage, plane });
+    expect(await service.worker.processOnce()).toBe(2);
+    expect(storage.listFailedBatches(context.id)).toHaveLength(1);
+    expect((await plane.listItems(context)).map((item) => item.title)).toEqual(["正常批次"]);
+    await service.app.close();
   });
 
   it("renews a short lease while a remote operation is awaiting and prevents a second claim", async () => {
