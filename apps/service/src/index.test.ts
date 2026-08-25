@@ -4,11 +4,42 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { EventCoordinator, FakePlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
-import { OutboxWorker, countProjectItems, createService } from "./index.js";
+import { OutboxWorker, classifyOutboxError, countProjectItems, createService } from "./index.js";
 
 const sessionHeaders = (service: ReturnType<typeof createService>) => ({ "X-Ambient-Session-Token": service.sessionToken });
 
 describe("local service and outbox worker", () => {
+  it("classifies only explicit transient failures as retryable", () => {
+    expect(classifyOutboxError(Object.assign(new Error("gateway"), { statusCode: 503 }))).toBe("retryable");
+    expect(classifyOutboxError(Object.assign(new Error("rate limited"), { response: { status: 429 } }))).toBe("retryable");
+    expect(classifyOutboxError(Object.assign(new Error("bad input"), { statusCode: 400 }))).toBe("terminal");
+    expect(classifyOutboxError(new Error("UNRESOLVED_RELATED_ITEM: missing"))).toBe("terminal");
+    expect(classifyOutboxError(new Error("unexpected failure"))).toBe("terminal");
+  });
+
+  it("backs off a transient failure before recovering and syncing", async () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { clock: () => current, retryBaseMs: 1_000, retryMaxMs: 10_000, random: () => 0 });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "transient", events: [{ type: "task", title: "恢复后同步", summary: "恢复后同步", userDirected: false, sourceExcerpt: "恢复后同步" }] });
+    const plane = new FakePlaneAdapter();
+    const originalListItems = plane.listItems.bind(plane);
+    let unavailable = true;
+    plane.listItems = async (projectContext) => {
+      if (unavailable) throw Object.assign(new Error("gateway timeout"), { statusCode: 503 });
+      return originalListItems(projectContext);
+    };
+    const service = createService({ storage, plane });
+    expect(await service.worker.processOnce()).toBe(1);
+    expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("retrying");
+    current = new Date("2026-01-01T00:00:00.499Z");
+    expect(await service.worker.processOnce()).toBe(0);
+    current = new Date("2026-01-01T00:00:01.000Z");
+    unavailable = false;
+    expect(await service.worker.processOnce()).toBe(1);
+    expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("synced");
+    await service.app.close();
+  });
   it("counts every non-archived item mapped to the four Inline states", () => {
     expect(countProjectItems([
       { id: "1", identifier: "1", title: "Backlog", projectId: "p", status: "captured", updatedAt: "now" },
@@ -223,6 +254,85 @@ describe("local service and outbox worker", () => {
     expect(await worker.processOnce()).toBe(1);
     expect(storage.listPendingBatches()).toHaveLength(0);
     storage.close();
+  });
+
+  it("drains past a terminal poison batch so a later healthy batch syncs in the same cycle", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "poison", events: [{ type: "completed", title: "不存在", summary: "不存在", relatedItemId: "DEMO-999", userDirected: false, sourceExcerpt: "不存在" }] });
+    storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "healthy", events: [{ type: "task", title: "正常批次", summary: "正常批次", userDirected: false, sourceExcerpt: "正常批次" }] });
+    const plane = new FakePlaneAdapter();
+    const service = createService({ storage, plane });
+    expect(await service.worker.processOnce()).toBe(2);
+    expect(storage.listFailedBatches(context.id)).toHaveLength(1);
+    expect((await plane.listItems(context)).map((item) => item.title)).toEqual(["正常批次"]);
+    await service.app.close();
+  });
+
+  it("enforces project isolation and claim ownership for Correct/dead-letter management", async () => {
+    const storage = new Storage(":memory:");
+    const first = storage.bindContext({ cwd: "/work/one", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "one" });
+    const second = storage.bindContext({ cwd: "/work/two", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "two" });
+    const plane = new FakePlaneAdapter();
+    const service = createService({ storage, plane });
+    const queued = storage.enqueueBatch({ projectContextId: first.id, sessionId: "s", turnId: "correct", events: [{ type: "completed", title: "缺失目标", summary: "缺失目标", relatedItemId: "DEMO-404", userDirected: false, sourceExcerpt: "缺失目标" }] });
+    await service.worker.processOnce();
+    const wrongProject = await service.app.inject({ method: "POST", url: `/api/projects/${second.id}/correct/${queued.batchId}`, headers: sessionHeaders(service), payload: { reason: "错误项目" } });
+    expect(wrongProject.statusCode).toBe(400);
+    const claim = storage.claimPendingBatches()[0];
+    expect(claim).toBeUndefined();
+    const managed = await service.app.inject({ method: "POST", url: `/api/projects/${first.id}/correct/${queued.batchId}`, headers: sessionHeaders(service), payload: { reason: "运维确认无法恢复" } });
+    expect(managed.statusCode).toBe(200);
+    expect((storage.db.prepare("SELECT status,last_error FROM outbox_batches WHERE id=1").get() as { status: string; last_error: string }).status).toBe("corrected");
+    expect(storage.listFailedBatches(first.id)).toHaveLength(0);
+    expect(storage.listPendingBatches()).toHaveLength(0);
+    expect(storage.listBatchHistory(queued.batchId).at(-1)).toMatchObject({ to_status: "corrected", error: "运维确认无法恢复", error_kind: "corrected", actor: "operator" });
+    expect(storage.getSourceReference("event_1_0")?.projectionError).toContain("UNRESOLVED_RELATED_ITEM");
+
+    const deadLettered = storage.enqueueBatch({ projectContextId: first.id, sessionId: "s", turnId: "dead-letter", events: [{ type: "completed", title: "死信", summary: "死信", relatedItemId: "DEMO-404", userDirected: false, sourceExcerpt: "死信" }] });
+    await service.worker.processOnce();
+    const originalBatchError = (storage.db.prepare("SELECT last_error FROM outbox_batches WHERE id=2").get() as { last_error: string }).last_error;
+    const originalSourceError = storage.getSourceReference("event_2_0")?.projectionError;
+    const activeBatch = storage.enqueueBatch({ projectContextId: first.id, sessionId: "s", turnId: "dead-letter-active", events: [{ type: "task", title: "活动批次", summary: "活动批次", userDirected: false, sourceExcerpt: "活动批次" }] });
+    const active = storage.claimPendingBatches()[0]!;
+    const activeResponse = await service.app.inject({ method: "POST", url: `/api/projects/${first.id}/dead-letter/${activeBatch.batchId}`, headers: sessionHeaders(service), payload: { reason: "不应抢占" } });
+    expect(activeResponse.statusCode).toBe(400);
+    expect(activeResponse.json().error).toContain("currently claimed");
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=3").get()).toEqual({ status: "pending" });
+    storage.setBatchStatus(active.id, "failed", "terminal", active.claimToken);
+    const deadLetterResponse = await service.app.inject({ method: "POST", url: `/api/projects/${first.id}/dead-letter/${deadLettered.batchId}`, headers: sessionHeaders(service), payload: { reason: "确认进入死信" } });
+    expect(deadLetterResponse.statusCode).toBe(200);
+    expect(storage.db.prepare("SELECT status,last_error FROM outbox_batches WHERE id=2").get()).toEqual({ status: "failed", last_error: originalBatchError });
+    expect(storage.getSourceReference("event_2_0")?.projectionError).toBe(originalSourceError);
+    expect(storage.listBatchHistory(deadLettered.batchId).at(-1)).toMatchObject({ to_status: "failed", error: "确认进入死信", error_kind: "dead_letter", actor: "operator" });
+    expect(storage.claimPendingBatches().map((batch) => batch.id)).not.toContain(deadLettered.batchId);
+    await service.app.close();
+  });
+
+  it("manually retries a failed batch through the worker while retaining the original source error", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const plane = new FakePlaneAdapter();
+    const originalCreateItem = plane.createItem.bind(plane);
+    let unavailable = true;
+    plane.createItem = async (projectContext, input) => {
+      if (unavailable) throw Object.assign(new Error("permanent source failure"), { statusCode: 400 });
+      return originalCreateItem(projectContext, input);
+    };
+    const service = createService({ storage, plane });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "manual-retry", events: [{ type: "task", title: "先失败后恢复", summary: "先失败后恢复", userDirected: false, sourceExcerpt: "先失败后恢复" }] });
+    await service.worker.processOnce();
+    expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("failed");
+    const originalError = storage.getSourceReference("event_1_0")?.projectionError;
+    expect(originalError).toContain("permanent source failure");
+    unavailable = false;
+    const retry = await service.app.inject({ method: "POST", url: `/api/projects/${context.id}/retry/${queued.batchId}`, headers: sessionHeaders(service) });
+    expect(retry.statusCode).toBe(200);
+    expect(await service.worker.processOnce()).toBe(1);
+    expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("synced");
+    expect(storage.getSourceReference("event_1_0")?.projectionStatus).toBe("completed");
+    expect(storage.listSourceReferenceHistory("event_1_0").some((entry) => entry.error === originalError)).toBe(true);
+    await service.app.close();
   });
 
   it("renews a short lease while a remote operation is awaiting and prevents a second claim", async () => {

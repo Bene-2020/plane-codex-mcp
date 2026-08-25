@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-24
+
+### Fixed
+
+- 将失败批次从自动领取队列移出，避免永久失败的 Plane 引用阻塞后续事件。
+- 为临时网络错误增加错误分类、指数退避、随机抖动和最大尝试次数，并保留完整投影与状态迁移审计。
+- 增加正式 Retry、Correct 和 Dead-letter 管理路径，并为旧 SQLite 数据提供幂等迁移快照。
+
 ## [0.1.2] - 2026-08-20
 
 ### Changed
@@ -40,7 +48,8 @@
 - 提供五种 Codex Hook 的会话上下文注入与最小审计。
 - 隔离 Plane API Key、Panel 临时会话令牌和本地项目数据。
 
-[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.0

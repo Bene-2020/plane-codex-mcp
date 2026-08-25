@@ -298,6 +298,83 @@ describe("SQLite storage", () => {
     first.close(); second.close(); rmSync(directory, { recursive: true, force: true });
   });
 
+  it("does not let a terminal failed batch starve a newer pending batch", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const poisoned = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "poisoned", events: [event] });
+    const healthy = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "healthy", events: [event] });
+    const claim = storage.claimPendingBatches()[0]!;
+    expect(claim.id).toBe(poisoned.batchId);
+    expect(storage.setBatchStatus(claim.id, "failed", "UNRESOLVED_RELATED_ITEM", claim.claimToken)).toBe(true);
+    expect(storage.claimPendingBatches().map((batch) => batch.id)).toEqual([healthy.batchId]);
+    storage.close();
+  });
+
+  it("uses deterministic exponential backoff and stops at the retry limit", () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { maxAttempts: 2, retryBaseMs: 1_000, retryMaxMs: 10_000, clock: () => current, random: () => 0 });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "retry", events: [event] });
+    const first = storage.claimPendingBatches()[0]!;
+    expect(storage.markBatchRetrying(queued.batchId, "timeout", first.claimToken)).toBe(true);
+    expect(storage.db.prepare("SELECT status, next_attempt_at FROM outbox_batches WHERE id=1").get()).toEqual({ status: "retrying", next_attempt_at: "2026-01-01T00:00:00.500Z" });
+    current = new Date("2026-01-01T00:00:00.499Z");
+    expect(storage.claimPendingBatches()).toHaveLength(0);
+    current = new Date("2026-01-01T00:00:00.500Z");
+    expect(storage.claimPendingBatches()).toHaveLength(1);
+    storage.db.prepare("UPDATE outbox_batches SET claim_token=NULL, lease_until=NULL WHERE id=1").run();
+    current = new Date("2026-01-01T00:00:01.000Z");
+    const second = storage.claimPendingBatches()[0]!;
+    expect(storage.markBatchRetrying(queued.batchId, "timeout again", second.claimToken)).toBe(true);
+    expect(storage.db.prepare("SELECT status, next_attempt_at FROM outbox_batches WHERE id=1").get()).toEqual({ status: "failed", next_attempt_at: null });
+    expect(storage.claimPendingBatches()).toHaveLength(0);
+    expect(storage.listBatchHistory(queued.batchId).map((row) => row.error)).toEqual([null, "timeout", "timeout again"]);
+    storage.close();
+  });
+
+  it("manual retry is the only transition from failed and preserves audit history", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "manual-retry", events: [event] });
+    const claim = storage.claimPendingBatches()[0]!;
+    storage.setBatchStatus(queued.batchId, "failed", "permanent error", claim.claimToken);
+    expect(storage.claimPendingBatches()).toHaveLength(0);
+    expect(storage.markBatchRetrying(queued.batchId, "must not revive failed")).toBe(false);
+    expect(storage.setBatchStatus(queued.batchId, "retrying", "must not revive failed")).toBe(false);
+    expect((storage.db.prepare("SELECT status,last_error FROM outbox_batches WHERE id=1").get() as { status: string; last_error: string }).status).toBe("failed");
+    storage.retryBatch(queued.batchId, context.id);
+    expect(storage.claimPendingBatches()[0]).toMatchObject({ id: queued.batchId, status: "retrying", lastError: "permanent error" });
+    expect(storage.listBatchHistory(queued.batchId).map((row) => row.to_status)).toEqual(["pending", "failed", "retrying"]);
+    storage.close();
+  });
+
+  it("enforces the worker transition matrix and requires completed source references before sync", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const failed = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "matrix-failed", events: [event] });
+    const failedClaim = storage.claimPendingBatches()[0]!;
+    expect(storage.setBatchStatus(failed.batchId, "failed", "original failure", failedClaim.claimToken)).toBe(true);
+    expect(storage.setBatchStatus(failed.batchId, "synced")).toBe(false);
+    expect(storage.setBatchStatus(failed.batchId, "corrected")).toBe(false);
+    expect(storage.setBatchStatus(failed.batchId, "failed", "replacement failure")).toBe(false);
+    expect(storage.db.prepare("SELECT status,last_error FROM outbox_batches WHERE id=1").get()).toEqual({ status: "failed", last_error: "original failure" });
+
+    const incomplete = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "matrix-incomplete", events: [event] });
+    expect(storage.setBatchStatus(incomplete.batchId, "synced")).toBe(false);
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=2").get()).toEqual({ status: "pending" });
+    expect(storage.setBatchStatus(incomplete.batchId, "failed", "incomplete")).toBe(true);
+
+    const complete = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "matrix-complete", events: [event] });
+    storage.addSourceReference({ batchId: complete.batchId, eventId: "event_3_0", remoteSourceId: "project_1:s:matrix-complete:0", sessionId: "s", turnId: "matrix-complete", eventType: event.type, summary: event.summary, sourceExcerpt: event.sourceExcerpt, observedAt: "now" });
+    const completeClaim = storage.claimPendingBatches()[0]!;
+    expect(completeClaim.id).toBe(complete.batchId);
+    storage.markEventAttempt("event_3_0", completeClaim.claimToken);
+    storage.markEventCompleted("event_3_0", "plane-item", completeClaim.claimToken);
+    expect(storage.setBatchStatus(complete.batchId, "synced", undefined, completeClaim.claimToken)).toBe(true);
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=3").get()).toEqual({ status: "synced" });
+    storage.close();
+  });
+
   it("migrates an old outbox schema without losing batch or source data", () => {
     const directory = mkdtempSync(join(tmpdir(), "ambient-migration-"));
     const filename = join(directory, "outbox.sqlite");
@@ -324,6 +401,55 @@ describe("SQLite storage", () => {
     expect(reopened.getContextByCwd("/work")?.id).toBe("project_1");
     expect(reopened.listPendingBatches()[0]?.id).toBe("batch_1");
     reopened.close(); rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("snapshots legacy terminal batches and source projection state exactly once during migration", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ambient-history-migration-"));
+    const filename = join(directory, "history.sqlite");
+    const old = new DatabaseSync(filename);
+    const json = JSON.stringify([event]).replace(/'/g, "''");
+    old.exec(`
+      CREATE TABLE project_contexts (id INTEGER PRIMARY KEY AUTOINCREMENT, canonical_cwd TEXT NOT NULL UNIQUE, plane_base_url TEXT NOT NULL, workspace_slug TEXT NOT NULL, plane_project_id TEXT NOT NULL, plane_project_name TEXT, auto_capture_enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE outbox_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, project_context_id TEXT NOT NULL, session_id TEXT NOT NULL, turn_id TEXT NOT NULL, events_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, next_attempt_at TEXT, accepted_at TEXT NOT NULL, synced_at TEXT, claim_version INTEGER NOT NULL DEFAULT 0, claim_token TEXT, lease_until TEXT, UNIQUE(project_context_id, session_id, turn_id));
+      CREATE TABLE source_references (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, remote_source_id TEXT NOT NULL, plane_item_id TEXT, session_id TEXT NOT NULL, turn_id TEXT NOT NULL, event_type TEXT NOT NULL, summary TEXT NOT NULL, source_excerpt TEXT NOT NULL, observed_at TEXT NOT NULL, created_at TEXT NOT NULL, projection_status TEXT NOT NULL, projection_attempts INTEGER NOT NULL, projection_error TEXT, projected_at TEXT);
+      INSERT INTO project_contexts (canonical_cwd, plane_base_url, workspace_slug, plane_project_id, created_at, updated_at) VALUES ('/work', 'https://plane.test', 'ws', 'p', 'created', 'updated');
+      INSERT INTO outbox_batches (project_context_id, session_id, turn_id, events_json, status, attempts, last_error, accepted_at, synced_at) VALUES ('project_1', 's', 'synced', '${json}', 'synced', 2, NULL, 'accepted-s', 'synced-at');
+      INSERT INTO outbox_batches (project_context_id, session_id, turn_id, events_json, status, attempts, last_error, accepted_at, synced_at) VALUES ('project_1', 's', 'corrected', '${json}', 'corrected', 4, 'corrected-source-error', 'accepted-c', NULL);
+      INSERT INTO outbox_batches (project_context_id, session_id, turn_id, events_json, status, attempts, last_error, accepted_at, synced_at) VALUES ('project_1', 's', 'failed', '${json}', 'failed', 7, 'UNRESOLVED_RELATED_ITEM', 'accepted-f', NULL);
+      INSERT INTO source_references (batch_id,event_id,remote_source_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at,projection_status,projection_attempts,projection_error,projected_at) VALUES ('batch_1','event_1_0','source-s','s','synced','bug','synced','synced','observed-s','source-created-s','completed',2,NULL,'projected-s');
+      INSERT INTO source_references (batch_id,event_id,remote_source_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at,projection_status,projection_attempts,projection_error,projected_at) VALUES ('batch_2','event_2_0','source-c','s','corrected','bug','corrected','corrected','observed-c','source-created-c','failed',3,'corrected-source-error',NULL);
+      INSERT INTO source_references (batch_id,event_id,remote_source_id,session_id,turn_id,event_type,summary,source_excerpt,observed_at,created_at,projection_status,projection_attempts,projection_error,projected_at) VALUES ('batch_3','event_3_0','source-f','s','failed','bug','failed','failed','observed-f','source-created-f','failed',7,'UNRESOLVED_RELATED_ITEM',NULL);
+    `);
+    old.close();
+    const storage = new Storage(filename);
+    try {
+      expect(storage.db.prepare("SELECT status, attempts, last_error, synced_at FROM outbox_batches ORDER BY id").all()).toEqual([
+        { status: "synced", attempts: 2, last_error: null, synced_at: "synced-at" },
+        { status: "corrected", attempts: 4, last_error: "corrected-source-error", synced_at: null },
+        { status: "failed", attempts: 7, last_error: "UNRESOLVED_RELATED_ITEM", synced_at: null },
+      ]);
+      expect(storage.claimPendingBatches()).toHaveLength(0);
+      expect(storage.db.prepare("SELECT batch_id,to_status,attempts,error,error_kind,actor,synced_at FROM outbox_batch_history WHERE actor='migration' ORDER BY batch_id").all()).toEqual([
+        { batch_id: "batch_1", to_status: "synced", attempts: 2, error: null, error_kind: "legacy_snapshot", actor: "migration", synced_at: "synced-at" },
+        { batch_id: "batch_2", to_status: "corrected", attempts: 4, error: "corrected-source-error", error_kind: "legacy_snapshot", actor: "migration", synced_at: null },
+        { batch_id: "batch_3", to_status: "failed", attempts: 7, error: "UNRESOLVED_RELATED_ITEM", error_kind: "legacy_snapshot", actor: "migration", synced_at: null },
+      ]);
+      expect(storage.db.prepare("SELECT event_id,status,attempt,error,error_kind,synced_at FROM source_reference_history WHERE error_kind='legacy_snapshot' ORDER BY event_id").all()).toEqual([
+        { event_id: "event_1_0", status: "completed", attempt: 2, error: null, error_kind: "legacy_snapshot", synced_at: "projected-s" },
+        { event_id: "event_2_0", status: "failed", attempt: 3, error: "corrected-source-error", error_kind: "legacy_snapshot", synced_at: null },
+        { event_id: "event_3_0", status: "failed", attempt: 7, error: "UNRESOLVED_RELATED_ITEM", error_kind: "legacy_snapshot", synced_at: null },
+      ]);
+      expect((storage.db.prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>).map((row) => row.version)).toContain(3);
+    } finally {
+      storage.close();
+      const reopened = new Storage(filename);
+      try {
+        expect(reopened.db.prepare("SELECT COUNT(*) AS count FROM outbox_batch_history WHERE actor='migration'").get()).toEqual({ count: 3 });
+      } finally {
+        reopened.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
   });
 
   it("migrates Git worktree history into one binding unit and changes every historical row", () => {
