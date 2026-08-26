@@ -7,7 +7,7 @@
 [Plane](https://plane.so/open-source) 是一款采用 AGPL-3.0 许可证的开源项目管理平台，既可以免费自行部署 Community Edition，也提供免费的云端方案。其自托管 Community Edition 不限制用户数，云端 Free 方案目前支持最多 12 名用户，因此非常适合个人开发者、一人公司（OPC）和小团队使用；具体额度以 [Plane 官方定价页](https://plane.so/pricing) 为准。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.1.3-4f6bed.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.4-4f6bed.svg)](CHANGELOG.md)
 
 Ambient Project Layer 是一个 Codex 插件。它从当前工作回合中捕获真正有项目价值的事件，先可靠写入本地 SQLite Outbox，再异步同步到 Plane。你可以继续在 Plane 中做完整的项目管理，也可以在 Codex 内通过轻量 Panel 查看最近工作项并修改状态。
 
@@ -58,7 +58,7 @@ Plane 官方文档说明了 [API Key 的创建位置与使用方式](https://dev
 
 ### 2. 安装对应平台的插件包
 
-下载形如 `ambient-project-layer-v0.1.3-<target>.zip` 的资产，解压到不会随意移动的目录。下文用 `<RELEASE_DIR>` 表示解压后的绝对路径；该目录应直接包含 `.agents/plugins/marketplace.json`。
+下载形如 `ambient-project-layer-v0.1.4-<target>.zip` 的资产，解压到不会随意移动的目录。下文用 `<RELEASE_DIR>` 表示解压后的绝对路径；该目录应直接包含 `.agents/plugins/marketplace.json`。
 
 ```bash
 codex plugin marketplace add "<RELEASE_DIR>"
@@ -93,6 +93,7 @@ macOS/Linux 示例：
 codex mcp add ambient-project \
   --env "AMBIENT_DB_PATH=$HOME/.codex/plugins/data/ambient-project-layer-ambient/ambient.sqlite" \
   --env "PLANE_MODE=sdk" \
+  --env "PLANE_TYPE_MODE=default" \
   --env "PLANE_BASE_URL=https://api.plane.so" \
   --env "PLANE_WORKSPACE_SLUG=replace-with-your-workspace" \
   --env "PLANE_API_KEY=replace-in-config-toml" \
@@ -106,6 +107,7 @@ Windows PowerShell 示例：
 codex mcp add ambient-project `
   --env "AMBIENT_DB_PATH=$env:USERPROFILE\.codex\plugins\data\ambient-project-layer-ambient\ambient.sqlite" `
   --env "PLANE_MODE=sdk" `
+  --env "PLANE_TYPE_MODE=default" `
   --env "PLANE_BASE_URL=https://api.plane.so" `
   --env "PLANE_WORKSPACE_SLUG=replace-with-your-workspace" `
   --env "PLANE_API_KEY=replace-in-config-toml" `
@@ -114,6 +116,15 @@ codex mcp add ambient-project `
 ```
 
 然后编辑 `~/.codex/config.toml`，仅在 `[mcp_servers.ambient-project.env]` 中把占位值替换为真实 Workspace slug 和 API Key。不要把真实 Key 放进上面的命令、仓库、Issue、日志或截图中，以免进入 shell history 或公开记录。
+
+`PLANE_TYPE_MODE` 控制工作项分类策略：
+
+- `default`（默认，适合 Plane Free）：不访问付费的 Work Item Types 目录，创建时使用 Plane 默认类型，并把语义分类写入标题前缀，例如 `[Bug]-登录失败`、`[Decision]-采用 SQLite`。
+- `custom`（适合 Plane Pro / Business）：为 Task、Bug、Decision、Idea、Risk、Milestone 解析或创建对应的自定义 Work Item Type。类型目录只在创建工作项且映射缺失时读取，普通刷新、计数和状态更新不会访问它。
+
+修改 `PLANE_TYPE_MODE` 后必须完全重启 Codex。不同模式不会自动重写已有工作项。
+
+升级到 v0.1.4 后，后台同步 Worker 会为每个终态失败批次提供一次自动恢复机会，包括升级前遗留的历史失败。恢复仍失败的批次会继续保持终态，避免无限重试；之后可在 Panel 中人工 Retry、Correct 或 Dead-letter。
 
 自托管 Plane 用户还需要把 `PLANE_BASE_URL` 换成实例的 API Base URL。
 

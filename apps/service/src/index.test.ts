@@ -40,6 +40,22 @@ describe("local service and outbox worker", () => {
     expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("synced");
     await service.app.close();
   });
+
+  it("automatically retries a historical failed batch once when the worker starts", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "historical-failure", events: [{ type: "bug", title: "升级后恢复", summary: "升级后恢复", userDirected: false, sourceExcerpt: "升级后恢复" }] });
+    const claim = storage.claimPendingBatches()[0]!;
+    expect(storage.setBatchStatus(queued.batchId, "failed", "Request failed with status code 402", claim.claimToken)).toBe(true);
+    const plane = new FakePlaneAdapter();
+    const service = createService({ storage, plane });
+
+    service.worker.start();
+    await vi.waitFor(() => expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("synced"));
+    expect((await plane.listItems(context)).map((item) => item.title)).toEqual(["升级后恢复"]);
+    expect(storage.listBatchHistory(queued.batchId).filter((row) => row.error_kind === "automatic_recovery")).toHaveLength(1);
+    await service.app.close();
+  });
   it("counts every non-archived item mapped to the four Inline states", () => {
     expect(countProjectItems([
       { id: "1", identifier: "1", title: "Backlog", projectId: "p", status: "captured", updatedAt: "now" },

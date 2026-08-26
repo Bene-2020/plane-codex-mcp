@@ -816,6 +816,35 @@ export class Storage {
     return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status='failed' ORDER BY id DESC").all(contextId) as unknown[];
   }
 
+  recoverFailedBatches(limit = 100): string[] {
+    const recovered: string[] = [];
+    const timestamp = this.timestamp();
+    const recover = this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT id, attempts, last_error FROM outbox_batches batch
+        WHERE batch.status='failed'
+          AND (batch.claim_token IS NULL OR batch.lease_until IS NULL OR batch.lease_until <= ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM outbox_batch_history history
+            WHERE history.batch_id='batch_' || batch.id
+              AND history.error_kind='automatic_recovery'
+          )
+        ORDER BY batch.id
+        LIMIT ?`).all(timestamp, Math.max(0, limit)) as Array<{ id: number; attempts: number; last_error: string | null }>;
+      const update = this.db.prepare(`UPDATE outbox_batches
+        SET status='retrying', attempts=0, next_attempt_at=?, claim_token=NULL, lease_until=NULL, synced_at=NULL
+        WHERE id=? AND status='failed'
+          AND (claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)`);
+      for (const row of rows) {
+        const batchIdValue = `batch_${row.id}`;
+        if (update.run(timestamp, row.id, timestamp).changes !== 1) continue;
+        this.recordBatchHistory(batchIdValue, "failed", "retrying", row.attempts ?? 0, row.last_error, "automatic_recovery", "worker");
+        recovered.push(batchIdValue);
+      }
+    });
+    recover.immediate();
+    return recovered;
+  }
+
   retryBatch(id: string, projectContextId?: string): void {
     const rowId = this.parseBatchRowId(id);
     const timestamp = this.timestamp();

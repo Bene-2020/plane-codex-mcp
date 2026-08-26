@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-26
+
+### Added
+
+- 增加 `PLANE_TYPE_MODE=default|custom`：默认 Free 模式绕过付费 Work Item Types 目录，使用 Plane 默认类型并将分类写入 `[Bug]-` 等标题前缀；Pro / Business 用户可显式启用自定义类型。
+- 后台同步 Worker 为每个终态失败批次提供一次有审计记录的自动恢复机会，并自动接管升级前的历史失败；再次失败后保持终态，避免无限重试。
+
+### Fixed
+
+- 项目刷新与计数不再依赖 Work Item Types 目录，避免 Plane Free 返回 HTTP 402 后项目计数不可用。
+
 ## [0.1.3] - 2026-08-24
 
 ### Fixed
@@ -48,7 +59,8 @@
 - 提供五种 Codex Hook 的会话上下文注入与最小审计。
 - 隔离 Plane API Key、Panel 临时会话令牌和本地项目数据。
 
-[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.1

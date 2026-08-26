@@ -305,7 +305,7 @@ try {
   const mcpConfig = JSON.parse(await readFile(join(isolatedPlugin, ".mcp.json"), "utf8"));
   const mcpServer = mcpConfig.mcpServers["ambient-project"];
   if (Object.hasOwn(mcpServer, "env")) throw new Error("Formal MCP entrypoint must forward host environment variables through env_vars");
-  if (JSON.stringify(mcpServer.env_vars) !== JSON.stringify(["AMBIENT_DB_PATH", "PLANE_MODE", "PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"])) throw new Error("Formal MCP entrypoint must forward the required host environment variables");
+  if (JSON.stringify(mcpServer.env_vars) !== JSON.stringify(["AMBIENT_DB_PATH", "PLANE_MODE", "PLANE_TYPE_MODE", "PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"])) throw new Error("Formal MCP entrypoint must forward the required host environment variables");
   if (mcpServer.env_vars.includes("AMBIENT_SERVICE_BASE_URL") || mcpServer.env_vars.includes("AMBIENT_SESSION_TOKEN")) throw new Error("Formal MCP entrypoint must own its dynamic service session");
   if (mcpServer.command !== target.launcherRelativePath) throw new Error(`MCP command must use the packaged sidecar launcher: ${mcpServer.command}`);
   const mcpArg = mcpServer.args[0];

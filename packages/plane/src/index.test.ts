@@ -6,14 +6,19 @@ import { recordKinds, remoteSourceId, type RecordKind, type SourceEvent } from "
 
 const bug = (title = "登录页面偶尔会白屏") => ({ type: "bug" as const, title, summary: title, userDirected: true, sourceExcerpt: title });
 
-function sdkHarness(stateDefinitions = [{ id: "state-captured", name: "Backlog", group: "backlog" }]) {
+function sdkHarness(stateDefinitions = [{ id: "state-captured", name: "Backlog", group: "backlog" }], typeMode: "default" | "custom" = "custom", failTypeList = false) {
   const types: Array<{ id: string; name: string; description?: string; is_active: boolean; is_epic: boolean }> = [];
   const items: Array<Record<string, unknown>> = [];
   const createPayloads: Array<Record<string, unknown>> = [];
   const updatePayloads: Array<Record<string, unknown>> = [];
+  const calls = { typeLists: 0, workItemListParams: [] as Array<Record<string, unknown>> };
   const client = {
     workItemTypes: {
-      list: async () => types,
+      list: async () => {
+        calls.typeLists += 1;
+        if (failTypeList) throw Object.assign(new Error("Payment required"), { statusCode: 402 });
+        return types;
+      },
       create: async (_workspace: string, _project: string, input: Record<string, unknown>) => {
         const type = { id: `type-${types.length + 1}`, name: String(input.name), description: String(input.description ?? ""), is_active: true, is_epic: false };
         types.push(type);
@@ -23,8 +28,12 @@ function sdkHarness(stateDefinitions = [{ id: "state-captured", name: "Backlog",
     states: { list: async () => ({ results: stateDefinitions }) },
     workItems: {
       list: async (_workspace: string, _project: string, params: Record<string, unknown> = {}) => {
+        calls.workItemListParams.push(params);
         const start = Number(params.cursor ?? 0);
-        const results = items.slice(start, start + 100);
+        const results = items.slice(start, start + 100).map((item) => {
+          if (params.expand !== "type" || typeof item.type !== "string") return item;
+          return { ...item, type: types.find((type) => type.id === item.type) ?? item.type };
+        });
         const nextPageResults = start + results.length < items.length;
         return { results, next_cursor: String(start + results.length), next_page_results: nextPageResults };
       },
@@ -42,7 +51,7 @@ function sdkHarness(stateDefinitions = [{ id: "state-captured", name: "Backlog",
       },
     },
   };
-  return { adapter: new PlaneSdkAdapter("https://api.plane.so", "test-key", "demo-workspace", client as unknown as PlaneClient), types, items, createPayloads, updatePayloads };
+  return { adapter: new PlaneSdkAdapter("https://api.plane.so", "test-key", "demo-workspace", { client: client as unknown as PlaneClient, typeMode }), types, items, createPayloads, updatePayloads, calls };
 }
 
 const sdkContext = { id: "project_1", cwd: "/work", canonicalCwd: "/work", planeBaseUrl: "https://api.plane.so", workspaceSlug: "demo-workspace", planeProjectId: "demo-project", autoCaptureEnabled: true, createdAt: "now", updatedAt: "now" };
@@ -99,6 +108,36 @@ describe("Plane projection", () => {
     await expect(adapter.listItems(sdkContext)).resolves.toHaveLength(1);
   });
 
+  it.each(recordKinds)("uses Plane's default type and prefixes %s titles without reading the paid type catalog", async (kind: RecordKind) => {
+    const { adapter, calls, createPayloads } = sdkHarness(undefined, "default", true);
+
+    const created = await adapter.createItem(sdkContext, { title: "登录失败", description: "record", kind, status: "captured", sourceEventId: `default-${kind}` });
+
+    expect(createPayloads[0]).not.toHaveProperty("type");
+    expect(createPayloads[0]?.name).toBe(`[${kind[0]!.toUpperCase()}${kind.slice(1)}]-登录失败`);
+    expect(created).toMatchObject({ title: createPayloads[0]?.name, kind });
+    expect(calls.typeLists).toBe(0);
+    expect(calls.workItemListParams.every((params) => params.expand === "type")).toBe(true);
+  });
+
+  it("keeps the semantic prefix when default-mode work items are updated", async () => {
+    const { adapter, createPayloads, updatePayloads } = sdkHarness([
+      { id: "state-captured", name: "Backlog", group: "backlog" },
+      { id: "state-done", name: "Done", group: "completed" },
+    ], "default", true);
+    const created = await adapter.createItem(sdkContext, { title: "登录失败", description: "record", kind: "bug", status: "captured", sourceEventId: "default-bug" });
+
+    const statusUpdate = await adapter.updateItem(sdkContext, created.id, { status: "done" });
+    const reclassified = await adapter.updateItem(sdkContext, created.id, { title: "登录仍失败", kind: "risk" });
+
+    expect(createPayloads[0]?.name).toBe("[Bug]-登录失败");
+    expect(updatePayloads[0]).not.toHaveProperty("type");
+    expect(statusUpdate.kind).toBe("bug");
+    expect(updatePayloads[1]).toMatchObject({ name: "[Risk]-登录仍失败" });
+    expect(updatePayloads[1]).not.toHaveProperty("type");
+    expect(reclassified.kind).toBe("risk");
+  });
+
   it("requires an explicit Plane mode instead of silently creating a Demo Project", () => {
     const previousMode = process.env.PLANE_MODE;
     delete process.env.PLANE_MODE;
@@ -116,11 +155,13 @@ describe("Plane projection", () => {
       baseUrl: process.env.PLANE_BASE_URL,
       apiKey: process.env.PLANE_API_KEY,
       workspace: process.env.PLANE_WORKSPACE_SLUG,
+      typeMode: process.env.PLANE_TYPE_MODE,
     };
     process.env.PLANE_MODE = "sdk";
     process.env.PLANE_BASE_URL = "https://api.plane.so";
     process.env.PLANE_API_KEY = "test-only-key";
     process.env.PLANE_WORKSPACE_SLUG = "test-workspace";
+    process.env.PLANE_TYPE_MODE = "custom";
     try {
       expect(createPlaneAdapter()).toBeInstanceOf(PlaneSdkAdapter);
     } finally {
@@ -129,6 +170,7 @@ describe("Plane projection", () => {
         PLANE_BASE_URL: previous.baseUrl,
         PLANE_API_KEY: previous.apiKey,
         PLANE_WORKSPACE_SLUG: previous.workspace,
+        PLANE_TYPE_MODE: previous.typeMode,
       })) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;

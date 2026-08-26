@@ -332,7 +332,7 @@ describe("SQLite storage", () => {
     storage.close();
   });
 
-  it("manual retry is the only transition from failed and preserves audit history", () => {
+  it("keeps worker transitions from reviving failed batches and preserves manual retry history", () => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
     const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "manual-retry", events: [event] });
@@ -345,6 +345,27 @@ describe("SQLite storage", () => {
     storage.retryBatch(queued.batchId, context.id);
     expect(storage.claimPendingBatches()[0]).toMatchObject({ id: queued.batchId, status: "retrying", lastError: "permanent error" });
     expect(storage.listBatchHistory(queued.batchId).map((row) => row.to_status)).toEqual(["pending", "failed", "retrying"]);
+    storage.close();
+  });
+
+  it("automatically recovers each failed batch only once and audits the bounded retry", () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const first = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recover-first", events: [event] });
+    const second = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recover-second", events: [event] });
+    for (const queued of [first, second]) {
+      const claim = storage.claimPendingBatches(1)[0]!;
+      expect(claim.id).toBe(queued.batchId);
+      expect(storage.setBatchStatus(queued.batchId, "failed", "configuration error", claim.claimToken)).toBe(true);
+    }
+
+    expect(storage.recoverFailedBatches(1)).toEqual([first.batchId]);
+    expect(storage.claimPendingBatches(1)[0]).toMatchObject({ id: first.batchId, status: "retrying", attempts: 1 });
+    storage.db.prepare("UPDATE outbox_batches SET status='failed', claim_token=NULL, lease_until=NULL WHERE id=1").run();
+    expect(storage.recoverFailedBatches()).toEqual([second.batchId]);
+    expect(storage.recoverFailedBatches()).toEqual([]);
+    expect(storage.listBatchHistory(first.batchId).filter((row) => row.error_kind === "automatic_recovery")).toHaveLength(1);
+    expect(storage.listBatchHistory(second.batchId).filter((row) => row.error_kind === "automatic_recovery")).toHaveLength(1);
     storage.close();
   });
 

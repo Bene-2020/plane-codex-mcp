@@ -28,6 +28,7 @@ export class OutboxWorker {
   constructor(private readonly storage: Storage, private readonly coordinator: EventCoordinator) {}
   async processOnce(): Promise<number> {
     if (this.running) return this.running;
+    this.storage.recoverFailedBatches();
     const run = this.runOnce();
     let shared: Promise<number>;
     shared = run.finally(() => {
@@ -73,6 +74,7 @@ export class OutboxWorker {
   }
   start(): void {
     if (this.timer) return;
+    void this.processOnce().catch(() => undefined);
     this.timer = setInterval(() => { void this.processOnce().catch(() => undefined); }, 5000);
   }
   async stop(): Promise<void> {
