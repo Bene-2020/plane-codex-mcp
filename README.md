@@ -124,7 +124,7 @@ codex mcp add ambient-project `
 
 修改 `PLANE_TYPE_MODE` 后必须完全重启 Codex。不同模式不会自动重写已有工作项。
 
-升级到 v0.1.4 后，后台同步 Worker 会为每个终态失败批次提供一次自动恢复机会，包括升级前遗留的历史失败。恢复仍失败的批次会继续保持终态，避免无限重试；之后可在 Panel 中人工 Retry、Correct 或 Dead-letter。
+升级到 v0.1.4 后，后台同步 Worker 会为每个终态失败批次提供一次自动恢复机会，包括升级前遗留的历史失败。多个 MCP Worker 通过 SQLite 共享同一节流队列：Plane 请求默认间隔 2 秒，自动恢复批次至少间隔 10 秒；遇到 429 时按服务端重置时间暂停全局队列，限流等待不消耗业务重试次数。恢复仍失败的批次会继续保持终态；之后可在 Panel 中人工 Retry、Correct 或 Dead-letter。
 
 自托管 Plane 用户还需要把 `PLANE_BASE_URL` 换成实例的 API Base URL。
 

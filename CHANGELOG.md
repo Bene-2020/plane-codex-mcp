@@ -9,7 +9,7 @@
 ### Added
 
 - 增加 `PLANE_TYPE_MODE=default|custom`：默认 Free 模式绕过付费 Work Item Types 目录，使用 Plane 默认类型并将分类写入 `[Bug]-` 等标题前缀；Pro / Business 用户可显式启用自定义类型。
-- 后台同步 Worker 为每个终态失败批次提供一次有审计记录的自动恢复机会，并自动接管升级前的历史失败；再次失败后保持终态，避免无限重试。
+- 后台同步 Worker 通过 SQLite 共享队列逐个接管历史 failed：Plane 请求默认间隔 2 秒、自动恢复批次间隔至少 10 秒；429 会按 `Retry-After` / `X-RateLimit-Reset` 全局暂停，且限流等待不消耗业务重试次数。
 
 ### Fixed
 

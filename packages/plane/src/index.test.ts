@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { createPlaneAdapter, EventCoordinator, FakePlaneAdapter, PlaneSdkAdapter, UnresolvedRelatedItemError } from "./index.js";
+import { describe, expect, it, vi } from "vitest";
+import { createPlaneAdapter, EventCoordinator, FakePlaneAdapter, PlaneSdkAdapter, SqlitePlaneRequestGate, UnresolvedRelatedItemError, validatePlaneConfiguration } from "./index.js";
 import { Storage } from "@ambient/storage";
 import { PlaneClient } from "@makeplane/plane-node-sdk";
 import { recordKinds, remoteSourceId, type RecordKind, type SourceEvent } from "@ambient/core";
@@ -69,6 +69,61 @@ function planeMutations(plane: FakePlaneAdapter): string[] {
 }
 
 describe("Plane projection", () => {
+  it("validates Plane configuration without side effects", () => {
+    expect(() => validatePlaneConfiguration({})).toThrow("PLANE_MODE is required");
+    expect(() => validatePlaneConfiguration({ PLANE_MODE: "sdk" })).toThrow("PLANE_BASE_URL, PLANE_API_KEY, and PLANE_WORKSPACE_SLUG");
+    expect(validatePlaneConfiguration({ PLANE_MODE: "fake" }).mode).toBe("fake");
+  });
+
+  it("requeues a stale reservation after a shared 429 pause", async () => {
+    vi.useFakeTimers({ now: new Date("2026-01-01T00:00:00.000Z") });
+    try {
+      const storage = new Storage(":memory:");
+      const first = new SqlitePlaneRequestGate(storage, "plane:test", 2_000);
+      const second = new SqlitePlaneRequestGate(storage, "plane:test", 2_000);
+      await first.acquire();
+      const waiting = second.acquire();
+      first.rateLimited(Object.assign(new Error("too many requests"), { response: { status: 429, headers: { "retry-after": "2", "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 60) } } }));
+      await vi.advanceTimersByTimeAsync(2_000);
+      let sent = false;
+      void waiting.then(() => { sent = true; });
+      await Promise.resolve();
+      expect(sent).toBe(false);
+      await vi.advanceTimersByTimeAsync(58_000);
+      await waiting;
+      expect(sent).toBe(true);
+      const next = new SqlitePlaneRequestGate(storage, "plane:test", 2_000).acquire();
+      await vi.advanceTimersByTimeAsync(1_999);
+      let nextSent = false;
+      void next.then(() => { nextSent = true; });
+      await Promise.resolve();
+      expect(nextSent).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await next;
+      storage.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("honors Retry-After as a delay and shares the pause through SQLite", () => {
+    const storage = new Storage(":memory:");
+    const gate = new SqlitePlaneRequestGate(storage, "plane:test", 2_000);
+    gate.rateLimited(Object.assign(new Error("too many requests"), { response: { status: 429, headers: { "retry-after": "60", "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 120) } } }));
+    const row = storage.db.prepare("SELECT paused_until FROM plane_request_limits WHERE rate_key=?").get("plane:test") as { paused_until: string };
+    expect(Date.parse(row.paused_until)).toBeGreaterThan(Date.now() + 119_000);
+    storage.close();
+  });
+
+  it("uses a conservative one-minute pause when a 429 has no reset headers", () => {
+    const storage = new Storage(":memory:");
+    const gate = new SqlitePlaneRequestGate(storage, "plane:test", 2_000);
+    gate.rateLimited(Object.assign(new Error("too many requests"), { statusCode: 429 }));
+    const row = storage.db.prepare("SELECT paused_until FROM plane_request_limits WHERE rate_key=?").get("plane:test") as { paused_until: string };
+    expect(Date.parse(row.paused_until)).toBeGreaterThan(Date.now() + 59_000);
+    storage.close();
+  });
+
   it.each(unresolvedRelatedEvents)("fails an unresolved explicit reference before any Plane mutation for %s", async (_label, event) => {
     const storage = new Storage(":memory:");
     const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });

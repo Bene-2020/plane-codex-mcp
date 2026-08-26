@@ -14,6 +14,34 @@ function git(cwd: string, args: string[]): void {
 }
 
 describe("SQLite storage", () => {
+  it("serializes Plane request permits across workers and pauses after a rate limit", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ambient-rate-limit-"));
+    const filename = join(directory, "outbox.sqlite");
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const first = new Storage(filename, { clock: () => current });
+    const second = new Storage(filename, { clock: () => current });
+
+    expect(first.acquirePlaneRequest("plane:test", 2_000)).toBe(0);
+    expect(second.acquirePlaneRequest("plane:test", 2_000)).toBe(2_000);
+    current = new Date("2026-01-01T00:00:02.000Z");
+    expect(first.acquirePlaneRequest("plane:test", 2_000)).toBe(2_000);
+    first.pausePlaneRequests("plane:test", new Date("2026-01-01T00:00:12.000Z"));
+    expect(second.acquirePlaneRequest("plane:test", 2_000)).toBe(10_000);
+
+    first.close(); second.close(); rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("invalidates reservations made before a shared rate-limit pause", () => {
+    const storage = new Storage(":memory:");
+    const first = storage.reservePlaneRequest("plane:test", 2_000);
+    const second = storage.reservePlaneRequest("plane:test", 2_000);
+    expect(first.waitMs).toBe(0);
+    expect(second.waitMs).toBe(2_000);
+    storage.pausePlaneRequests("plane:test", new Date(Date.now() + 60_000));
+    expect(storage.isPlaneRequestReservationValid("plane:test", first.epoch)).toBe(false);
+    expect(storage.isPlaneRequestReservationValid("plane:test", second.epoch)).toBe(false);
+    storage.close();
+  });
   it("keeps path semantics explicit and compares path segments rather than string prefixes", () => {
     expect(() => resolveWorkspaceIdentity("relative/project")).toThrow(/absolute path/);
     expect(isWorkspacePathAncestor("/", "/work/demo")).toBe(true);
@@ -366,6 +394,27 @@ describe("SQLite storage", () => {
     expect(storage.recoverFailedBatches()).toEqual([]);
     expect(storage.listBatchHistory(first.batchId).filter((row) => row.error_kind === "automatic_recovery")).toHaveLength(1);
     expect(storage.listBatchHistory(second.batchId).filter((row) => row.error_kind === "automatic_recovery")).toHaveLength(1);
+    storage.close();
+  });
+
+  it("does not recover a second failed batch while automatic recovery is in flight", () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { clock: () => current });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const first = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recover-one", events: [event] });
+    const second = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recover-two", events: [event] });
+    for (const queued of [first, second]) {
+      const claim = storage.claimPendingBatches()[0]!;
+      expect(storage.setBatchStatus(queued.batchId, "failed", "429", claim.claimToken)).toBe(true);
+    }
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([first.batchId]);
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([]);
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=2").get()).toEqual({ status: "failed" });
+    current = new Date("2026-01-01T00:00:10.000Z");
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([]);
+    storage.db.prepare("UPDATE outbox_batches SET status='synced' WHERE id=1").run();
+    current = new Date("2026-01-01T00:00:20.000Z");
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([second.batchId]);
     storage.close();
   });
 

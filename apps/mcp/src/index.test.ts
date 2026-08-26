@@ -3,6 +3,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { App as McpApp } from "@modelcontextprotocol/ext-apps";
 import { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { readFile } from "node:fs/promises";
 import { codexDesktopListProjectsToolName, parentChildClosureRule, projectBindingConditionalFinalDeliveryRule, projectBindingListProjectsToolName, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingPromptInstruction, projectBindingRestoreRule, projectBindingSessionDeferralRule, projectBindingToolName, projectBindingToolSourceRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
 import { FakePlaneAdapter } from "@ambient/plane";
@@ -10,6 +13,23 @@ import { Storage } from "@ambient/storage";
 import { createMcpServer, PANEL_BOOTSTRAP_META_KEY, PANEL_PROXY_TOOL_NAME, PANEL_RESOURCE_URI, startMcpRuntime } from "./index.js";
 
 describe("ambient MCP tools and App bootstrap", () => {
+  it("rejects missing Plane configuration before opening the default database", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ambient-invalid-mcp-config-"));
+    const database = join(directory, "should-not-exist.sqlite");
+    const previousMode = process.env.PLANE_MODE;
+    const previousDatabase = process.env.AMBIENT_DB_PATH;
+    delete process.env.PLANE_MODE;
+    process.env.AMBIENT_DB_PATH = database;
+    try {
+      expect(() => createMcpServer()).toThrow("PLANE_MODE is required");
+      expect(existsSync(database)).toBe(false);
+    } finally {
+      if (previousMode === undefined) delete process.env.PLANE_MODE; else process.env.PLANE_MODE = previousMode;
+      if (previousDatabase === undefined) delete process.env.AMBIENT_DB_PATH; else process.env.AMBIENT_DB_PATH = previousDatabase;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("advertises the project tools and App bootstrap with current behavior annotations", async () => {
     const storage = new Storage(":memory:");
     const { server } = createMcpServer({ storage, plane: new FakePlaneAdapter() });

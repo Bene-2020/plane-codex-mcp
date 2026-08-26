@@ -124,7 +124,7 @@ Then edit `~/.codex/config.toml` and replace the placeholder Workspace slug and 
 
 Completely restart Codex after changing `PLANE_TYPE_MODE`. Existing work items are not rewritten automatically when the mode changes.
 
-After upgrading to v0.1.4, the background synchronization worker gives each terminal failed batch one automatic recovery opportunity, including historical failures left by an earlier version. A batch that fails again remains terminal to prevent infinite retries; it can then be handled with Retry, Correct, or Dead-letter in the Panel.
+After upgrading to v0.1.4, the background synchronization worker gives each terminal failed batch one automatic recovery opportunity, including historical failures left by an earlier version. Multiple MCP workers share one SQLite-backed throttle queue: Plane requests are spaced by two seconds and automatic recovery batches by at least ten seconds; a 429 pauses the global queue until the server reset time without consuming the business retry budget. A batch that still fails remains terminal and can then be handled with Retry, Correct, or Dead-letter in the Panel.
 
 Self-hosted Plane users must also replace `PLANE_BASE_URL` with their instance's API Base URL.
 

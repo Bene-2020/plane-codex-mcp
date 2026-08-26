@@ -72,6 +72,7 @@ interface BindingPreferenceRow {
   created_at: string;
   updated_at: string;
 }
+export interface PlaneRequestReservation { waitMs: number; epoch: number; }
 
 type NewSourceReference = Omit<SourceReference, "id" | "createdAt" | "projectionStatus" | "projectionAttempts" | "projectionError" | "projectedAt" | "planeItemId"> & {
   planeItemId?: null;
@@ -262,6 +263,12 @@ export class Storage {
         synced_at TEXT,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS plane_request_limits (
+        rate_key TEXT PRIMARY KEY,
+        next_allowed_at TEXT,
+        paused_until TEXT,
+        pause_epoch INTEGER NOT NULL DEFAULT 0
+      );
       `);
 
       this.ensureColumn("project_contexts", "workspace_identity", "TEXT");
@@ -285,6 +292,7 @@ export class Storage {
       this.ensureColumn("outbox_batch_history", "synced_at", "TEXT");
       this.ensureColumn("source_reference_history", "error_kind", "TEXT");
       this.ensureColumn("source_reference_history", "synced_at", "TEXT");
+      this.ensureColumn("plane_request_limits", "pause_epoch", "INTEGER NOT NULL DEFAULT 0");
       this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_context_workspace_identity ON project_contexts(workspace_identity);
       CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_batches(status, next_attempt_at);
@@ -305,12 +313,49 @@ export class Storage {
     migration.immediate();
   }
 
-  private ensureColumn(table: "project_contexts" | "outbox_batches" | "source_references" | "plane_item_cache" | "turn_audits" | "outbox_batch_history" | "source_reference_history", column: string, definition: string): void {
+  private ensureColumn(table: "project_contexts" | "outbox_batches" | "source_references" | "plane_item_cache" | "turn_audits" | "outbox_batch_history" | "source_reference_history" | "plane_request_limits", column: string, definition: string): void {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   private timestamp(): string { return this.clock().toISOString(); }
+
+  /** Reserve one shared Plane request slot. The reservation is atomic, so
+   * separate MCP workers using the same SQLite file cannot burst together. */
+  acquirePlaneRequest(rateKey: string, intervalMs: number): number {
+    return this.reservePlaneRequest(rateKey, intervalMs).waitMs;
+  }
+
+  reservePlaneRequest(rateKey: string, intervalMs: number): PlaneRequestReservation {
+    const interval = Math.max(0, intervalMs);
+    const timestamp = this.clock().getTime();
+    const transaction = this.db.transaction(() => {
+      const row = this.db.prepare("SELECT next_allowed_at, paused_until, pause_epoch FROM plane_request_limits WHERE rate_key=?").get(rateKey) as { next_allowed_at: string | null; paused_until: string | null; pause_epoch: number } | undefined;
+      const next = Math.max(timestamp, this.parseTimestamp(row?.next_allowed_at), this.parseTimestamp(row?.paused_until));
+      const nextAllowed = new Date(next + interval).toISOString();
+      this.db.prepare(`INSERT INTO plane_request_limits (rate_key,next_allowed_at,paused_until,pause_epoch) VALUES (?,?,?,?)
+        ON CONFLICT(rate_key) DO UPDATE SET next_allowed_at=excluded.next_allowed_at`).run(rateKey, nextAllowed, row?.paused_until ?? null, row?.pause_epoch ?? 0);
+      return { waitMs: next - timestamp, epoch: row?.pause_epoch ?? 0 };
+    });
+    return transaction.immediate();
+  }
+
+  isPlaneRequestReservationValid(rateKey: string, epoch: number): boolean {
+    const row = this.db.prepare("SELECT pause_epoch FROM plane_request_limits WHERE rate_key=?").get(rateKey) as { pause_epoch: number } | undefined;
+    return (row?.pause_epoch ?? 0) === epoch;
+  }
+
+  pausePlaneRequests(rateKey: string, until: Date): void {
+    const transaction = this.db.transaction(() => {
+      const row = this.db.prepare("SELECT next_allowed_at, paused_until, pause_epoch FROM plane_request_limits WHERE rate_key=?").get(rateKey) as { next_allowed_at: string | null; paused_until: string | null; pause_epoch: number } | undefined;
+      const paused = Math.max(until.getTime(), this.parseTimestamp(row?.paused_until));
+      this.db.prepare(`INSERT INTO plane_request_limits (rate_key,next_allowed_at,paused_until,pause_epoch) VALUES (?,?,?,?)
+        ON CONFLICT(rate_key) DO UPDATE SET paused_until=excluded.paused_until, pause_epoch=plane_request_limits.pause_epoch+1`).run(rateKey, row?.next_allowed_at ?? null, new Date(paused).toISOString(), (row?.pause_epoch ?? 0) + 1);
+    });
+    transaction.immediate();
+  }
+
+  private parseTimestamp(value: string | null | undefined): number { const parsed = value ? Date.parse(value) : NaN; return Number.isFinite(parsed) ? parsed : 0; }
   private retryDelayMs(attempt: number): number {
     const exponential = Math.min(this.retryMaxMs, this.retryBaseMs * (2 ** Math.max(0, attempt - 1)));
     return Math.round(exponential * (0.5 + Math.min(1, Math.max(0, this.random()))));
@@ -816,7 +861,15 @@ export class Storage {
     return this.db.prepare("SELECT 'batch_' || id AS batch_id, status, attempts, last_error, accepted_at FROM outbox_batches WHERE project_context_id=? AND status='failed' ORDER BY id DESC").all(contextId) as unknown[];
   }
 
-  recoverFailedBatches(limit = 100): string[] {
+  recoverFailedBatches(limit = 100, intervalMs = 0): string[] {
+    if (intervalMs > 0) {
+      const active = this.db.prepare(`SELECT 1 FROM outbox_batch_history active_history
+        JOIN outbox_batches active_batch ON active_batch.id=CAST(SUBSTR(active_history.batch_id, 7) AS INTEGER)
+        WHERE active_history.error_kind='automatic_recovery'
+          AND active_batch.status IN ('pending','retrying') LIMIT 1`).get();
+      if (active) return [];
+      if (this.acquirePlaneRequest("outbox-recovery", intervalMs) > 0) return [];
+    }
     const recovered: string[] = [];
     const timestamp = this.timestamp();
     const recover = this.db.transaction(() => {
@@ -827,6 +880,12 @@ export class Storage {
             SELECT 1 FROM outbox_batch_history history
             WHERE history.batch_id='batch_' || batch.id
               AND history.error_kind='automatic_recovery'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM outbox_batch_history active_history
+            JOIN outbox_batches active_batch ON active_batch.id=CAST(SUBSTR(active_history.batch_id, 7) AS INTEGER)
+            WHERE active_history.error_kind='automatic_recovery'
+              AND active_batch.status IN ('pending','retrying')
           )
         ORDER BY batch.id
         LIMIT ?`).all(timestamp, Math.max(0, limit)) as Array<{ id: number; attempts: number; last_error: string | null }>;
@@ -949,6 +1008,23 @@ export class Storage {
       : [...values, eventIdValue, batchRowId, timestamp];
     const result = this.db.prepare(`UPDATE source_references SET ${setSql}
       WHERE event_id=? AND EXISTS (SELECT 1 FROM outbox_batches WHERE id=? AND status NOT IN ('synced','corrected') AND ${ownership})`).run(...params);
+    return result.changes === 1;
+  }
+
+  /** Defer a server-throttled batch without consuming one of its business retries. */
+  markBatchRateLimited(batchIdValue: string, error: string, claimToken?: string, delayMs = 2_000): boolean {
+    const id = this.parseBatchRowId(batchIdValue);
+    const timestamp = this.timestamp();
+    const row = this.db.prepare("SELECT status, attempts FROM outbox_batches WHERE id=?").get(id) as { status: SyncStatus; attempts: number } | undefined;
+    if (!row || (row.status !== "pending" && row.status !== "retrying")) return false;
+    const ownership = claimToken ? "claim_token=? AND lease_until > ?" : "(claim_token IS NULL OR lease_until IS NULL OR lease_until <= ?)";
+    const next = new Date(this.clock().getTime() + Math.max(1, delayMs)).toISOString();
+    const claimedAttempts = claimToken ? Math.max(0, (row.attempts ?? 0) - 1) : row.attempts ?? 0;
+    const result = this.db.prepare(`UPDATE outbox_batches
+      SET status='retrying', attempts=?, last_error=?, synced_at=NULL, next_attempt_at=?, claim_token=NULL, lease_until=NULL
+      WHERE id=? AND status IN ('pending','retrying') AND ${ownership}`)
+      .run(...(claimToken ? [claimedAttempts, error, next, id, claimToken, timestamp] : [claimedAttempts, error, next, id, timestamp]));
+    if (result.changes === 1) this.recordBatchHistory(batchIdValue, row.status, "retrying", claimedAttempts, error, "rate_limited", "worker");
     return result.changes === 1;
   }
 
