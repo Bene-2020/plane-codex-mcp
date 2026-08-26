@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -9,6 +9,23 @@ import { OutboxWorker, classifyOutboxError, countProjectItems, createService } f
 const sessionHeaders = (service: ReturnType<typeof createService>) => ({ "X-Ambient-Session-Token": service.sessionToken });
 
 describe("local service and outbox worker", () => {
+  it("rejects missing Plane configuration before opening the default database", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ambient-invalid-config-"));
+    const database = join(directory, "should-not-exist.sqlite");
+    const previousMode = process.env.PLANE_MODE;
+    const previousDatabase = process.env.AMBIENT_DB_PATH;
+    delete process.env.PLANE_MODE;
+    process.env.AMBIENT_DB_PATH = database;
+    try {
+      expect(() => createService()).toThrow("PLANE_MODE is required");
+      expect(existsSync(database)).toBe(false);
+    } finally {
+      if (previousMode === undefined) delete process.env.PLANE_MODE; else process.env.PLANE_MODE = previousMode;
+      if (previousDatabase === undefined) delete process.env.AMBIENT_DB_PATH; else process.env.AMBIENT_DB_PATH = previousDatabase;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("classifies only explicit transient failures as retryable", () => {
     expect(classifyOutboxError(Object.assign(new Error("gateway"), { statusCode: 503 }))).toBe("retryable");
     expect(classifyOutboxError(Object.assign(new Error("rate limited"), { response: { status: 429 } }))).toBe("retryable");
@@ -39,6 +56,61 @@ describe("local service and outbox worker", () => {
     expect(await service.worker.processOnce()).toBe(1);
     expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("synced");
     await service.app.close();
+  });
+
+  it("defers a rate-limited batch without consuming its business retry budget", async () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { clock: () => current, retryBaseMs: 1_000, random: () => 0 });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "rate-limited", events: [{ type: "task", title: "限流批次", summary: "限流批次", userDirected: false, sourceExcerpt: "限流批次" }] });
+    const plane = new FakePlaneAdapter();
+    plane.listItems = async () => { throw Object.assign(new Error("too many requests"), { statusCode: 429 }); };
+    const service = createService({ storage, plane });
+    expect(await service.worker.processOnce()).toBe(1);
+    expect(storage.listFailedBatches(context.id)).toHaveLength(0);
+    expect(storage.db.prepare("SELECT status, attempts FROM outbox_batches WHERE id=1").get()).toMatchObject({ status: "retrying", attempts: 0 });
+    expect(storage.listBatchHistory(queued.batchId).at(-1)).toMatchObject({ error_kind: "rate_limited" });
+    current = new Date("2026-01-01T00:00:02.000Z");
+    await service.app.close();
+  });
+
+  it("automatically retries a historical failed batch once when the worker starts", async () => {
+    const storage = new Storage(":memory:");
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "historical-failure", events: [{ type: "bug", title: "升级后恢复", summary: "升级后恢复", userDirected: false, sourceExcerpt: "升级后恢复" }] });
+    const claim = storage.claimPendingBatches()[0]!;
+    expect(storage.setBatchStatus(queued.batchId, "failed", "Request failed with status code 402", claim.claimToken)).toBe(true);
+    const plane = new FakePlaneAdapter();
+    const service = createService({ storage, plane });
+
+    service.worker.start();
+    await vi.waitFor(() => expect((storage.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("synced"));
+    expect((await plane.listItems(context)).map((item) => item.title)).toEqual(["升级后恢复"]);
+    expect(storage.listBatchHistory(queued.batchId).filter((row) => row.error_kind === "automatic_recovery")).toHaveLength(1);
+    await service.app.close();
+  });
+
+  it("paces automatic recovery across workers sharing one SQLite queue", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ambient-recovery-workers-"));
+    const filename = join(directory, "outbox.sqlite");
+    const storageA = new Storage(filename);
+    const context = storageA.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "demo-workspace", planeProjectId: "demo-project" });
+    const first = storageA.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recover-a", events: [{ type: "bug", title: "第一批次", summary: "第一批次", userDirected: false, sourceExcerpt: "第一批次" }] });
+    const second = storageA.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recover-b", events: [{ type: "bug", title: "第二批次", summary: "第二批次", userDirected: false, sourceExcerpt: "第二批次" }] });
+    for (const queued of [first, second]) {
+      const claim = storageA.claimPendingBatches()[0]!;
+      expect(storageA.setBatchStatus(queued.batchId, "failed", "previous 429", claim.claimToken)).toBe(true);
+    }
+    const storageB = new Storage(filename);
+    const plane = new FakePlaneAdapter();
+    const workerA = new OutboxWorker(storageA, new EventCoordinator(storageA, plane), 10_000);
+    const workerB = new OutboxWorker(storageB, new EventCoordinator(storageB, plane), 10_000);
+    await Promise.all([workerA.processOnce(), workerB.processOnce()]);
+
+    expect((storageA.db.prepare("SELECT status FROM outbox_batches WHERE id=1").get() as { status: string }).status).toBe("synced");
+    expect((storageA.db.prepare("SELECT status FROM outbox_batches WHERE id=2").get() as { status: string }).status).toBe("failed");
+    expect((await plane.listItems(context)).map((item) => item.title)).toEqual(["第一批次"]);
+    storageA.close(); storageB.close(); rmSync(directory, { recursive: true, force: true });
   });
   it("counts every non-archived item mapped to the four Inline states", () => {
     expect(countProjectItems([

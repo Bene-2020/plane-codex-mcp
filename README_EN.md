@@ -7,7 +7,7 @@ Let Codex quietly organize project progress while you work and synchronize tasks
 [Plane](https://plane.so/open-source) is an open-source project management platform licensed under AGPL-3.0. You can self-host its Community Edition for free or use its free cloud plan. The self-hosted Community Edition has no user limit, while the Cloud Free plan currently supports up to 12 users, making Plane a strong fit for individual developers, one-person companies, and small teams. See the [official Plane pricing page](https://plane.so/pricing) for current limits.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.1.3-4f6bed.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.4-4f6bed.svg)](CHANGELOG.md)
 
 Ambient Project Layer is a Codex plugin. It captures project-relevant events from the current work turn, writes them reliably to a local SQLite Outbox, and then synchronizes them asynchronously to Plane. You can continue using Plane for full project management while viewing recent work items and changing their status through a lightweight Panel inside Codex.
 
@@ -58,7 +58,7 @@ The Plane documentation explains [where to create an API Key and how to use it](
 
 ### 2. Install the package for your platform
 
-Download an asset named like `ambient-project-layer-v0.1.3-<target>.zip` and extract it to a stable directory. The instructions below refer to its absolute path as `<RELEASE_DIR>`. This directory should directly contain `.agents/plugins/marketplace.json`.
+Download an asset named like `ambient-project-layer-v0.1.4-<target>.zip` and extract it to a stable directory. The instructions below refer to its absolute path as `<RELEASE_DIR>`. This directory should directly contain `.agents/plugins/marketplace.json`.
 
 ```bash
 codex plugin marketplace add "<RELEASE_DIR>"
@@ -93,6 +93,7 @@ macOS/Linux example:
 codex mcp add ambient-project \
   --env "AMBIENT_DB_PATH=$HOME/.codex/plugins/data/ambient-project-layer-ambient/ambient.sqlite" \
   --env "PLANE_MODE=sdk" \
+  --env "PLANE_TYPE_MODE=default" \
   --env "PLANE_BASE_URL=https://api.plane.so" \
   --env "PLANE_WORKSPACE_SLUG=replace-with-your-workspace" \
   --env "PLANE_API_KEY=replace-in-config-toml" \
@@ -106,6 +107,7 @@ Windows PowerShell example:
 codex mcp add ambient-project `
   --env "AMBIENT_DB_PATH=$env:USERPROFILE\.codex\plugins\data\ambient-project-layer-ambient\ambient.sqlite" `
   --env "PLANE_MODE=sdk" `
+  --env "PLANE_TYPE_MODE=default" `
   --env "PLANE_BASE_URL=https://api.plane.so" `
   --env "PLANE_WORKSPACE_SLUG=replace-with-your-workspace" `
   --env "PLANE_API_KEY=replace-in-config-toml" `
@@ -114,6 +116,15 @@ codex mcp add ambient-project `
 ```
 
 Then edit `~/.codex/config.toml` and replace the placeholder Workspace slug and API Key only under `[mcp_servers.ambient-project.env]`. Do not put a real Key in the commands above, a repository, an Issue, logs, or screenshots, where it could enter shell history or public records.
+
+`PLANE_TYPE_MODE` controls the work-item classification strategy:
+
+- `default` (the default, recommended for Plane Free): does not access the paid Work Item Types catalog, uses Plane's default type when creating an item, and writes the semantic kind into the title, for example `[Bug]-Login failure` or `[Decision]-Adopt SQLite`.
+- `custom` (for Plane Pro / Business): resolves or creates custom Work Item Types for Task, Bug, Decision, Idea, Risk, and Milestone. The type catalog is read only while creating a work item whose mapping is missing; ordinary refreshes, counts, and status updates do not access it.
+
+Completely restart Codex after changing `PLANE_TYPE_MODE`. Existing work items are not rewritten automatically when the mode changes.
+
+After upgrading to v0.1.4, the background synchronization worker gives each terminal failed batch one automatic recovery opportunity, including historical failures left by an earlier version. Multiple MCP workers share one SQLite-backed throttle queue: Plane requests are spaced by two seconds and automatic recovery batches by at least ten seconds; a 429 pauses the global queue until the server reset time without consuming the business retry budget. A batch that still fails remains terminal and can then be handled with Retry, Correct, or Dead-letter in the Panel.
 
 Self-hosted Plane users must also replace `PLANE_BASE_URL` with their instance's API Base URL.
 

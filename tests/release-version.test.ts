@@ -14,7 +14,7 @@ describe("release version metadata", () => {
   it("keeps package, plugin, runtime, and user-facing release metadata aligned", async () => {
     const packageManifest = await readJson("package.json");
     const version = packageManifest.version;
-    expect(version).toBe("0.1.3");
+    expect(version).toBe("0.1.4");
 
     const packagePaths = [
       "package.json",
@@ -44,7 +44,7 @@ describe("release version metadata", () => {
       expect(document).toContain(`version-v${version}-`);
       expect(document).toContain(`ambient-project-layer-v${version}-<target>.zip`);
     }
-    expect(changelog).toContain(`## [${version}] - 2026-08-24`);
+    expect(changelog).toContain(`## [${version}] - 2026-08-26`);
     expect(changelog).toContain(`[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v${version}...HEAD`);
     expect(changelog).toContain(`[${version}]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v${version}`);
     expect(releaseAssetScript).toContain("pluginManifest.version !== packageManifest.version");
@@ -55,7 +55,7 @@ describe("release version metadata", () => {
 
   it("accepts only the tag derived from the root package version", async () => {
     const verifyScript = join(root, "scripts/verify-release-tag.mjs");
-    expect(execFileSync(process.execPath, [verifyScript, "--", "v0.1.3"], { encoding: "utf8" })).toContain("Release tag verified: v0.1.3");
+    expect(execFileSync(process.execPath, [verifyScript, "--", "v0.1.4"], { encoding: "utf8" })).toContain("Release tag verified: v0.1.4");
     expect(() => execFileSync(process.execPath, [verifyScript, "--", "v0.1.0"], { encoding: "utf8" })).toThrow();
   });
 });

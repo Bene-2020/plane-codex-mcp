@@ -1,7 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { ProjectContext, RecordKind, LifecycleState, PlaneItem } from "@ambient/core";
-import { createPlaneAdapter, EventCoordinator, PlaneAdapter, UnresolvedRelatedItemError, UpdateItemInput } from "@ambient/plane";
+import { createPlaneAdapter, EventCoordinator, PlaneAdapter, UnresolvedRelatedItemError, UpdateItemInput, validatePlaneConfiguration } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { createSessionToken, matchesSessionToken, SESSION_TOKEN_HEADER } from "./session.js";
 
@@ -25,9 +25,10 @@ export function classifyOutboxError(error: unknown): OutboxErrorDisposition {
 export class OutboxWorker {
   private timer: NodeJS.Timeout | undefined;
   private running: Promise<number> | undefined;
-  constructor(private readonly storage: Storage, private readonly coordinator: EventCoordinator) {}
+  constructor(private readonly storage: Storage, private readonly coordinator: EventCoordinator, private readonly recoveryIntervalMs = 10_000) {}
   async processOnce(): Promise<number> {
     if (this.running) return this.running;
+    this.storage.recoverFailedBatches(1, this.recoveryIntervalMs);
     const run = this.runOnce();
     let shared: Promise<number>;
     shared = run.finally(() => {
@@ -59,7 +60,8 @@ export class OutboxWorker {
         succeeded = true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (classifyOutboxError(error) === "retryable") this.storage.markBatchRetrying(batch.id, message, claimToken);
+        if (isRateLimited(error)) this.storage.markBatchRateLimited(batch.id, message, claimToken);
+        else if (classifyOutboxError(error) === "retryable") this.storage.markBatchRetrying(batch.id, message, claimToken);
         else this.storage.setBatchStatus(batch.id, "failed", message, claimToken);
       } finally {
         clearInterval(heartbeat);
@@ -73,6 +75,7 @@ export class OutboxWorker {
   }
   start(): void {
     if (this.timer) return;
+    void this.processOnce().catch(() => undefined);
     this.timer = setInterval(() => { void this.processOnce().catch(() => undefined); }, 5000);
   }
   async stop(): Promise<void> {
@@ -80,6 +83,11 @@ export class OutboxWorker {
     this.timer = undefined;
     await this.running;
   }
+}
+
+function isRateLimited(error: unknown): boolean {
+  const value = error as { response?: { status?: unknown }; status?: unknown; statusCode?: unknown };
+  return Number(value.response?.status ?? value.status ?? value.statusCode) === 429;
 }
 
 function jsonError(error: unknown): { error: string } { return { error: error instanceof Error ? error.message : String(error) }; }
@@ -112,8 +120,9 @@ export type RunningService = ReturnType<typeof createService> & {
 };
 
 export function createService(args: ServiceOptions = {}) {
-  const plane = args.plane ?? createPlaneAdapter();
+  if (!args.plane) validatePlaneConfiguration();
   const storage = args.storage ?? new Storage();
+  const plane = args.plane ?? createPlaneAdapter({ storage });
   const coordinator = new EventCoordinator(storage, plane);
   const worker = new OutboxWorker(storage, coordinator);
   const sessionToken = createSessionToken(args.sessionToken ?? process.env.AMBIENT_SESSION_TOKEN);

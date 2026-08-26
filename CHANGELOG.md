@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-26
+
+### Added
+
+- 增加 `PLANE_TYPE_MODE=default|custom`：默认 Free 模式绕过付费 Work Item Types 目录，使用 Plane 默认类型并将分类写入 `[Bug]-` 等标题前缀；Pro / Business 用户可显式启用自定义类型。
+- 后台同步 Worker 通过 SQLite 共享队列逐个接管历史 failed：Plane 请求默认间隔 2 秒、自动恢复批次间隔至少 10 秒；429 会按 `Retry-After` / `X-RateLimit-Reset` 全局暂停，且限流等待不消耗业务重试次数。
+
+### Fixed
+
+- 项目刷新与计数不再依赖 Work Item Types 目录，避免 Plane Free 返回 HTTP 402 后项目计数不可用。
+- 自动恢复 Worker 未到调度时间时只读检查，不再因单进程或多进程重复轮询持续预订未来槽位，并会在出现可恢复批次时自愈旧版本遗留的异常远期槽位；取得执行权与激活单个失败批次在同一 SQLite 事务内完成。
+
 ## [0.1.3] - 2026-08-24
 
 ### Fixed
@@ -48,7 +60,8 @@
 - 提供五种 Codex Hook 的会话上下文注入与最小审计。
 - 隔离 Plane API Key、Panel 临时会话令牌和本地项目数据。
 
-[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Bene-2020/plane-codex-mcp/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Bene-2020/plane-codex-mcp/releases/tag/v0.1.1

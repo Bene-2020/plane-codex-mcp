@@ -3,7 +3,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
 import { codexDesktopListProjectsToolName, eventBatchSchema, isSessionToken, noProjectEventsReviewSchema, parentChildClosureRule, projectBindingAcknowledgeEventsToolName, projectBindingChangeToolName, projectBindingConditionalFinalDeliveryRule, projectBindingDeclineToolName, projectBindingGetBindingToolName, projectBindingListProjectsToolName, projectBindingOpenPanelToolName, projectBindingPermanentRefusalRule, projectBindingPostPromptDeferralRule, projectBindingRecordEventsToolName, projectBindingRestoreRule, projectBindingRestoreToolName, projectBindingSessionDeferralRule, projectBindingToolName, projectBindingToolSourceRule, relatedItemIdContract, supersededPlanRule } from "@ambient/core";
-import { createPlaneAdapter } from "@ambient/plane";
+import { createPlaneAdapter, validatePlaneConfiguration } from "@ambient/plane";
 import type { PlaneAdapter } from "@ambient/plane";
 import { Storage } from "@ambient/storage";
 import { randomBytes } from "node:crypto";
@@ -66,8 +66,9 @@ const bindInput = (input: z.infer<typeof bindingSchema>) => ({ ...input, planeBa
 export interface McpServerDependencies { storage?: Storage; plane?: PlaneAdapter; panelSession?: PanelSession; }
 
 export function createMcpServer(dependencies: McpServerDependencies = {}): { server: McpServer; storage: Storage } {
-  const plane = dependencies.plane ?? createPlaneAdapter();
+  if (!dependencies.plane) validatePlaneConfiguration();
   const storage = dependencies.storage ?? new Storage();
+  const plane = dependencies.plane ?? createPlaneAdapter({ storage });
   const panelSession = dependencies.panelSession ? {
     serviceBaseUrl: normalizeServiceBaseUrl(dependencies.panelSession.serviceBaseUrl),
     sessionToken: dependencies.panelSession.sessionToken,
@@ -95,7 +96,7 @@ export function createMcpServer(dependencies: McpServerDependencies = {}): { ser
   };
   const server = new McpServer({
     name: "ambient-project",
-    version: "0.1.3",
+    version: "0.1.4",
   }, {
     ...bindingInstructions,
   });

@@ -66,7 +66,7 @@ async function validatePackage(pluginRoot, { executeNative = true } = {}) {
     throw new Error(`${pluginRoot}: MCP must use ${target.launcherRelativePath} from the plugin root`);
   }
   if (Object.hasOwn(mcpServer, "env")) throw new Error(`${pluginRoot}: MCP must not embed environment values`);
-  if (JSON.stringify(mcpServer.env_vars) !== JSON.stringify(["AMBIENT_DB_PATH", "PLANE_MODE", "PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"])) throw new Error(`${pluginRoot}: MCP env_vars are not the formal allowlist`);
+  if (JSON.stringify(mcpServer.env_vars) !== JSON.stringify(["AMBIENT_DB_PATH", "PLANE_MODE", "PLANE_TYPE_MODE", "PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"])) throw new Error(`${pluginRoot}: MCP env_vars are not the formal allowlist`);
 
   const expectedHookCommand = `"${"${PLUGIN_ROOT}"}/${target.launcherRelativePath}" "${"${PLUGIN_ROOT}"}/runtime/hook-adapter/index.js"`;
   const expectedEvents = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"];

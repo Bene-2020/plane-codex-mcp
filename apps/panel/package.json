@@ -1,6 +1,6 @@
 {
   "name": "@ambient/panel",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Inline project panel for Ambient Project Layer.",
   "private": true,
   "license": "MIT",

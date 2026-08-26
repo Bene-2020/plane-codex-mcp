@@ -1,4 +1,4 @@
-export const PLUGIN_ENV_VARS = ["AMBIENT_DB_PATH", "PLANE_MODE", "PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"];
+export const PLUGIN_ENV_VARS = ["AMBIENT_DB_PATH", "PLANE_MODE", "PLANE_TYPE_MODE", "PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG"];
 
 export function targetMcpConfig(target) {
   return {
