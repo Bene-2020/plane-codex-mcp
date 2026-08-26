@@ -453,6 +453,43 @@ describe("SQLite storage", () => {
     storage.close();
   });
 
+  it("self-heals an impossible far-future recovery deadline during upgrade", () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { clock: () => current });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recovery-upgrade-deadline", events: [event] });
+    const claim = storage.claimPendingBatches(1)[0]!;
+    expect(storage.setBatchStatus(queued.batchId, "failed", "previous 429", claim.claimToken)).toBe(true);
+    storage.db.prepare(`INSERT INTO plane_request_limits (rate_key,next_allowed_at,paused_until,pause_epoch)
+      VALUES (?,?,?,0) ON CONFLICT(rate_key) DO UPDATE SET next_allowed_at=excluded.next_allowed_at`)
+      .run("outbox-recovery", new Date(current.getTime() + 2 * 60 * 60 * 1_000).toISOString(), null);
+
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([queued.batchId]);
+    expect(storage.db.prepare("SELECT next_allowed_at FROM plane_request_limits WHERE rate_key=?").get("outbox-recovery"))
+      .toEqual({ next_allowed_at: "2026-01-01T00:00:10.000Z" });
+    storage.close();
+  });
+
+  it("waits for a normal recovery deadline without moving it", () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { clock: () => current });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const queued = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recovery-normal-deadline", events: [event] });
+    const claim = storage.claimPendingBatches(1)[0]!;
+    expect(storage.setBatchStatus(queued.batchId, "failed", "previous 429", claim.claimToken)).toBe(true);
+    const deadline = "2026-01-01T00:00:10.000Z";
+    storage.db.prepare(`INSERT INTO plane_request_limits (rate_key,next_allowed_at,paused_until,pause_epoch)
+      VALUES (?,?,?,0) ON CONFLICT(rate_key) DO UPDATE SET next_allowed_at=excluded.next_allowed_at`)
+      .run("outbox-recovery", deadline, null);
+
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([]);
+    expect(storage.db.prepare("SELECT next_allowed_at FROM plane_request_limits WHERE rate_key=?").get("outbox-recovery"))
+      .toEqual({ next_allowed_at: deadline });
+    current = new Date(deadline);
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([queued.batchId]);
+    storage.close();
+  });
+
   it("keeps the recovery deadline stable and single-flight across shared workers", () => {
     const directory = mkdtempSync(join(tmpdir(), "ambient-recovery-deadline-workers-"));
     const filename = join(directory, "outbox.sqlite");

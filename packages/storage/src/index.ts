@@ -894,9 +894,12 @@ export class Storage {
         const rateKey = "outbox-recovery";
         const rateRow = this.db.prepare("SELECT next_allowed_at, paused_until FROM plane_request_limits WHERE rate_key=?").get(rateKey) as { next_allowed_at: string | null; paused_until: string | null } | undefined;
         const nowMs = this.clock().getTime();
-        const nextMs = Math.max(nowMs, this.parseTimestamp(rateRow?.next_allowed_at), this.parseTimestamp(rateRow?.paused_until));
-        if (nextMs > nowMs) return recovered;
-        const nextAllowed = new Date(nowMs + Math.max(0, intervalMs)).toISOString();
+        const nextAllowedMs = this.parseTimestamp(rateRow?.next_allowed_at);
+        const pausedMs = this.parseTimestamp(rateRow?.paused_until);
+        const recoveryDeadlineUpperBound = nowMs + intervalMs * 2;
+        if (pausedMs > nowMs) return recovered;
+        if (nextAllowedMs > nowMs && nextAllowedMs <= recoveryDeadlineUpperBound) return recovered;
+        const nextAllowed = new Date(nowMs + intervalMs).toISOString();
         this.db.prepare(`INSERT INTO plane_request_limits (rate_key,next_allowed_at,paused_until,pause_epoch) VALUES (?,?,?,0)
           ON CONFLICT(rate_key) DO UPDATE SET next_allowed_at=excluded.next_allowed_at`).run(rateKey, nextAllowed, rateRow?.paused_until ?? null);
       }
