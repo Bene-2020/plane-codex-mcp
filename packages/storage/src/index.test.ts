@@ -32,12 +32,13 @@ describe("SQLite storage", () => {
   });
 
   it("invalidates reservations made before a shared rate-limit pause", () => {
-    const storage = new Storage(":memory:");
+    const current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { clock: () => current });
     const first = storage.reservePlaneRequest("plane:test", 2_000);
     const second = storage.reservePlaneRequest("plane:test", 2_000);
     expect(first.waitMs).toBe(0);
     expect(second.waitMs).toBe(2_000);
-    storage.pausePlaneRequests("plane:test", new Date(Date.now() + 60_000));
+    storage.pausePlaneRequests("plane:test", new Date(current.getTime() + 60_000));
     expect(storage.isPlaneRequestReservationValid("plane:test", first.epoch)).toBe(false);
     expect(storage.isPlaneRequestReservationValid("plane:test", second.epoch)).toBe(false);
     storage.close();
