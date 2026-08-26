@@ -409,13 +409,77 @@ describe("SQLite storage", () => {
     }
     expect(storage.recoverFailedBatches(1, 10_000)).toEqual([first.batchId]);
     expect(storage.recoverFailedBatches(1, 10_000)).toEqual([]);
-    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=2").get()).toEqual({ status: "failed" });
+    expect(storage.db.prepare("SELECT status FROM outbox_batches WHERE id=?").get(Number(second.batchId.slice("batch_".length)))).toEqual({ status: "failed" });
     current = new Date("2026-01-01T00:00:10.000Z");
     expect(storage.recoverFailedBatches(1, 10_000)).toEqual([]);
-    storage.db.prepare("UPDATE outbox_batches SET status='synced' WHERE id=1").run();
+    storage.db.prepare("UPDATE outbox_batches SET status='synced' WHERE id=?").run(Number(first.batchId.slice("batch_".length)));
     current = new Date("2026-01-01T00:00:20.000Z");
     expect(storage.recoverFailedBatches(1, 10_000)).toEqual([second.batchId]);
     storage.close();
+  });
+
+  it("does not move the automatic recovery deadline during repeated polling", () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { clock: () => current });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const first = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recovery-deadline-first", events: [event] });
+    const second = storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "recovery-deadline-second", events: [event] });
+    for (const queued of [first, second]) {
+      const claim = storage.claimPendingBatches(1)[0]!;
+      expect(storage.setBatchStatus(queued.batchId, "failed", "previous 429", claim.claimToken)).toBe(true);
+    }
+
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([first.batchId]);
+    storage.db.prepare("UPDATE outbox_batches SET status='synced' WHERE id=?").run(Number(first.batchId.slice("batch_".length)));
+    current = new Date("2026-01-01T00:00:05.000Z");
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([]);
+    current = new Date("2026-01-01T00:00:10.000Z");
+    expect(storage.recoverFailedBatches(1, 10_000)).toEqual([second.batchId]);
+    storage.close();
+  });
+
+  it("limits automatic recovery mode to one batch even when given a larger limit", () => {
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storage = new Storage(":memory:", { clock: () => current });
+    const context = storage.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const batches = ["one", "two"].map((name) => storage.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: `recovery-limit-${name}`, events: [event] }));
+    for (const queued of batches) {
+      const claim = storage.claimPendingBatches(1)[0]!;
+      expect(storage.setBatchStatus(queued.batchId, "failed", "previous 429", claim.claimToken)).toBe(true);
+    }
+
+    expect(storage.recoverFailedBatches(10, 10_000)).toEqual([batches[0]!.batchId]);
+    expect(storage.db.prepare("SELECT COUNT(*) AS count FROM outbox_batches WHERE status='retrying'").get()).toEqual({ count: 1 });
+    storage.close();
+  });
+
+  it("keeps the recovery deadline stable and single-flight across shared workers", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ambient-recovery-deadline-workers-"));
+    const filename = join(directory, "outbox.sqlite");
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const storageA = new Storage(filename, { clock: () => current });
+    const context = storageA.bindContext({ cwd: "/work", planeBaseUrl: "https://plane.test", workspaceSlug: "ws", planeProjectId: "p" });
+    const first = storageA.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "shared-recovery-first", events: [event] });
+    const second = storageA.enqueueBatch({ projectContextId: context.id, sessionId: "s", turnId: "shared-recovery-second", events: [event] });
+    for (const queued of [first, second]) {
+      const claim = storageA.claimPendingBatches(1)[0]!;
+      expect(storageA.setBatchStatus(queued.batchId, "failed", "previous 429", claim.claimToken)).toBe(true);
+    }
+    const storageB = new Storage(filename, { clock: () => current });
+    try {
+      expect(new Set([storageA.recoverFailedBatches(1, 10_000), storageB.recoverFailedBatches(1, 10_000)].flat())).toEqual(new Set([first.batchId]));
+      storageA.db.prepare("UPDATE outbox_batches SET status='synced' WHERE id=?").run(Number(first.batchId.slice("batch_".length)));
+      current = new Date("2026-01-01T00:00:05.000Z");
+      expect(storageA.recoverFailedBatches(1, 10_000)).toEqual([]);
+      expect(storageB.recoverFailedBatches(1, 10_000)).toEqual([]);
+      current = new Date("2026-01-01T00:00:10.000Z");
+      const recoveredAtDeadline = [storageA.recoverFailedBatches(1, 10_000), storageB.recoverFailedBatches(1, 10_000)].flat();
+      expect(recoveredAtDeadline).toEqual([second.batchId]);
+    } finally {
+      storageA.close();
+      storageB.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("enforces the worker transition matrix and requires completed source references before sync", () => {

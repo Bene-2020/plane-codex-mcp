@@ -862,17 +862,16 @@ export class Storage {
   }
 
   recoverFailedBatches(limit = 100, intervalMs = 0): string[] {
-    if (intervalMs > 0) {
+    const recovered: string[] = [];
+    const recoveryLimit = intervalMs > 0 ? 1 : limit;
+    const timestamp = this.timestamp();
+    const recover = this.db.transaction(() => {
       const active = this.db.prepare(`SELECT 1 FROM outbox_batch_history active_history
         JOIN outbox_batches active_batch ON active_batch.id=CAST(SUBSTR(active_history.batch_id, 7) AS INTEGER)
         WHERE active_history.error_kind='automatic_recovery'
           AND active_batch.status IN ('pending','retrying') LIMIT 1`).get();
-      if (active) return [];
-      if (this.acquirePlaneRequest("outbox-recovery", intervalMs) > 0) return [];
-    }
-    const recovered: string[] = [];
-    const timestamp = this.timestamp();
-    const recover = this.db.transaction(() => {
+      if (active) return recovered;
+
       const rows = this.db.prepare(`SELECT id, attempts, last_error FROM outbox_batches batch
         WHERE batch.status='failed'
           AND (batch.claim_token IS NULL OR batch.lease_until IS NULL OR batch.lease_until <= ?)
@@ -888,7 +887,20 @@ export class Storage {
               AND active_batch.status IN ('pending','retrying')
           )
         ORDER BY batch.id
-        LIMIT ?`).all(timestamp, Math.max(0, limit)) as Array<{ id: number; attempts: number; last_error: string | null }>;
+        LIMIT ?`).all(timestamp, Math.max(0, recoveryLimit)) as Array<{ id: number; attempts: number; last_error: string | null }>;
+      if (rows.length === 0) return recovered;
+
+      if (intervalMs > 0) {
+        const rateKey = "outbox-recovery";
+        const rateRow = this.db.prepare("SELECT next_allowed_at, paused_until FROM plane_request_limits WHERE rate_key=?").get(rateKey) as { next_allowed_at: string | null; paused_until: string | null } | undefined;
+        const nowMs = this.clock().getTime();
+        const nextMs = Math.max(nowMs, this.parseTimestamp(rateRow?.next_allowed_at), this.parseTimestamp(rateRow?.paused_until));
+        if (nextMs > nowMs) return recovered;
+        const nextAllowed = new Date(nowMs + Math.max(0, intervalMs)).toISOString();
+        this.db.prepare(`INSERT INTO plane_request_limits (rate_key,next_allowed_at,paused_until,pause_epoch) VALUES (?,?,?,0)
+          ON CONFLICT(rate_key) DO UPDATE SET next_allowed_at=excluded.next_allowed_at`).run(rateKey, nextAllowed, rateRow?.paused_until ?? null);
+      }
+
       const update = this.db.prepare(`UPDATE outbox_batches
         SET status='retrying', attempts=0, next_attempt_at=?, claim_token=NULL, lease_until=NULL, synced_at=NULL
         WHERE id=? AND status='failed'
@@ -899,9 +911,9 @@ export class Storage {
         this.recordBatchHistory(batchIdValue, "failed", "retrying", row.attempts ?? 0, row.last_error, "automatic_recovery", "worker");
         recovered.push(batchIdValue);
       }
+      return recovered;
     });
-    recover.immediate();
-    return recovered;
+    return recover.immediate() as string[];
   }
 
   retryBatch(id: string, projectContextId?: string): void {
