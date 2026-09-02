@@ -15,6 +15,6 @@
     "@ambient/plane": "workspace:*",
     "@ambient/storage": "workspace:*",
     "@fastify/cors": "^10.0.2",
-    "fastify": "^5.3.3"
+    "fastify": "^5.12.1"
   }
 }
