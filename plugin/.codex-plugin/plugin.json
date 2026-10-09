@@ -5,6 +5,16 @@
   "author": {
     "name": "Wenyan Wei"
   },
+  "homepage": "https://github.com/Bene-2020/plane-codex-mcp",
+  "repository": "https://github.com/Bene-2020/plane-codex-mcp",
+  "license": "MIT",
+  "keywords": [
+    "plane",
+    "project-management",
+    "ambient",
+    "sqlite",
+    "mcp"
+  ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
