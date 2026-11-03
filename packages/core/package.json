@@ -10,5 +10,5 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": { "build": "tsc -p tsconfig.json" },
-  "dependencies": { "zod": "^3.25.20" }
+  "dependencies": { "zod": "^4.6.6" }
 }
